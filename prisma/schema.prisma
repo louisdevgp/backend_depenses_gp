@@ -1,0 +1,538 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model agent_reporting_lines {
+  id                                                 Int       @id @default(autoincrement()) @db.UnsignedInt
+  uuid                                               String    @unique(map: "uk_arl_uuid") @db.Char(36)
+  agent_id                                           Int       @db.UnsignedInt
+  manager_id                                         Int?      @db.UnsignedInt
+  start_at                                           DateTime  @db.DateTime(0)
+  end_at                                             DateTime? @db.DateTime(0)
+  created_by_id                                      Int       @db.UnsignedInt
+  created_at                                         DateTime  @default(now()) @db.DateTime(0)
+  agents_agent_reporting_lines_agent_idToagents      agents    @relation("agent_reporting_lines_agent_idToagents", fields: [agent_id], references: [id], onDelete: Cascade, map: "fk_arl_agent")
+  agents_agent_reporting_lines_created_by_idToagents agents    @relation("agent_reporting_lines_created_by_idToagents", fields: [created_by_id], references: [id], map: "fk_arl_created_by")
+  agents_agent_reporting_lines_manager_idToagents    agents?   @relation("agent_reporting_lines_manager_idToagents", fields: [manager_id], references: [id], map: "fk_arl_manager")
+
+  @@index([created_by_id], map: "fk_arl_created_by")
+  @@index([end_at], map: "idx_arl_active")
+  @@index([agent_id, start_at], map: "idx_arl_agent")
+  @@index([manager_id], map: "idx_arl_manager")
+}
+
+model agents {
+  id                                                                Int                     @id @default(autoincrement()) @db.UnsignedInt
+  uuid                                                              String                  @unique(map: "uk_agents_uuid") @db.Char(36)
+  user_id                                                           Int                     @db.UnsignedInt
+  matricule                                                         String?                 @unique(map: "uk_agents_matricule") @db.VarChar(50)
+  nom                                                               String                  @db.VarChar(100)
+  prenom                                                            String                  @db.VarChar(100)
+  direction_id                                                      Int?                    @db.UnsignedInt
+  departement_id                                                    Int?                    @db.UnsignedInt
+  service_id                                                        Int?                    @db.UnsignedInt
+  manager_id                                                        Int?                    @db.UnsignedInt
+  role_id                                                           Int?                    @db.UnsignedInt
+  created_at                                                        DateTime                @default(now()) @db.DateTime(0)
+  updated_at                                                        DateTime                @default(now()) @db.DateTime(0)
+  deleted_at                                                        DateTime?               @db.DateTime(0)
+  agent_reporting_lines_agent_reporting_lines_agent_idToagents      agent_reporting_lines[] @relation("agent_reporting_lines_agent_idToagents")
+  agent_reporting_lines_agent_reporting_lines_created_by_idToagents agent_reporting_lines[] @relation("agent_reporting_lines_created_by_idToagents")
+  agent_reporting_lines_agent_reporting_lines_manager_idToagents    agent_reporting_lines[] @relation("agent_reporting_lines_manager_idToagents")
+  departements                                                      departements?           @relation(fields: [departement_id], references: [id], map: "fk_agent_departement")
+  directions                                                        directions?             @relation(fields: [direction_id], references: [id], map: "fk_agent_direction")
+  agents                                                            agents?                 @relation("agentsToagents", fields: [manager_id], references: [id], map: "fk_agent_manager")
+  other_agents                                                      agents[]                @relation("agentsToagents")
+  roles                                                             roles?                  @relation(fields: [role_id], references: [id], map: "fk_agent_role")
+  services                                                          services?               @relation(fields: [service_id], references: [id], map: "fk_agent_service")
+  users                                                             users                   @relation(fields: [user_id], references: [id], map: "fk_agent_user")
+  bons_commande                                                     bons_commande[]
+  delegations_delegations_created_by_idToagents                     delegations[]           @relation("delegations_created_by_idToagents")
+  delegations_delegations_delegate_idToagents                       delegations[]           @relation("delegations_delegate_idToagents")
+  delegations_delegations_principal_idToagents                      delegations[]           @relation("delegations_principal_idToagents")
+  demandes_paiement_demandes_paiement_ajournee_par_idToagents       demandes_paiement[]     @relation("demandes_paiement_ajournee_par_idToagents")
+  demandes_paiement_demandes_paiement_demandeur_idToagents          demandes_paiement[]     @relation("demandes_paiement_demandeur_idToagents")
+  documents                                                         documents[]
+  paiements                                                         paiements[]
+  receptions_receptions_recu_par_idToagents                         receptions[]            @relation("receptions_recu_par_idToagents")
+  receptions_receptions_visa_daf_idToagents                         receptions[]            @relation("receptions_visa_daf_idToagents")
+  receptions_receptions_visa_directeur_idToagents                   receptions[]            @relation("receptions_visa_directeur_idToagents")
+  validation_steps_validation_steps_validated_by_idToagents         validation_steps[]      @relation("validation_steps_validated_by_idToagents")
+  validation_steps_validation_steps_validator_idToagents            validation_steps[]      @relation("validation_steps_validator_idToagents")
+
+  @@index([deleted_at], map: "idx_agent_deleted")
+  @@index([departement_id], map: "idx_agent_departement")
+  @@index([direction_id], map: "idx_agent_direction")
+  @@index([manager_id], map: "idx_agent_manager")
+  @@index([role_id], map: "idx_agent_role")
+  @@index([service_id], map: "idx_agent_service")
+  @@index([user_id], map: "idx_agent_user")
+}
+
+model audit_logs {
+  id          Int      @id @default(autoincrement()) @db.UnsignedInt
+  uuid        String   @unique(map: "uk_audit_logs_uuid") @db.Char(36)
+  user_id     Int?     @db.UnsignedInt
+  entity_type String   @db.VarChar(50)
+  entity_id   Int      @db.UnsignedInt
+  action      String   @db.VarChar(50)
+  old_value   Json?
+  new_value   Json?
+  created_at  DateTime @default(now()) @db.DateTime(0)
+  users       users?   @relation(fields: [user_id], references: [id], map: "fk_audit_user")
+
+  @@index([entity_type, entity_id], map: "idx_audit_entity")
+  @@index([user_id], map: "idx_audit_user")
+}
+
+model bon_commande_items {
+  id              Int           @id @default(autoincrement()) @db.UnsignedInt
+  uuid            String        @unique(map: "uk_bci_uuid") @db.Char(36)
+  bon_commande_id Int           @db.UnsignedInt
+  designation     String        @db.VarChar(255)
+  quantite        Decimal       @default(1.00) @db.Decimal(18, 2)
+  prix_unitaire   Decimal?      @db.Decimal(18, 2)
+  unite           String?       @db.VarChar(30)
+  total_ligne     Decimal?      @db.Decimal(18, 2)
+  created_at      DateTime      @default(now()) @db.DateTime(0)
+  bons_commande   bons_commande @relation(fields: [bon_commande_id], references: [id], onDelete: Cascade, map: "fk_bci_bc")
+
+  @@index([bon_commande_id], map: "idx_bci_bc")
+}
+
+model bons_commande {
+  id                 Int                  @id @default(autoincrement()) @db.UnsignedInt
+  uuid               String               @unique(map: "uk_bc_uuid") @db.Char(36)
+  demande_id         Int                  @db.UnsignedInt
+  numero             String               @unique(map: "uk_bc_numero") @db.VarChar(50)
+  fournisseur_id     Int?                 @db.UnsignedInt
+  statut             String               @default("brouillon") @db.VarChar(30)
+  date_commande      DateTime?            @db.Date
+  created_by_id      Int                  @db.UnsignedInt
+  created_at         DateTime             @default(now()) @db.DateTime(0)
+  updated_at         DateTime             @default(now()) @db.DateTime(0)
+  bon_commande_items bon_commande_items[]
+  agents             agents               @relation(fields: [created_by_id], references: [id], map: "fk_bc_created_by")
+  demandes_paiement  demandes_paiement    @relation(fields: [demande_id], references: [id], onDelete: Cascade, map: "fk_bc_demande")
+  fournisseurs       fournisseurs?        @relation(fields: [fournisseur_id], references: [id], map: "fk_bc_fournisseur")
+  documents          documents[]
+  receptions         receptions[]
+
+  @@index([created_by_id], map: "idx_bc_created_by")
+  @@index([demande_id], map: "idx_bc_demande")
+  @@index([fournisseur_id], map: "idx_bc_fournisseur")
+}
+
+model conditions_paiement {
+  id                Int               @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String            @unique(map: "uk_cp_uuid") @db.Char(36)
+  demande_id        Int               @db.UnsignedInt
+  label             String            @db.VarChar(100)
+  type_echeance     String            @db.VarChar(50)
+  pourcentage       Decimal?          @db.Decimal(5, 2)
+  montant_prevu     Decimal?          @db.Decimal(18, 2)
+  date_echeance     DateTime?         @db.Date
+  condition_texte   String?           @db.VarChar(255)
+  statut            String            @default("prevu") @db.VarChar(30)
+  paiement_id       Int?              @db.UnsignedInt
+  created_at        DateTime          @default(now()) @db.DateTime(0)
+  updated_at        DateTime          @default(now()) @db.DateTime(0)
+  demandes_paiement demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, map: "fk_cp_demande")
+  paiements         paiements?        @relation(fields: [paiement_id], references: [id], map: "fk_cp_paiement")
+
+  @@index([demande_id], map: "idx_cp_demande")
+  @@index([paiement_id], map: "idx_cp_paiement")
+}
+
+model delegations {
+  id                                       Int      @id @default(autoincrement()) @db.UnsignedInt
+  uuid                                     String   @unique(map: "uk_delegations_uuid") @db.Char(36)
+  principal_id                             Int      @db.UnsignedInt
+  delegate_id                              Int      @db.UnsignedInt
+  role_name                                String   @db.VarChar(50)
+  scope                                    String?  @db.VarChar(100)
+  start_at                                 DateTime @db.DateTime(0)
+  end_at                                   DateTime @db.DateTime(0)
+  is_active                                Boolean  @default(true)
+  created_at                               DateTime @default(now()) @db.DateTime(0)
+  created_by_id                            Int      @db.UnsignedInt
+  agents_delegations_created_by_idToagents agents   @relation("delegations_created_by_idToagents", fields: [created_by_id], references: [id], map: "fk_deleg_creator")
+  agents_delegations_delegate_idToagents   agents   @relation("delegations_delegate_idToagents", fields: [delegate_id], references: [id], map: "fk_deleg_delegate")
+  agents_delegations_principal_idToagents  agents   @relation("delegations_principal_idToagents", fields: [principal_id], references: [id], map: "fk_deleg_principal")
+
+  @@index([is_active, start_at, end_at], map: "idx_deleg_active")
+  @@index([created_by_id], map: "idx_deleg_creator")
+  @@index([delegate_id], map: "idx_deleg_delegate")
+  @@index([principal_id], map: "idx_deleg_principal")
+}
+
+model demande_items {
+  id                Int               @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String            @unique(map: "uk_di_uuid") @db.Char(36)
+  demande_id        Int               @db.UnsignedInt
+  designation       String            @db.VarChar(255)
+  quantite          Decimal           @default(1.00) @db.Decimal(18, 2)
+  prix_unitaire     Decimal?          @db.Decimal(18, 2)
+  unite             String?           @db.VarChar(30)
+  specifications    String?           @db.Text
+  total_ligne       Decimal?          @db.Decimal(18, 2)
+  created_at        DateTime          @default(now()) @db.DateTime(0)
+  demandes_paiement demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, map: "fk_di_demande")
+
+  @@index([demande_id], map: "idx_di_demande")
+}
+
+model demandes_paiement {
+  id                                               Int                   @id @default(autoincrement()) @db.UnsignedInt
+  uuid                                             String                @unique(map: "uk_demandes_uuid") @db.Char(36)
+  motif                                            String                @db.VarChar(255)
+  description                                      String?               @db.Text
+  montant                                          Decimal               @db.Decimal(18, 2)
+  devise                                           String?               @db.VarChar(10)
+  taux_change                                      Decimal?              @db.Decimal(18, 6)
+  montant_base                                     Decimal?              @db.Decimal(18, 2)
+  beneficiaire                                     String                @db.VarChar(255)
+  fournisseur_id                                   Int?                  @db.UnsignedInt
+  remarque                                         String?               @db.Text
+  demandeur_id                                     Int                   @db.UnsignedInt
+  direction_id                                     Int?                  @db.UnsignedInt
+  departement_id                                   Int?                  @db.UnsignedInt
+  service_id                                       Int?                  @db.UnsignedInt
+  statut                                           String                @default("draft") @db.VarChar(50)
+  budget_prevu                                     Boolean?
+  budget_disponible                                Boolean?
+  paiement_immediat                                Boolean?
+  ajournee                                         Boolean               @default(false)
+  ajournee_le                                      DateTime?             @db.DateTime(0)
+  ajournee_par_id                                  Int?                  @db.UnsignedInt
+  prochaine_revue_le                               DateTime?             @db.DateTime(0)
+  created_at                                       DateTime              @default(now()) @db.DateTime(0)
+  updated_at                                       DateTime              @default(now()) @db.DateTime(0)
+  deleted_at                                       DateTime?             @db.DateTime(0)
+  validation_flow_id                               Int?                  @db.UnsignedInt
+  bons_commande                                    bons_commande[]
+  conditions_paiement                              conditions_paiement[]
+  demande_items                                    demande_items[]
+  agents_demandes_paiement_ajournee_par_idToagents agents?               @relation("demandes_paiement_ajournee_par_idToagents", fields: [ajournee_par_id], references: [id], map: "fk_demande_ajournee_par")
+  agents_demandes_paiement_demandeur_idToagents    agents                @relation("demandes_paiement_demandeur_idToagents", fields: [demandeur_id], references: [id], map: "fk_demande_demandeur")
+  departements                                     departements?         @relation(fields: [departement_id], references: [id], map: "fk_demande_departement")
+  directions                                       directions?           @relation(fields: [direction_id], references: [id], map: "fk_demande_direction")
+  validation_flows                                 validation_flows?     @relation(fields: [validation_flow_id], references: [id], map: "fk_demande_flow")
+  fournisseurs                                     fournisseurs?         @relation(fields: [fournisseur_id], references: [id], map: "fk_demande_fournisseur")
+  services                                         services?             @relation(fields: [service_id], references: [id], map: "fk_demande_service")
+  documents                                        documents[]
+  notifications                                    notifications[]
+  paiements                                        paiements[]
+  receptions                                       receptions[]
+  validation_steps                                 validation_steps[]
+
+  @@index([ajournee_par_id], map: "fk_demande_ajournee_par")
+  @@index([departement_id], map: "fk_demande_departement")
+  @@index([deleted_at], map: "idx_demande_deleted")
+  @@index([demandeur_id], map: "idx_demande_demandeur")
+  @@index([direction_id, departement_id], map: "idx_demande_direction_dept")
+  @@index([validation_flow_id], map: "idx_demande_flow")
+  @@index([fournisseur_id], map: "idx_demande_fournisseur")
+  @@index([service_id], map: "idx_demande_service")
+  @@index([statut], map: "idx_demande_statut")
+}
+
+model departements {
+  id                Int                 @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String              @unique(map: "uk_departements_uuid") @db.Char(36)
+  direction_id      Int                 @db.UnsignedInt
+  nom               String              @db.VarChar(150)
+  code              String?             @unique(map: "uk_departements_code") @db.VarChar(50)
+  created_at        DateTime            @default(now()) @db.DateTime(0)
+  updated_at        DateTime            @default(now()) @db.DateTime(0)
+  deleted_at        DateTime?           @db.DateTime(0)
+  agents            agents[]
+  demandes_paiement demandes_paiement[]
+  directions        directions          @relation(fields: [direction_id], references: [id], map: "fk_departement_direction")
+  services          services[]
+
+  @@index([deleted_at], map: "idx_dept_deleted")
+  @@index([direction_id], map: "idx_dept_direction")
+}
+
+model directions {
+  id                Int                 @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String              @unique(map: "uk_directions_uuid") @db.Char(36)
+  nom               String              @db.VarChar(150)
+  code              String?             @unique(map: "uk_directions_code") @db.VarChar(50)
+  created_at        DateTime            @default(now()) @db.DateTime(0)
+  updated_at        DateTime            @default(now()) @db.DateTime(0)
+  deleted_at        DateTime?           @db.DateTime(0)
+  agents            agents[]
+  demandes_paiement demandes_paiement[]
+  departements      departements[]
+
+  @@index([deleted_at], map: "idx_directions_deleted")
+}
+
+model documents {
+  id                Int                @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String             @unique(map: "uk_documents_uuid") @db.Char(36)
+  demande_id        Int?               @db.UnsignedInt
+  reception_id      Int?               @db.UnsignedInt
+  paiement_id       Int?               @db.UnsignedInt
+  bon_commande_id   Int?               @db.UnsignedInt
+  type_document     String             @db.VarChar(50)
+  url               String             @db.VarChar(500)
+  nom_fichier       String             @db.VarChar(255)
+  format            String?            @db.VarChar(20)
+  taille            BigInt?
+  upload_by_id      Int                @db.UnsignedInt
+  created_at        DateTime           @default(now()) @db.DateTime(0)
+  bons_commande     bons_commande?     @relation(fields: [bon_commande_id], references: [id], onDelete: Cascade, map: "fk_docs_bc")
+  demandes_paiement demandes_paiement? @relation(fields: [demande_id], references: [id], onDelete: Cascade, map: "fk_docs_demande")
+  paiements         paiements?         @relation(fields: [paiement_id], references: [id], onDelete: Cascade, map: "fk_docs_paiement")
+  receptions        receptions?        @relation(fields: [reception_id], references: [id], onDelete: Cascade, map: "fk_docs_reception")
+  agents            agents             @relation(fields: [upload_by_id], references: [id], map: "fk_docs_upload_by")
+
+  @@index([bon_commande_id], map: "idx_docs_bc")
+  @@index([demande_id], map: "idx_docs_demande")
+  @@index([paiement_id], map: "idx_docs_paiement")
+  @@index([reception_id], map: "idx_docs_reception")
+  @@index([type_document], map: "idx_docs_type")
+  @@index([upload_by_id], map: "idx_docs_upload_by")
+}
+
+model fournisseur_contacts {
+  id             Int          @id @default(autoincrement()) @db.UnsignedInt
+  uuid           String       @unique(map: "uk_fc_uuid") @db.Char(36)
+  fournisseur_id Int          @db.UnsignedInt
+  nom            String       @db.VarChar(150)
+  prenom         String?      @db.VarChar(150)
+  fonction       String?      @db.VarChar(150)
+  telephone      String?      @db.VarChar(50)
+  email          String?
+  is_primary     Boolean      @default(false)
+  created_at     DateTime     @default(now()) @db.DateTime(0)
+  fournisseurs   fournisseurs @relation(fields: [fournisseur_id], references: [id], onDelete: Cascade, map: "fk_fc_fournisseur")
+
+  @@index([fournisseur_id], map: "idx_fc_fournisseur")
+}
+
+model fournisseurs {
+  id                   Int                    @id @default(autoincrement()) @db.UnsignedInt
+  uuid                 String                 @unique(map: "uk_fournisseurs_uuid") @db.Char(36)
+  nom                  String                 @db.VarChar(255)
+  rccm                 String?                @db.VarChar(100)
+  nif                  String?                @db.VarChar(100)
+  telephone            String?                @db.VarChar(50)
+  email                String?
+  adresse              String?                @db.VarChar(500)
+  ville                String?                @db.VarChar(100)
+  pays                 String?                @db.VarChar(100)
+  is_active            Boolean                @default(true)
+  created_at           DateTime               @default(now()) @db.DateTime(0)
+  updated_at           DateTime               @default(now()) @db.DateTime(0)
+  deleted_at           DateTime?              @db.DateTime(0)
+  bons_commande        bons_commande[]
+  demandes_paiement    demandes_paiement[]
+  fournisseur_contacts fournisseur_contacts[]
+
+  @@index([is_active], map: "idx_fournisseurs_active")
+  @@index([deleted_at], map: "idx_fournisseurs_deleted")
+  @@index([nom], map: "idx_fournisseurs_nom")
+}
+
+model notifications {
+  id                Int                @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String             @unique(map: "uk_notifications_uuid") @db.Char(36)
+  user_id           Int                @db.UnsignedInt
+  type              String             @db.VarChar(100)
+  demande_id        Int?               @db.UnsignedInt
+  message           String             @db.Text
+  channel           String             @default("email") @db.VarChar(50)
+  sent_by_email     Boolean            @default(false)
+  email_sent_at     DateTime?          @db.DateTime(0)
+  sent_by_whatsapp  Boolean            @default(false)
+  whatsapp_sent_at  DateTime?          @db.DateTime(0)
+  meta              Json?
+  created_at        DateTime           @default(now()) @db.DateTime(0)
+  read_at           DateTime?          @db.DateTime(0)
+  demandes_paiement demandes_paiement? @relation(fields: [demande_id], references: [id], map: "fk_notif_demande")
+  users             users              @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "fk_notif_user")
+
+  @@index([demande_id], map: "idx_notif_demande")
+  @@index([type], map: "idx_notif_type")
+  @@index([user_id], map: "idx_notif_user")
+}
+
+model paiements {
+  id                  Int                   @id @default(autoincrement()) @db.UnsignedInt
+  uuid                String                @unique(map: "uk_paiements_uuid") @db.Char(36)
+  demande_id          Int                   @db.UnsignedInt
+  type_paiement       String                @db.VarChar(50)
+  montant             Decimal               @db.Decimal(18, 2)
+  date_paiement       DateTime              @db.DateTime(0)
+  moyen_paiement      String                @db.VarChar(50)
+  reference_piece     String?               @db.VarChar(100)
+  compte_debite       String?               @db.VarChar(100)
+  commentaire         String?               @db.Text
+  comptable_id        Int                   @db.UnsignedInt
+  created_at          DateTime              @default(now()) @db.DateTime(0)
+  conditions_paiement conditions_paiement[]
+  documents           documents[]
+  agents              agents                @relation(fields: [comptable_id], references: [id], map: "fk_paiement_comptable")
+  demandes_paiement   demandes_paiement     @relation(fields: [demande_id], references: [id], map: "fk_paiement_demande")
+
+  @@index([comptable_id], map: "idx_paiement_comptable")
+  @@index([demande_id], map: "idx_paiement_demande")
+}
+
+model receptions {
+  id                                          Int               @id @default(autoincrement()) @db.UnsignedInt
+  uuid                                        String            @unique(map: "uk_receptions_uuid") @db.Char(36)
+  demande_id                                  Int               @db.UnsignedInt
+  bon_commande_id                             Int?              @db.UnsignedInt
+  fournisseur                                 String            @db.VarChar(255)
+  description                                 String            @db.VarChar(500)
+  reference_facture                           String?           @db.VarChar(100)
+  montant                                     Decimal?          @db.Decimal(18, 2)
+  date_reception                              DateTime          @db.Date
+  conforme                                    Boolean
+  observations                                String?           @db.Text
+  recu_par_id                                 Int               @db.UnsignedInt
+  visa_directeur_id                           Int?              @db.UnsignedInt
+  visa_daf_id                                 Int?              @db.UnsignedInt
+  signature_daf_url                           String?           @db.VarChar(500)
+  signature_directeur_url                     String?           @db.VarChar(500)
+  signature_recu_par_url                      String?           @db.VarChar(500)
+  created_at                                  DateTime          @default(now()) @db.DateTime(0)
+  updated_at                                  DateTime          @default(now()) @db.DateTime(0)
+  documents                                   documents[]
+  bons_commande                               bons_commande?    @relation(fields: [bon_commande_id], references: [id], map: "fk_reception_bc")
+  demandes_paiement                           demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, map: "fk_reception_demande")
+  agents_receptions_recu_par_idToagents       agents            @relation("receptions_recu_par_idToagents", fields: [recu_par_id], references: [id], map: "fk_reception_recu_par")
+  agents_receptions_visa_daf_idToagents       agents?           @relation("receptions_visa_daf_idToagents", fields: [visa_daf_id], references: [id], map: "fk_reception_visa_daf")
+  agents_receptions_visa_directeur_idToagents agents?           @relation("receptions_visa_directeur_idToagents", fields: [visa_directeur_id], references: [id], map: "fk_reception_visa_directeur")
+
+  @@index([bon_commande_id], map: "idx_reception_bc")
+  @@index([demande_id], map: "idx_reception_demande")
+  @@index([recu_par_id], map: "idx_reception_recu_par")
+  @@index([visa_daf_id], map: "idx_reception_visa_daf")
+  @@index([visa_directeur_id], map: "idx_reception_visa_directeur")
+}
+
+model roles {
+  id          Int          @id @default(autoincrement()) @db.UnsignedInt
+  uuid        String       @unique(map: "uk_roles_uuid") @db.Char(36)
+  name        String       @unique(map: "uk_roles_name") @db.VarChar(50)
+  label       String       @db.VarChar(100)
+  description String?      @db.Text
+  created_at  DateTime     @default(now()) @db.DateTime(0)
+  updated_at  DateTime     @default(now()) @db.DateTime(0)
+  agents      agents[]
+  user_roles  user_roles[]
+}
+
+model services {
+  id                Int                 @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String              @unique(map: "uk_services_uuid") @db.Char(36)
+  departement_id    Int                 @db.UnsignedInt
+  nom               String              @db.VarChar(150)
+  code              String?             @unique(map: "uk_services_code") @db.VarChar(50)
+  created_at        DateTime            @default(now()) @db.DateTime(0)
+  updated_at        DateTime            @default(now()) @db.DateTime(0)
+  deleted_at        DateTime?           @db.DateTime(0)
+  agents            agents[]
+  demandes_paiement demandes_paiement[]
+  departements      departements        @relation(fields: [departement_id], references: [id], map: "fk_service_departement")
+
+  @@index([deleted_at], map: "idx_service_deleted")
+  @@index([departement_id], map: "idx_service_dept")
+}
+
+model user_roles {
+  user_id    Int      @db.UnsignedInt
+  role_id    Int      @db.UnsignedInt
+  created_at DateTime @default(now()) @db.DateTime(0)
+  roles      roles    @relation(fields: [role_id], references: [id], map: "fk_ur_role")
+  users      users    @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "fk_ur_user")
+
+  @@id([user_id, role_id])
+  @@index([role_id], map: "idx_ur_role")
+}
+
+model users {
+  id                Int             @id @default(autoincrement()) @db.UnsignedInt
+  uuid              String          @unique(map: "uk_users_uuid") @db.Char(36)
+  email             String          @unique(map: "uk_users_email")
+  password_hash     String          @db.VarChar(255)
+  nom               String?         @db.VarChar(100)
+  prenom            String?         @db.VarChar(100)
+  is_active         Boolean         @default(true)
+  email_verified_at DateTime?       @db.DateTime(0)
+  last_login_at     DateTime?       @db.DateTime(0)
+  created_at        DateTime        @default(now()) @db.DateTime(0)
+  updated_at        DateTime        @default(now()) @db.DateTime(0)
+  deleted_at        DateTime?       @db.DateTime(0)
+  agents            agents[]
+  audit_logs        audit_logs[]
+  notifications     notifications[]
+  user_roles        user_roles[]
+
+  @@index([is_active], map: "idx_users_active")
+  @@index([deleted_at], map: "idx_users_deleted")
+}
+
+model validation_flow_steps {
+  id               Int              @id @default(autoincrement()) @db.UnsignedInt
+  uuid             String           @unique(map: "uk_vfs_uuid") @db.Char(36)
+  flow_id          Int              @db.UnsignedInt
+  step_order       Int
+  role_name        String           @db.VarChar(50)
+  required         Boolean          @default(true)
+  created_at       DateTime         @default(now()) @db.DateTime(0)
+  validation_flows validation_flows @relation(fields: [flow_id], references: [id], onDelete: Cascade, map: "fk_vfs_flow")
+
+  @@unique([flow_id, step_order], map: "uk_vfs_unique")
+  @@index([flow_id], map: "idx_vfs_flow")
+}
+
+model validation_flows {
+  id                    Int                     @id @default(autoincrement()) @db.UnsignedInt
+  uuid                  String                  @unique(map: "uk_vf_uuid") @db.Char(36)
+  code                  String                  @unique(map: "uk_vf_code") @db.VarChar(50)
+  label                 String                  @db.VarChar(150)
+  is_active             Boolean                 @default(true)
+  created_at            DateTime                @default(now()) @db.DateTime(0)
+  updated_at            DateTime                @default(now()) @db.DateTime(0)
+  demandes_paiement     demandes_paiement[]
+  validation_flow_steps validation_flow_steps[]
+
+  @@index([is_active], map: "idx_vf_active")
+}
+
+model validation_steps {
+  id                                              Int               @id @default(autoincrement()) @db.UnsignedInt
+  uuid                                            String            @unique(map: "uk_vs_uuid") @db.Char(36)
+  demande_id                                      Int               @db.UnsignedInt
+  level                                           Int
+  role_name                                       String            @db.VarChar(50)
+  status                                          String            @default("en_attente") @db.VarChar(30)
+  validator_id                                    Int?              @db.UnsignedInt
+  validated_by_id                                 Int?              @db.UnsignedInt
+  commentaire                                     String?           @db.Text
+  signature_url                                   String?           @db.VarChar(500)
+  validated_at                                    DateTime?         @db.DateTime(0)
+  created_at                                      DateTime          @default(now()) @db.DateTime(0)
+  updated_at                                      DateTime          @default(now()) @db.DateTime(0)
+  demandes_paiement                               demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, map: "fk_vs_demande")
+  agents_validation_steps_validated_by_idToagents agents?           @relation("validation_steps_validated_by_idToagents", fields: [validated_by_id], references: [id], map: "fk_vs_validated_by")
+  agents_validation_steps_validator_idToagents    agents?           @relation("validation_steps_validator_idToagents", fields: [validator_id], references: [id], map: "fk_vs_validator")
+
+  @@index([demande_id], map: "idx_vs_demande")
+  @@index([level], map: "idx_vs_level")
+  @@index([status], map: "idx_vs_status")
+  @@index([validated_by_id], map: "idx_vs_validated_by")
+  @@index([validator_id], map: "idx_vs_validator")
+}
