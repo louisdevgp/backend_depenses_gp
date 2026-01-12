@@ -41,20 +41,22 @@ exports.getOne = async (req, res) => {
 };
 
 exports.create = async (req, res) => {
-  const {  nom, code, departementIdOrUuid } = req.body;
-  if (!nom || !departementIdOrUuid) {
-    return res.status(400).json({ success: false, message: "nom, departementIdOrUuid required" });
+  try {
+    const agent = await prisma.agents.findFirst({
+      where: { user_id: req.user.userId, deleted_at: null },
+      select: { id: true },
+    });
+
+    if (!agent) {
+      return res.status(400).json({ success: false, message: "Agent non trouvé" });
+    }
+
+    const reception = await receptionsService.createReception(req.body, agent.id);
+
+    return res.status(201).json({ success: true, data: reception });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ success: false, message: e.message || "Erreur réception" });
   }
-    const uuid = require("uuid").v4();
-
-  const departement_id = await resolveDepartementId(departementIdOrUuid);
-  if (!departement_id) return res.status(400).json({ success: false, message: "Departement not found" });
-
-  const row = await prisma.services.create({
-    data: { uuid, nom, code: code || null, departement_id },
-  });
-
-  res.status(201).json({ success: true, data: row });
 };
 
 exports.update = async (req, res) => {

@@ -22,6 +22,7 @@ async function login(req, res) {
     const result = await authService.login(body);
     return ok(res, result, "Login success");
   } catch (e) {
+    console.error("Error in login:", e);
     if (e.message === "INVALID_CREDENTIALS") {
       return res.status(401).json({ success: false, message: "Invalid credentials" });
     }
@@ -48,11 +49,30 @@ async function resetPassword(req, res) {
     const result = await authService.resetPassword(body);
     return ok(res, result, "Password updated");
   } catch (e) {
-    if (e.message === "RESET_TOKEN_NOT_IMPLEMENTED") {
-      return res.status(501).json({ success: false, message: "Not implemented yet" });
+    if (e.message === "INVALID_RESET_TOKEN") {
+      return res.status(400).json({ success: false, message: "Lien invalide ou expiré" });
     }
     return res.status(500).json({ success: false, message: "Server error" });
   }
 }
 
-module.exports = { register, login, forgotPassword, resetPassword };
+async function changePassword(req, res) {
+  try {
+    const { body } = req.validated;
+    const result = await authService.changePassword(req.user.userId, body);
+    return ok(res, result, "Password changed");
+  } catch (e) {
+    if (e.message === "INVALID_OLD_PASSWORD") {
+      return res.status(400).json({ success: false, message: "Ancien mot de passe incorrect" });
+    }
+    if (e.message === "USER_DISABLED") {
+      return res.status(403).json({ success: false, message: "User disabled" });
+    }
+    if (e.message === "USER_NOT_FOUND") {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+}
+
+module.exports = { register, login, forgotPassword, resetPassword, changePassword };

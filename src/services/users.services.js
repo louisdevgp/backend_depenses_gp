@@ -15,6 +15,30 @@ async function me(userId) {
 
   if (!user || user.deleted_at) throw new Error("User not found");
 
+  const baseRoles = user.user_roles.map((ur) => ur.roles.name);
+
+  // ✅ délégations actives: ajout au /me pour que le frontend puisse autoriser l'accès
+  const agentRecord = user.agents?.[0] || null;
+  const agentId = agentRecord?.id;
+  let delegatedRoles = [];
+  let delegated = [];
+  if (agentId) {
+    const now = new Date();
+    const dels = await prisma.delegations.findMany({
+      where: {
+        delegate_id: Number(agentId),
+        is_active: true,
+        start_at: { lte: now },
+        end_at: { gte: now },
+      },
+      select: { id: true, uuid: true, role_name: true, principal_id: true, start_at: true, end_at: true, is_active: true },
+    });
+    delegatedRoles = Array.from(new Set(dels.map((d) => d.role_name).filter(Boolean)));
+    delegated = dels;
+  }
+
+  const roles = Array.from(new Set([...baseRoles, ...delegatedRoles]));
+
   return {
     id: user.id,
     uuid: user.uuid,
@@ -22,8 +46,9 @@ async function me(userId) {
     nom: user.nom,
     prenom: user.prenom,
     is_active: user.is_active,
-    roles: user.user_roles.map((ur) => ur.roles.name),
-    agent: user.agents?.[0] || null,
+    roles,
+    delegatedRoles,
+    agent: agentRecord ? { ...agentRecord, delegations: delegated } : null,
   };
 }
 

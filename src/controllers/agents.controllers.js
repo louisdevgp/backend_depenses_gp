@@ -1,4 +1,5 @@
 const agentsService = require("../services/agents.services");
+const prisma = require("../config/prisma");
 
 async function createAgent(req, res) {
   try {
@@ -53,12 +54,18 @@ async function softDeleteAgent(req, res) {
 async function setAgentManager(req, res) {
   try {
     const { manager_id, start_at, end_at } = req.body;
+
+    const actor = await prisma.agents.findFirst({
+      where: { user_id: Number(req.user?.userId), deleted_at: null },
+      select: { id: true },
+    });
+
     const agent = await agentsService.setAgentManager({
       agentId: req.params.id,
       managerId: manager_id ?? null,
       startAt: start_at,
       endAt: end_at,
-      actorAgentId: req.user?.agent?.id, // si tu mets agent dans req.user
+      actorAgentId: actor?.id,
     });
     return res.json({ success: true, data: agent });
   } catch (e) {

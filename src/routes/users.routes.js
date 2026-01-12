@@ -1,14 +1,17 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
 const ctrl = require("../controllers/users.controllers");
+const requireRole = require("../middlewares/requireRole.middleware");
+
+router.use(auth);
 
 // utilisateur connecté
-router.get("/me", auth, ctrl.me);
+router.get("/me", ctrl.me);
 
 // admin/users management
-router.get("/", auth, ctrl.list);                 // ?q=&is_active=&page=&limit=
-router.get("/:idOrUuid", auth, ctrl.getById);
-router.patch("/:idOrUuid", auth, ctrl.update);    // nom, prenom, is_active
-router.delete("/:idOrUuid", auth, ctrl.softDelete);
+router.get("/", requireRole(["ADMIN"]), ctrl.list); // ?q=&is_active=&page=&limit=
+router.get("/:idOrUuid", requireRole(["ADMIN"]), ctrl.getById);
+router.patch("/:idOrUuid", requireRole(["ADMIN"]), ctrl.update); // nom, prenom, is_active
+router.delete("/:idOrUuid", requireRole(["ADMIN"]), ctrl.softDelete);
 
 module.exports = router;

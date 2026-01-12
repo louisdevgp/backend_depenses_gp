@@ -1,14 +1,17 @@
 const router = require("express").Router();
-const requireAuth = require("../middlewares/auth.middleware");
+const auth = require("../middlewares/auth.middleware");
+const requireRole = require("../middlewares/requireRole.middleware");
 const ctrl = require("../controllers/demandes.controllers");
 
 // CRUD
-router.post("/", requireAuth, ctrl.create);
-router.get("/", requireAuth, ctrl.list);
-router.get("/my", requireAuth, ctrl.listMine);
-router.get("/by-demandeur/:demandeurId", requireAuth, ctrl.listByDemandeur);
-router.get("/:idOrUuid", requireAuth, ctrl.getOne);
-router.put("/:idOrUuid", requireAuth, ctrl.update);
-router.delete("/:idOrUuid", requireAuth, ctrl.softDelete);
+router.post("/", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"]), ctrl.create);
+// Liste globale (encadrement): rôles de validation + compta + admin
+router.get("/", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"]), ctrl.list);
+router.get("/my", auth, ctrl.listMine);
+router.get("/by-demandeur/:demandeurId", auth, requireRole(["ADMIN"]), ctrl.listByDemandeur);
+router.get("/:idOrUuid/pdf", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"]), ctrl.pdf);
+router.get("/:idOrUuid", auth, ctrl.getOne);
+router.put("/:idOrUuid", auth, requireRole(["DEMANDEUR", "ADMIN"]), ctrl.update);
+router.delete("/:idOrUuid", auth, requireRole(["DEMANDEUR", "ADMIN"]), ctrl.softDelete);
 
 module.exports = router;

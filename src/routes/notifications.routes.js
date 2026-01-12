@@ -1,13 +1,14 @@
 const router = require("express").Router();
-const requireAuth = require("../middlewares/auth.middleware");
-const c = require("../controllers/notifications.controllers");
+const auth = require("../middlewares/auth.middleware");
+const ctrl = require("../controllers/notifications.controllers");
+const requireRole = require("../middlewares/requireRole.middleware");
 
-router.use(requireAuth);
+router.use(auth);
 
-router.get("/", c.listMine);
-router.get("/unread", c.listUnread);
-router.patch("/:id/read", c.readOne);
-router.patch("/read-all", c.readAll);
-router.delete("/:id", c.remove);
+router.get("/my", ctrl.listMine);
+router.patch("/:id/read", ctrl.readOne);
+
+// (optionnel) endpoint admin/test
+router.post("/", requireRole(["ADMIN"]), ctrl.create);
 
 module.exports = router;

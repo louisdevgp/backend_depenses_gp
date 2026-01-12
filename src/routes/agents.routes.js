@@ -2,10 +2,12 @@ const express = require("express");
 const router = express.Router();
 
 const agentsController = require("../controllers/agents.controllers");
-const requireAuth  = require("../middlewares/auth.middleware"); // si tu as déjà
+const requireAuth = require("../middlewares/auth.middleware");
+const requireRole = require("../middlewares/requireRole.middleware");
 // const { requireRole } = require("../middlewares/requireRole"); // optionnel
 
 router.use(requireAuth);
+router.use(requireRole(["ADMIN"]));
 
 // CRUD
 router.post("/", agentsController.createAgent);

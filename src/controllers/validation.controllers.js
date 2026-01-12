@@ -39,6 +39,6 @@ exports.getByUuid = async (req, res) => {
 };
 
 exports.getValidationsDoneBydemande = async (req, res) => {
-  const data = await service.getValidationsDoneBydemande(req.params.demandeIdOrUuid);
+  const data = await service.getValidationsDoneBydemande(req.params.demandeUuid);
   res.json({ success: true, data });
 };

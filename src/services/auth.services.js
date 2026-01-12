@@ -1,12 +1,24 @@
 const prisma = require("../config/prisma")
+const crypto = require("crypto");
 const { hashPassword, comparePassword } = require("../utils/password");
 const { signAccessToken, signRefreshToken } = require("./token.services");
 const { v4: uuidv4 } = require("uuid");
+const { sendMail, getTransporter } = require("../config/mailer");
 
-// Option simple: tokens reset en mémoire DB -> à ajouter si tu veux table password_resets.
-// Là je fais “simple”: on génère token et tu verras comment le stocker après.
 function generateResetToken() {
   return crypto.randomBytes(32).toString("hex");
+}
+
+function hashToken(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+function getFrontendBaseUrl() {
+  return (
+    process.env.FRONTEND_URL ||
+    process.env.DASHBOARD_URL ||
+    "http://localhost:5173"
+  );
 }
 
 async function register({ email, password, nom, prenom, agent }) {
@@ -60,8 +72,27 @@ async function login({ email, password }) {
   const ok = await comparePassword(password, user.password_hash);
   if (!ok) throw new Error("INVALID_CREDENTIALS");
 
-  const accessToken = signAccessToken({ userId: user.id, email: user.email });
-  const refreshToken = signRefreshToken({ userId: user.id });
+  const isFirstLogin = user.last_login_at == null;
+
+  // audit: track last login timestamp
+  try {
+    await prisma.users.update({
+      where: { id: user.id },
+      data: { last_login_at: new Date() },
+    });
+  } catch {
+    // ignore audit update errors
+  }
+
+  const accessToken = signAccessToken({
+    userId: user.id,
+    email: user.email,
+    mustChangePassword: isFirstLogin,
+  });
+  const refreshToken = signRefreshToken({
+    userId: user.id,
+    mustChangePassword: isFirstLogin,
+  });
 
   return {
     user: {
@@ -75,6 +106,55 @@ async function login({ email, password }) {
     },
     accessToken,
     refreshToken,
+    mustChangePassword: isFirstLogin,
+  };
+}
+
+async function changePassword(userId, { oldPassword, newPassword }) {
+  const user = await prisma.users.findUnique({
+    where: { id: Number(userId) },
+    include: {
+      user_roles: { include: { roles: true } },
+      agents: true,
+    },
+  });
+
+  if (!user || user.deleted_at) throw new Error("USER_NOT_FOUND");
+  if (!user.is_active) throw new Error("USER_DISABLED");
+
+  const ok = await comparePassword(String(oldPassword || ""), user.password_hash);
+  if (!ok) throw new Error("INVALID_OLD_PASSWORD");
+
+  const password_hash = await hashPassword(newPassword);
+
+  await prisma.users.update({
+    where: { id: user.id },
+    data: { password_hash },
+  });
+
+  const accessToken = signAccessToken({
+    userId: user.id,
+    email: user.email,
+    mustChangePassword: false,
+  });
+  const refreshToken = signRefreshToken({
+    userId: user.id,
+    mustChangePassword: false,
+  });
+
+  return {
+    user: {
+      id: user.id,
+      uuid: user.uuid,
+      email: user.email,
+      nom: user.nom,
+      prenom: user.prenom,
+      roles: user.user_roles.map((ur) => ur.roles.name),
+      agent: user.agents?.[0] || null,
+    },
+    accessToken,
+    refreshToken,
+    mustChangePassword: false,
   };
 }
 
@@ -84,15 +164,89 @@ async function forgotPassword({ email }) {
   if (!user) return { sent: true };
 
   const token = generateResetToken();
-  // 👉 Recommandation: créer une table password_reset_tokens et stocker hash(token) + expires_at
-  // Pour l’instant on te renvoie token (en dev) pour tester.
-  return { sent: true, token };
+  const token_hash = hashToken(token);
+  const expires_at = new Date(Date.now() + 60 * 60 * 1000); // 1h
+
+  // Create token row (and invalidate previous unused tokens)
+  await prisma.$transaction(async (tx) => {
+    await tx.password_reset_tokens.updateMany({
+      where: { user_id: user.id, used_at: null },
+      data: { used_at: new Date() },
+    });
+
+    await tx.password_reset_tokens.create({
+      data: {
+        uuid: uuidv4(),
+        user_id: user.id,
+        token_hash,
+        expires_at,
+      },
+    });
+  });
+
+  const resetUrl = `${getFrontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
+
+  // Non-blocking email send
+  sendMail({
+    to: user.email,
+    subject: "Réinitialisation de mot de passe",
+    text: `Pour réinitialiser votre mot de passe, ouvrez ce lien : ${resetUrl}`,
+    html: `
+      <p>Bonjour,</p>
+      <p>Vous avez demandé la réinitialisation de votre mot de passe.</p>
+      <p><a href="${resetUrl}">Cliquer ici pour réinitialiser</a></p>
+      <p>Ce lien expire dans 1 heure.</p>
+    `,
+  }).catch((e) => {
+    // eslint-disable-next-line no-console
+    console.warn("[auth] forgot-password email failed:", String(e?.message || e));
+  });
+
+  // Dev convenience: if mailer not configured, return token
+  if (String(process.env.NODE_ENV || "").toLowerCase() !== "production") {
+    const t = getTransporter();
+    if (!t) return { sent: true, token };
+  }
+
+  return { sent: true };
 }
 
 async function resetPassword({ token, newPassword }) {
-  // Avec table reset_tokens: vérifier token + expiration + user_id.
-  // Ici on met “placeholder”.
-  throw new Error("RESET_TOKEN_NOT_IMPLEMENTED");
+  const token_hash = hashToken(token);
+  const now = new Date();
+
+  const prt = await prisma.password_reset_tokens.findFirst({
+    where: {
+      token_hash,
+      used_at: null,
+      expires_at: { gt: now },
+    },
+    include: { users: true },
+  });
+
+  if (!prt || !prt.users || prt.users.deleted_at) {
+    throw new Error("INVALID_RESET_TOKEN");
+  }
+
+  const password_hash = await hashPassword(newPassword);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.password_reset_tokens.update({
+      where: { id: prt.id },
+      data: { used_at: now },
+    });
+
+    await tx.users.update({
+      where: { id: prt.user_id },
+      data: {
+        password_hash,
+        // If the user never logged in, we don't want first-login to force another password change.
+        last_login_at: prt.users.last_login_at ?? now,
+      },
+    });
+  });
+
+  return { reset: true };
 }
 
-module.exports = { register, login, forgotPassword, resetPassword };
+module.exports = { register, login, forgotPassword, resetPassword, changePassword };

@@ -28,6 +28,65 @@ async function main() {
       },
     });
   }
+
+  // Flows utilisés par l'application (selectionnés par rôle du demandeur)
+  // ⚠️ Idempotent: on remplace les steps de chaque flow.
+  const flows = [
+    {
+      code: "FLOW_DEMANDEUR_LAMBDA",
+      label: "Demandeur lambda : RESPONSABLE > DIRECTEUR > DAF > DGA > DG",
+      steps: ["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG"],
+    },
+    {
+      code: "FLOW_RESPONSABLE",
+      label: "Responsable : DIRECTEUR > DAF > DGA > DG",
+      steps: ["DIRECTEUR", "DAF", "DGA", "DG"],
+    },
+    {
+      code: "FLOW_DIRECTEUR",
+      label: "Directeur : DAF > DGA > DG",
+      steps: ["DAF", "DGA", "DG"],
+    },
+    {
+      code: "FLOW_DAF",
+      label: "DAF : DGA > DG",
+      steps: ["DGA", "DG"],
+    },
+    {
+      code: "FLOW_DGA",
+      label: "DGA : DG",
+      steps: ["DG"],
+    },
+    {
+      code: "FLOW_DG",
+      label: "DG : DGA",
+      steps: ["DGA"],
+    },
+  ];
+
+  for (const f of flows) {
+    const flow = await prisma.validation_flows.upsert({
+      where: { code: f.code },
+      update: { label: f.label, is_active: true },
+      create: {
+        uuid: uuidv4(),
+        code: f.code,
+        label: f.label,
+        is_active: true,
+      },
+    });
+
+    await prisma.validation_flow_steps.deleteMany({ where: { flow_id: flow.id } });
+    await prisma.validation_flow_steps.createMany({
+      data: f.steps.map((roleName, idx) => ({
+        uuid: uuidv4(),
+        flow_id: flow.id,
+        step_order: idx + 1,
+        role_name: roleName,
+        required: true,
+      })),
+    });
+  }
 }
 
 main()

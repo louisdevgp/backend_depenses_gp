@@ -48,9 +48,19 @@ const resetPasswordSchema = z.object({
   query: z.object({}),
 });
 
+const changePasswordSchema = z.object({
+  body: z.object({
+    oldPassword: z.string().min(1),
+    newPassword: z.string().min(8),
+  }),
+  params: z.object({}),
+  query: z.object({}),
+});
+
 module.exports = {
   registerSchema,
   loginSchema,
   forgotPasswordSchema,
   resetPasswordSchema,
+  changePasswordSchema,
 };

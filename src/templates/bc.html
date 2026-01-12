@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Bon de commande - {{po.number}}</title>
+
+  <style>
+    :root{
+      --green:#16a34a;
+      --green-dark:#166534;
+      --green-light:#ecfdf5;
+      --border:#c7e6d4;
+      --text:#0f172a;
+      --muted:#6b7280;
+    }
+
+    body{
+      font-family: Arial, Helvetica, sans-serif;
+      background:#fff;
+      color:var(--text);
+      margin:0;
+    }
+
+    .page{
+      width:210mm;
+      min-height:297mm;
+      padding:16mm;
+      margin:auto;
+    }
+
+    /* HEADER */
+    .header{
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+    }
+
+    .company h1{
+      margin:0;
+      font-size:20px;
+      color:var(--green-dark);
+    }
+
+    .company div{
+      font-size:12px;
+      line-height:1.4;
+    }
+
+    .po-title{
+      font-size:30px;
+      font-weight:800;
+      color:var(--green);
+      text-align:right;
+      margin:0;
+    }
+
+    .meta table{
+      border-collapse:collapse;
+      margin-top:10px;
+      font-size:12px;
+    }
+
+    .meta td{
+      border:1px solid var(--border);
+      padding:6px 8px;
+    }
+
+    .meta .label{
+      background:var(--green-light);
+      font-weight:bold;
+    }
+
+    /* BLOCKS */
+    .grid-2{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:16px;
+      margin-top:18px;
+    }
+
+    .block{
+      border:1px solid var(--border);
+    }
+
+    .block-title{
+      background:var(--green);
+      color:#fff;
+      padding:6px 10px;
+      font-size:12px;
+      font-weight:700;
+      text-transform:uppercase;
+    }
+
+    .block-body{
+      padding:10px;
+      font-size:12px;
+      line-height:1.45;
+    }
+
+    /* INFO ROW */
+    table.info{
+      width:100%;
+      border-collapse:collapse;
+      margin-top:14px;
+      font-size:12px;
+    }
+
+    table.info th{
+      background:var(--green);
+      color:#fff;
+      padding:6px;
+      text-transform:uppercase;
+    }
+
+    table.info td{
+      border:1px solid var(--border);
+      padding:8px;
+      height:28px;
+    }
+
+    /* ITEMS */
+    table.items{
+      width:100%;
+      border-collapse:collapse;
+      margin-top:14px;
+      font-size:12px;
+    }
+
+    table.items th{
+      background:var(--green);
+      color:#fff;
+      padding:7px;
+      text-transform:uppercase;
+    }
+
+    table.items td{
+      border:1px solid var(--border);
+      padding:7px;
+    }
+
+    .right{ text-align:right; }
+    .center{ text-align:center; }
+
+    /* BOTTOM */
+    .bottom{
+      display:grid;
+      grid-template-columns:1.2fr .8fr;
+      gap:16px;
+      margin-top:14px;
+    }
+
+    .comments{
+      border:1px solid var(--border);
+    }
+
+    .comments-title{
+      background:var(--green-light);
+      padding:6px 10px;
+      font-weight:700;
+      font-size:12px;
+    }
+
+    .comments-body{
+      padding:10px;
+      min-height:90px;
+      font-size:12px;
+    }
+
+    table.totals{
+      width:100%;
+      border-collapse:collapse;
+      font-size:12px;
+    }
+
+    table.totals td{
+      border:1px solid var(--border);
+      padding:7px;
+    }
+
+    table.totals .label{
+      font-weight:700;
+      text-transform:uppercase;
+    }
+
+    table.totals .grand{
+      background:var(--green);
+      color:#fff;
+      font-weight:800;
+    }
+
+    .footer{
+      margin-top:18px;
+      text-align:center;
+      font-size:11px;
+      color:var(--muted);
+    }
+  </style>
+</head>
+
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="company">
+      <h1>GREENPAY</h1>
+      <div>{{company.address}}</div>
+      <div>Tél : {{company.phone}}</div>
+      <div>Email : {{company.email}}</div>
+    </div>
+
+    <div>
+      <h2 class="po-title">BON DE COMMANDE</h2>
+      <div class="meta">
+        <table>
+          <tr>
+            <td class="label">DATE</td>
+            <td class="right">{{po.date}}</td>
+          </tr>
+          <tr>
+            <td class="label">BC N°</td>
+            <td class="right">{{po.number}}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- VENDOR / SHIP TO -->
+  <div class="grid-2">
+    <div class="block">
+      <div class="block-title">Fournisseur</div>
+      <div class="block-body">
+        <strong>{{vendor.name}}</strong><br>
+        {{vendor.address}}<br>
+        Tél : {{vendor.phone}}
+      </div>
+    </div>
+
+    <div class="block">
+      <div class="block-title">Livraison</div>
+      <div class="block-body">
+        <strong>{{ship_to.name}}</strong><br>
+        {{ship_to.address}}<br>
+        Tél : {{ship_to.phone}}
+      </div>
+    </div>
+  </div>
+
+  <!-- INFO -->
+  <table class="info">
+    <thead>
+      <tr>
+        <th>Demandeur</th>
+        <th>Transport</th>
+        <th>FOB</th>
+        <th>Conditions</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>{{po.requisitioner}}</td>
+        <td>{{po.ship_via}}</td>
+        <td>{{po.fob}}</td>
+        <td>{{po.shipping_terms}}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ITEMS -->
+  <table class="items">
+    <thead>
+      <tr>
+        <th>Réf</th>
+        <th>Désignation</th>
+        <th>Qté</th>
+        <th>PU</th>
+        <th>Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#items}}
+      <tr>
+        <td>{{sku}}</td>
+        <td>{{name}}</td>
+        <td class="center">{{qty}}</td>
+        <td class="right">{{unit_price}}</td>
+        <td class="right">{{line_total}}</td>
+      </tr>
+      {{/items}}
+    </tbody>
+  </table>
+
+  <!-- BOTTOM -->
+  <div class="bottom">
+    <div class="comments">
+      <div class="comments-title">Observations</div>
+      <div class="comments-body">
+        {{po.comments}}
+      </div>
+    </div>
+
+    <table class="totals">
+      <tr>
+        <td class="label">Sous-total</td>
+        <td class="right">{{totals.subtotal}}</td>
+      </tr>
+      <tr>
+        <td class="label">Taxes</td>
+        <td class="right">{{totals.tax}}</td>
+      </tr>
+      <tr class="grand">
+        <td class="label">TOTAL</td>
+        <td class="right">{{totals.total}}</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="footer">
+    GREENPAY – Bon de commande officiel
+  </div>
+
+</div>
+</body>
+</html>

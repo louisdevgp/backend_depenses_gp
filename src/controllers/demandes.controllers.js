@@ -1,4 +1,5 @@
 const service = require("../services/demandes.services");
+const pdfService = require("../services/pdf.services");
 
 exports.create = async (req, res) => {
   try {
@@ -42,6 +43,14 @@ exports.getOne = async (req, res) => {
   try {
     const result = await service.getOne(req.params.idOrUuid);
     return res.json({ success: true, data: result });
+  } catch (e) {
+    return res.status(404).json({ success: false, message: e.message });
+  }
+};
+
+exports.pdf = async (req, res) => {
+  try {
+    await pdfService.streamDemandePdf(res, req.params.idOrUuid);
   } catch (e) {
     return res.status(404).json({ success: false, message: e.message });
   }

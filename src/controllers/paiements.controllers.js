@@ -1,28 +1,29 @@
 const paiementsService = require("../services/paiements.services");
-const {PrismaClient} = require("@prisma/client");
-const prisma = new PrismaClient();
+const prisma = require("../config/prisma");
 
 exports.create = async (req, res) => {
   try {
-    // req.user vient de ton auth.middleware -> { userId, email, ... }
-    // Ici on doit récupérer l'agent lié au user connecté.
-    // Si dans ton projet tu as déjà req.agentId, utilise-le.
-    const agent = await prisma.agents.findMany({ where: { user_id: req.user.userId } });
+    const agent = await prisma.agents.findFirst({
+      where: { user_id: req.user.userId, deleted_at: null },
+      select: { id: true },
+    });
+
     if (!agent) {
-      return res.status(400).json({ success: false, message: "Agent non trouvé pour l'utilisateur connecté" });
+      return res.status(400).json({
+        success: false,
+        message: "Agent non trouvé pour l'utilisateur connecté",
+      });
     }
 
-    const comptableAgentId = agent[0].id;
-
-    console.log("Comptable Agent ID:", comptableAgentId);
-
-    const paiement = await paiementsService.createPaiement(req.body, comptableAgentId);
+    const paiement = await paiementsService.createPaiement(req.body, agent.id);
     return res.status(201).json({ success: true, data: paiement });
   } catch (e) {
-    return res.status(e.statusCode || 500).json({ success: false, message: e.message || "Erreur paiement" });
+    return res.status(e.statusCode || 500).json({
+      success: false,
+      message: e.message || "Erreur paiement",
+    });
   }
 };
-
 
 exports.list = async (req, res) => {
   try {
@@ -51,7 +52,6 @@ exports.getByUuid = async (req, res) => {
   }
 };
 
-
 exports.listByDemande = async (req, res) => {
   try {
     const data = await paiementsService.listByDemande(req.params.demandeId);
@@ -61,10 +61,21 @@ exports.listByDemande = async (req, res) => {
   }
 };
 
-
 exports.update = async (req, res) => {
   try {
-    const data = await paiementsService.updatePaiement(req.params.id, req.body);
+    const agent = await prisma.agents.findFirst({
+      where: { user_id: req.user.userId, deleted_at: null },
+      select: { id: true },
+    });
+
+    if (!agent) {
+      return res.status(400).json({
+        success: false,
+        message: "Agent non trouvé pour l'utilisateur connecté",
+      });
+    }
+
+    const data = await paiementsService.updatePaiement(req.params.id, req.body, agent.id);
     return res.json({ success: true, data });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -73,7 +84,19 @@ exports.update = async (req, res) => {
 
 exports.remove = async (req, res) => {
   try {
-    await paiementsService.deletePaiement(req.params.id);
+    const agent = await prisma.agents.findFirst({
+      where: { user_id: req.user.userId, deleted_at: null },
+      select: { id: true },
+    });
+
+    if (!agent) {
+      return res.status(400).json({
+        success: false,
+        message: "Agent non trouvé pour l'utilisateur connecté",
+      });
+    }
+
+    await paiementsService.deletePaiement(req.params.id, agent.id);
     return res.json({ success: true, message: "Paiement supprimé" });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });

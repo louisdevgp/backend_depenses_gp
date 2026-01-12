@@ -430,8 +430,13 @@ model roles {
   description String?      @db.Text
   created_at  DateTime     @default(now()) @db.DateTime(0)
   updated_at  DateTime     @default(now()) @db.DateTime(0)
+  is_active   Boolean      @default(true)
+  deleted_at  DateTime?    @db.DateTime(0)
   agents      agents[]
   user_roles  user_roles[]
+
+  @@index([is_active], map: "idx_roles_active")
+  @@index([deleted_at], map: "idx_roles_deleted")
 }
 
 model services {
@@ -462,6 +467,22 @@ model user_roles {
   @@index([role_id], map: "idx_ur_role")
 }
 
+model password_reset_tokens {
+  id            Int      @id @default(autoincrement()) @db.UnsignedInt
+  uuid          String   @unique(map: "uk_prt_uuid") @db.Char(36)
+  user_id       Int      @db.UnsignedInt
+  token_hash    String   @db.VarChar(255)
+  expires_at    DateTime @db.DateTime(0)
+  used_at       DateTime? @db.DateTime(0)
+  created_at    DateTime @default(now()) @db.DateTime(0)
+
+  users users @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "fk_prt_user")
+
+  @@index([user_id], map: "idx_prt_user")
+  @@index([expires_at], map: "idx_prt_expires")
+  @@index([used_at], map: "idx_prt_used")
+}
+
 model users {
   id                Int             @id @default(autoincrement()) @db.UnsignedInt
   uuid              String          @unique(map: "uk_users_uuid") @db.Char(36)
@@ -479,6 +500,7 @@ model users {
   audit_logs        audit_logs[]
   notifications     notifications[]
   user_roles        user_roles[]
+  password_reset_tokens password_reset_tokens[]
 
   @@index([is_active], map: "idx_users_active")
   @@index([deleted_at], map: "idx_users_deleted")

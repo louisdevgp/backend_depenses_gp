@@ -1,11 +1,9 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
 const rolesController = require("../controllers/roles.controllers")
-// (optionnel) si tu veux limiter à ADMIN:
-// const requireRole = require("../middlewares/requireRole.middleware");
-// router.use(auth, requireRole("ADMIN"));
+const requireRole = require("../middlewares/requireRole.middleware");
 
-router.use(auth);
+router.use(auth, requireRole(["ADMIN"]));
 
 router.get("/", rolesController.list);
 router.get("/:id", rolesController.getById);

@@ -1,7 +1,40 @@
 const { randomUUID } = require("crypto");
 const { generateBonCommandeNumero } = require("../utils/numero.utils");
 
-async function createBonCommande(prisma, payload, createdByAgentId) {
+async function assertDemandeApproved(tx, demandeId) {
+  const demande = await tx.demandes_paiement.findFirst({
+    where: { id: Number(demandeId), deleted_at: null },
+    select: { id: true, statut: true },
+  });
+
+  if (!demande) throw new Error("Demande introuvable");
+
+  const statut = String(demande.statut || "").toLowerCase();
+  const allowed = statut === "approuvee" || statut === "en_attente_paiement";
+  if (!allowed) {
+    throw new Error("Bon de commande impossible : demande non approuvée");
+  }
+
+  const totalSteps = await tx.validation_steps.count({
+    where: { demande_id: Number(demandeId) },
+  });
+  if (totalSteps <= 0) {
+    throw new Error("Bon de commande impossible : workflow de validation introuvable");
+  }
+
+  const notApprovedCount = await tx.validation_steps.count({
+    where: {
+      demande_id: Number(demandeId),
+      status: { in: ["en_attente", "bloque", "rejete"] },
+    },
+  });
+
+  if (notApprovedCount > 0) {
+    throw new Error("Bon de commande impossible : demande non approuvée (validations incomplètes ou rejetée)");
+  }
+}
+
+async function createBonCommande(prisma, payload, createdByAgent) {
   const {
     demande_id,
     fournisseur_id = null,
@@ -17,12 +50,23 @@ async function createBonCommande(prisma, payload, createdByAgentId) {
   }
 
   return prisma.$transaction(async (tx) => {
-    // Vérifie la demande existe
+    // ✅ Règle métier : BC seulement après validations
+    await assertDemandeApproved(tx, demande_id);
+
+    // ✅ Autorisation : demandeur (créateur de la demande) ou rôle privilégié
+    const creatorId = Number(createdByAgent?.id);
+    const creatorRole = String(createdByAgent?.roleName || "").toUpperCase();
+    if (!creatorId) throw new Error("Créateur BC invalide");
+
     const demande = await tx.demandes_paiement.findUnique({
       where: { id: Number(demande_id) },
-      select: { id: true },
+      select: { id: true, demandeur_id: true },
     });
     if (!demande) throw new Error("Demande introuvable");
+
+    const privileged = ["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"];
+    const canCreate = creatorId === Number(demande.demandeur_id) || privileged.includes(creatorRole);
+    if (!canCreate) throw new Error("Bon de commande: action non autorisée");
 
     const numero = await generateBonCommandeNumero(tx);
 
@@ -34,7 +78,7 @@ async function createBonCommande(prisma, payload, createdByAgentId) {
         numero,
         statut,
         date_commande: date_commande ? new Date(date_commande) : null,
-        created_by_id: Number(createdByAgentId),
+        created_by_id: creatorId,
       },
     });
 
