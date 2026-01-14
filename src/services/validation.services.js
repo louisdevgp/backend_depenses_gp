@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const notifications = require("./notifications.services");
+const { saveSignaturePngDataUrl } = require("./signatures.services");
 
 function parseScope(scopeRaw) {
   if (scopeRaw == null) return null;
@@ -142,7 +143,10 @@ async function getPendingForUser(userId) {
 }
 
 
-async function approveStep(stepId, userId) {
+async function approveStep(stepId, userId, commentaire, signatureDataUrl = null) {
+  const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
+  const signatureDataUrlTrimmed = signatureDataUrl != null ? String(signatureDataUrl).trim() : "";
+
   const result = await prisma.$transaction(async (tx) => {
     const step = await tx.validation_steps.findUnique({
       where: { id: Number(stepId) },
@@ -167,12 +171,19 @@ async function approveStep(stepId, userId) {
     const ok = await canActByDelegation(tx, step, agent);
     if (!ok) throw new Error("Non autorisé");
 
+    let signature_url = null;
+    if (signatureDataUrlTrimmed) {
+      signature_url = saveSignaturePngDataUrl(signatureDataUrlTrimmed, { prefix: `validation_${step.id}` }).url;
+    }
+
     await tx.validation_steps.update({
       where: { id: step.id },
       data: {
         status: "valide",
         validated_by_id: agent.id,
         validated_at: new Date(),
+        commentaire: commentaireTrimmed || null,
+        ...(signature_url ? { signature_url } : {}),
         updated_at: new Date(),
       },
     });

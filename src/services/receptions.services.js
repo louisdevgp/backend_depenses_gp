@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
+const { saveSignaturePngDataUrl } = require("./signatures.services");
 
 async function findUserIdByAgentId(agentId) {
   if (!agentId) return null;
@@ -118,10 +119,14 @@ async function createReception(payload, userAgentId) {
     });
 
     // ✅ statut demande:
-    // - si déjà payée -> cloture
+    // - si totalement payée -> cloture
     // - sinon -> receptionnee
-    const hasPaiement = await tx.paiements.count({ where: { demande_id: Number(demande.id) } });
-    const nextStatut = hasPaiement > 0 ? "cloture" : "receptionnee";
+    const stillUnpaid = await tx.conditions_paiement.count({
+      where: { demande_id: Number(demande.id), paiement_id: null },
+    });
+    const fullyPaid = stillUnpaid === 0;
+    const currentStatut = String(demande?.statut || "").toLowerCase();
+    const nextStatut = fullyPaid ? "cloture" : (currentStatut === "en_attente_paiement" ? "en_attente_paiement" : "receptionnee");
 
     await tx.demandes_paiement.update({
       where: { id: Number(demande.id) },
@@ -244,16 +249,23 @@ async function updateReception(id, payload, actorAgentId) {
   return updated;
 }
 
-async function visaDirecteur(id, { signature_directeur_url }, directeurAgentId) {
+async function visaDirecteur(id, { signature_directeur_url, signature_data_url, commentaire } = {}, directeurAgentId) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) throw new Error("Reception introuvable");
   if (existing.visa_directeur_id) throw new Error("Réception déjà visée par le Directeur");
+
+  const sigUrl = signature_data_url
+    ? saveSignaturePngDataUrl(signature_data_url, { prefix: `reception_${existing.id}_directeur` }).url
+    : signature_directeur_url;
+
+  const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
 
   const updated = await prisma.receptions.update({
     where: { id: Number(id) },
     data: {
       visa_directeur_id: Number(directeurAgentId),
-      signature_directeur_url: signature_directeur_url || null,
+      signature_directeur_url: sigUrl || null,
+      visa_directeur_commentaire: commentaireTrimmed ? commentaireTrimmed : null,
       updated_at: new Date(),
     },
   });
@@ -292,17 +304,24 @@ async function visaDirecteur(id, { signature_directeur_url }, directeurAgentId) 
   return updated;
 }
 
-async function visaDaf(id, { signature_daf_url }, dafAgentId) {
+async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire } = {}, dafAgentId) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) throw new Error("Reception introuvable");
   if (!existing.visa_directeur_id) throw new Error("Visa Directeur requis avant le Visa DAF");
   if (existing.visa_daf_id) throw new Error("Réception déjà visée par le DAF");
 
+  const sigUrl = signature_data_url
+    ? saveSignaturePngDataUrl(signature_data_url, { prefix: `reception_${existing.id}_daf` }).url
+    : signature_daf_url;
+
+  const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
+
   const updated = await prisma.receptions.update({
     where: { id: Number(id) },
     data: {
       visa_daf_id: Number(dafAgentId),
-      signature_daf_url: signature_daf_url || null,
+      signature_daf_url: sigUrl || null,
+      visa_daf_commentaire: commentaireTrimmed ? commentaireTrimmed : null,
       updated_at: new Date(),
     },
   });

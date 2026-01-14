@@ -250,6 +250,15 @@ exports.create = async (req, res) => {
     return res.status(400).json({ success: false, message: "principal, delegate, role_name, start_at, end_at required" });
   }
 
+  const startAtDate = new Date(start_at);
+  const endAtDate = new Date(end_at);
+  if (Number.isNaN(startAtDate.getTime()) || Number.isNaN(endAtDate.getTime())) {
+    return res.status(400).json({ success: false, message: "Dates start_at / end_at invalides" });
+  }
+  if (startAtDate > endAtDate) {
+    return res.status(400).json({ success: false, message: "start_at doit être antérieur à end_at" });
+  }
+
   if (roleNameNorm === "ADMIN") {
     return res.status(400).json({ success: false, message: "Le rôle ADMIN ne peut pas être délégué" });
   }
@@ -262,6 +271,27 @@ exports.create = async (req, res) => {
 
   if (Number(principal_id) === Number(delegate_id)) {
     return res.status(400).json({ success: false, message: "Le principal et le délégué doivent être différents" });
+  }
+
+  // ✅ règle métier: une personne ne peut pas être déléguée plus d'une fois sur une période qui se chevauche.
+  // (Concrètement: pas 2 délégations actives qui se recouvrent pour le même delegate_id)
+  const overlap = await prisma.delegations.findFirst({
+    where: {
+      delegate_id,
+      is_active: true,
+      AND: [
+        { start_at: { lte: endAtDate } },
+        { end_at: { gte: startAtDate } },
+      ],
+    },
+    select: { id: true, uuid: true, principal_id: true, role_name: true, start_at: true, end_at: true },
+  });
+  if (overlap) {
+    return res.status(400).json({
+      success: false,
+      message: "Ce délégué a déjà une délégation active sur une période qui se chevauche",
+      data: { conflict: overlap },
+    });
   }
 
   // role_name must be the principal's actual role
@@ -325,8 +355,8 @@ exports.create = async (req, res) => {
       delegate_id,
       role_name: roleNameNorm,
       scope: scopeFinal,
-      start_at: new Date(start_at),
-      end_at: new Date(end_at),
+      start_at: startAtDate,
+      end_at: endAtDate,
       is_active: true,
       created_by_id,
     },
@@ -370,6 +400,39 @@ exports.update = async (req, res) => {
   // ✅ période modifiable par principal OU délégué
   if (req.body.start_at) data.start_at = new Date(req.body.start_at);
   if (req.body.end_at) data.end_at = new Date(req.body.end_at);
+
+  // Validation période si on change start/end
+  if (data.start_at || data.end_at) {
+    const nextStart = data.start_at || existing.start_at;
+    const nextEnd = data.end_at || existing.end_at;
+    if (Number.isNaN(new Date(nextStart).getTime()) || Number.isNaN(new Date(nextEnd).getTime())) {
+      return res.status(400).json({ success: false, message: "Dates start_at / end_at invalides" });
+    }
+    if (new Date(nextStart) > new Date(nextEnd)) {
+      return res.status(400).json({ success: false, message: "start_at doit être antérieur à end_at" });
+    }
+
+    // ✅ même règle de chevauchement, en excluant la délégation courante
+    const conflict = await prisma.delegations.findFirst({
+      where: {
+        id: { not: existing.id },
+        delegate_id: existing.delegate_id,
+        is_active: true,
+        AND: [
+          { start_at: { lte: new Date(nextEnd) } },
+          { end_at: { gte: new Date(nextStart) } },
+        ],
+      },
+      select: { id: true, uuid: true, principal_id: true, role_name: true, start_at: true, end_at: true },
+    });
+    if (conflict) {
+      return res.status(400).json({
+        success: false,
+        message: "Ce délégué a déjà une délégation active sur une période qui se chevauche",
+        data: { conflict },
+      });
+    }
+  }
 
   // Champs sensibles: seulement admin ou principal
   const canEditSensitive = admin || (actorAgentId && existing.principal_id === actorAgentId);

@@ -1,10 +1,56 @@
-const {uuid} = require("uuid")
+const { v4: uuidv4 } = require("uuid");
+const prisma = require("../config/prisma");
 const service = require("../services/conditionsPaiement.services");
+
+async function isAdminUserId(userId) {
+  const u = await prisma.users.findUnique({
+    where: { id: Number(userId) },
+    include: { user_roles: { include: { roles: true } } },
+  });
+  const roleNames = (u?.user_roles || []).map((ur) => ur?.roles?.name).filter(Boolean);
+  return roleNames.includes("ADMIN");
+}
+
+async function assertCanMutateDemande({ req, demandeId, actionLabel }) {
+  const userId = req.user?.userId;
+  if (!userId) return { ok: false, status: 401, message: "Unauthorized" };
+  if (!demandeId) return { ok: false, status: 400, message: "demande_id requis" };
+
+  if (await isAdminUserId(userId)) return { ok: true };
+
+  const demande = await prisma.demandes_paiement.findUnique({
+    where: { id: Number(demandeId) },
+    select: {
+      id: true,
+      demandeur_id: true,
+      agents_demandes_paiement_demandeur_idToagents: { select: { user_id: true } },
+    },
+  });
+  if (!demande) return { ok: false, status: 404, message: "Demande introuvable" };
+
+  const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
+  if (demandeurUserId != null && Number(demandeurUserId) === Number(userId)) return { ok: true };
+
+  const agent = await prisma.agents.findFirst({
+    where: { user_id: Number(userId), deleted_at: null },
+    select: { id: true },
+  });
+  if (agent?.id && Number(demande.demandeur_id) === Number(agent.id)) return { ok: true };
+
+  return { ok: false, status: 403, message: `${actionLabel || "Action"} non autorisée` };
+}
 
 exports.create = async (req, res) => {
   try {
+    const authz = await assertCanMutateDemande({
+      req,
+      demandeId: req.body?.demande_id,
+      actionLabel: "Création condition paiement",
+    });
+    if (!authz.ok) return res.status(authz.status).json({ success: false, message: authz.message });
+
     const payload = {
-      uuid: uuid(),
+      uuid: uuidv4(),
       ...req.body,
       demande_id: Number(req.body.demande_id),
       paiement_id: req.body.paiement_id ? Number(req.body.paiement_id) : null,
@@ -47,6 +93,16 @@ exports.listByDemande = async (req, res) => {
 
 exports.update = async (req, res) => {
   try {
+    const existing = await service.getConditionPaiementById(req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+
+    const authz = await assertCanMutateDemande({
+      req,
+      demandeId: existing.demande_id,
+      actionLabel: "Modification condition paiement",
+    });
+    if (!authz.ok) return res.status(authz.status).json({ success: false, message: authz.message });
+
     const payload = {
       ...req.body,
       paiement_id: req.body.paiement_id ? Number(req.body.paiement_id) : null,
@@ -61,6 +117,16 @@ exports.update = async (req, res) => {
 
 exports.remove = async (req, res) => {
   try {
+    const existing = await service.getConditionPaiementById(req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: "Not found" });
+
+    const authz = await assertCanMutateDemande({
+      req,
+      demandeId: existing.demande_id,
+      actionLabel: "Suppression condition paiement",
+    });
+    if (!authz.ok) return res.status(authz.status).json({ success: false, message: authz.message });
+
     await service.deleteConditionPaiement(req.params.id);
     res.json({ success: true, message: "Deleted" });
   } catch (e) {

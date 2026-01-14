@@ -53,6 +53,14 @@ async function createBonCommande(prisma, payload, createdByAgent) {
     // ✅ Règle métier : BC seulement après validations
     await assertDemandeApproved(tx, demande_id);
 
+    // ✅ Règle métier : 1 seul BC par demande
+    const existingBcCount = await tx.bons_commande.count({
+      where: { demande_id: Number(demande_id) },
+    });
+    if (existingBcCount > 0) {
+      throw new Error("Un bon de commande existe déjà pour cette demande");
+    }
+
     // ✅ Autorisation : demandeur (créateur de la demande) ou rôle privilégié
     const creatorId = Number(createdByAgent?.id);
     const creatorRole = String(createdByAgent?.roleName || "").toUpperCase();

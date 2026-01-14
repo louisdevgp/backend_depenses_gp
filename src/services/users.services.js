@@ -1,5 +1,17 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
+const { v4: uuidv4 } = require("uuid");
+const { hashPassword } = require("../utils/password");
+
+function generateTemporaryPassword() {
+  // Simple, readable, avoids ambiguous chars.
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  let out = "";
+  for (let i = 0; i < 12; i++) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return out;
+}
 
 function idWhere(idOrUuid) {
   const asNumber = Number(idOrUuid);
@@ -102,6 +114,43 @@ async function list(query) {
   };
 }
 
+async function create(payload, performedByUserId) {
+  const email = String(payload?.email || "").trim().toLowerCase();
+  const nom = String(payload?.nom || "").trim();
+  const prenom = String(payload?.prenom || "").trim();
+  const is_active = payload?.is_active === undefined ? true : !!payload.is_active;
+
+  if (!email) throw new Error("email required");
+  if (!nom) throw new Error("nom required");
+  if (!prenom) throw new Error("prenom required");
+
+  const existing = await prisma.users.findUnique({ where: { email } });
+  if (existing && !existing.deleted_at) throw new Error("EMAIL_ALREADY_USED");
+  if (existing && existing.deleted_at) throw new Error("EMAIL_ALREADY_USED");
+
+  const temporaryPassword = generateTemporaryPassword();
+  const password_hash = await hashPassword(temporaryPassword);
+
+  const created = await prisma.users.create({
+    data: {
+      uuid: uuidv4(),
+      email,
+      nom,
+      prenom,
+      password_hash,
+      is_active,
+      last_login_at: null,
+    },
+  });
+
+  return {
+    id: created.id,
+    uuid: created.uuid,
+    email: created.email,
+    temporaryPassword,
+  };
+}
+
 async function getById(idOrUuid) {
   const user = await prisma.users.findFirst({
     where: { ...idWhere(idOrUuid), deleted_at: null },
@@ -141,4 +190,29 @@ async function softDelete(idOrUuid, performedByUserId) {
   return { id: updated.id, uuid: updated.uuid, deleted: true };
 }
 
-module.exports = { me, list, getById, update, softDelete };
+async function adminResetPassword(idOrUuid, performedByUserId) {
+  const user = await prisma.users.findFirst({ where: { ...idWhere(idOrUuid), deleted_at: null } });
+  if (!user) throw new Error("User not found");
+
+  const temporaryPassword = generateTemporaryPassword();
+  const password_hash = await hashPassword(temporaryPassword);
+
+  await prisma.users.update({
+    where: { id: user.id },
+    data: {
+      password_hash,
+      last_login_at: null, // force change-password flow next login
+      is_active: true,
+    },
+  });
+
+  return {
+    id: user.id,
+    uuid: user.uuid,
+    email: user.email,
+    temporaryPassword,
+    mustChangePassword: true,
+  };
+}
+
+module.exports = { me, list, create, getById, update, adminResetPassword, softDelete };

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Fiche de réception – {{reception.numero}}</title>
+
+  <style>
+    /* Page A4 */
+    @page { size: A4; margin: 0; }
+    body { margin:0; background:#fff; }
+
+    .page{
+      width:210mm;
+      height:297mm;
+      padding:18mm 16mm 16mm 16mm;
+      font-family: "Times New Roman", Times, serif;
+      font-size:12px;
+      color:#000;
+      position:relative;
+      box-sizing:border-box;
+    }
+
+    /* Header left block (logo + infos) */
+    .brand{
+      position:absolute;
+      top:14mm;
+      left:16mm;
+      width:70mm;
+    }
+    .logo{
+      display:flex;
+      align-items:flex-start;
+      gap:8px;
+    }
+    .logo img{
+      height:26mm;          /* proche visuel */
+      width:auto;
+      object-fit:contain;
+    }
+    /* Infos sous logo */
+    .brand-info{
+      margin-top:6mm;
+      line-height:1.9;
+      font-size:12px;
+      font-weight:400;
+    }
+
+    /* Title centered with thick border */
+    .title{
+      position:absolute;
+      top:20mm;
+      left:50%;
+      transform:translateX(-50%);
+      width:100mm;
+      border:2px solid #000;
+      text-align:center;
+      padding:6px 8px;
+      font-weight:800;
+      font-size:16px;
+      letter-spacing:.2px;
+    }
+
+    /* Form area */
+    .form{
+      position:absolute;
+      top:72mm;          /* aligné comme le PDF */
+      left:16mm;
+      right:16mm;
+    }
+
+    .row{
+      display:flex;
+      align-items:flex-end;
+      margin:14px 0;
+      gap:8px;
+    }
+
+    .label{
+      font-weight:700;
+      text-transform:uppercase;
+      white-space:nowrap;
+      min-width:54mm;     /* largeur label comme PDF */
+    }
+
+    /* Dotted line like the pdf */
+    .dots{
+      flex:1;
+      border-bottom:1.8px dotted #000;
+      height:16px;
+      display:flex;
+      align-items:flex-end;
+      padding-bottom:1px;
+      font-weight:400;
+      text-transform:none;
+      overflow:hidden;
+    }
+
+    /* Second line for description (full dotted across) */
+    .row-full{
+      display:flex;
+      align-items:flex-end;
+      margin:12px 0 14px 0;
+    }
+    .dots-full{
+      width:100%;
+      border-bottom:1.8px dotted #000;
+      height:16px;
+      display:flex;
+      align-items:flex-end;
+      padding-bottom:1px;
+      overflow:hidden;
+    }
+
+    /* Small green bordered box at right (as in capture) */
+    .green-box{
+      width:22mm;
+      height:14mm;
+      border:2px solid #1f7a3a;
+      margin-left:8px;
+    }
+
+    /* Conforme row aligned like PDF */
+    .conforme{
+      display:flex;
+      align-items:center;
+      margin-top:18px;
+      font-weight:700;
+      text-transform:uppercase;
+    }
+    .conforme .spacer{ flex:1; }
+    .conforme .choice{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-weight:700;
+    }
+    .box{
+      width:14px;
+      height:14px;
+      border:1.8px solid #000;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      font-size:11px;
+      line-height:1;
+      font-weight:900;
+    }
+
+    /* Signatures (2 columns + top border line effect) */
+    .signatures{
+      position:absolute;
+      left:16mm;
+      bottom:18mm;
+      width: 120mm; /* comme la capture (pas toute la page) */
+      display:flex;
+      border-top:2px solid #000;
+    }
+    .sig{
+      width:60mm;
+      height:55mm;
+      border-left:2px solid #000;
+      border-right:2px solid #000;
+      border-bottom:2px solid #000;
+      box-sizing:border-box;
+      position:relative;
+    }
+    .sig:first-child{
+      border-left:2px solid #000;
+      border-right:1px solid #000; /* séparation fine au milieu */
+    }
+    .sig:last-child{
+      border-left:1px solid #000;
+      border-right:2px solid #000;
+    }
+    .sig-title{
+      position:absolute;
+      top:0;
+      left:0;
+      right:0;
+      border-bottom:2px solid #000;
+      padding:6px 6px;
+      text-align:center;
+      font-weight:700;
+      font-size:11px;
+      text-transform:uppercase;
+    }
+
+    /* Optional: keep text crisp in print */
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  </style>
+</head>
+
+<body>
+  <div class="page">
+
+    <!-- LEFT: logo + infos -->
+    <div class="brand">
+      <div class="logo">
+        <img src="{{company.logo_url}}" alt="GreenPay" />
+      </div>
+
+      <div class="brand-info">
+        Tél : {{company.telephone}}<br>
+        {{company.bp}}<br>
+        CDI : {{company.adresse}}<br>
+        Régime d'imposition : {{company.regime}}
+      </div>
+    </div>
+
+    <!-- CENTER TITLE -->
+    <div class="title">
+      FICHE DE RECEPTION DE BIENS ET<br>
+      SERVICES
+    </div>
+
+    <!-- FORM -->
+    <div class="form">
+
+      <div class="row">
+        <div class="label">FOURNISSEUR :</div>
+        <div class="dots">{{reception.fournisseur}}</div>
+      </div>
+
+      <div class="row">
+        <div class="label">DESCRIPTION BIEN/PRESTATION :</div>
+        <div class="dots">{{reception.description}}</div>
+      </div>
+
+      <div class="row-full">
+        <div class="dots-full">{{reception.description_ligne2}}</div>
+        <div class="green-box"></div>
+      </div>
+
+      <div class="row">
+        <div class="label">REFERENCE FACTURE :</div>
+        <div class="dots">{{reception.reference_facture}}</div>
+      </div>
+
+      <div class="row">
+        <div class="label">MONTANT:</div>
+        <div class="dots">{{reception.montant}}</div>
+      </div>
+
+      <div class="row">
+        <div class="label">DATE DE RECEPTION:</div>
+        <div class="dots">{{reception.date_reception}}</div>
+      </div>
+
+      <div class="conforme">
+        <div>CONFORME A LA COMMANDE?</div>
+        <div class="spacer"></div>
+
+        <div class="choice">
+          <span>OUI</span>
+          <span class="box">{{#if reception.conforme}}X{{/if}}</span>
+
+          <span style="margin-left:14px;">NON</span>
+          <span class="box">{{#if reception.non_conforme}}X{{/if}}</span>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:18px;">
+        <div class="label">OBSERVATIONS :</div>
+        <div class="dots">{{reception.observations}}</div>
+      </div>
+
+      <div class="row">
+        <div class="label">RECU PAR :</div>
+        <div class="dots">{{reception.recu_par}}</div>
+      </div>
+
+    </div>
+
+    <!-- SIGNATURES -->
+    <div class="signatures">
+      <div class="sig">
+        <div class="sig-title">APPROBATION DIRECTION DEMANDEUSE</div>
+      </div>
+      <div class="sig">
+        <div class="sig-title">VISA DAF/DGA</div>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>

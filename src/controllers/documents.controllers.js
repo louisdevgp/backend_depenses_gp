@@ -3,9 +3,44 @@ const prisma = require("../config/prisma");
 // const { serializeBigInt } = require("../utils/jsonBigInt.utils");
 const { jsonSafe } = require("../utils/jsonSafe");
 const notifications = require("../services/notifications.services");
+const path = require("path");
+const fs = require("fs");
 
 function isNumericId(v) {
   return v !== null && v !== undefined && v !== "" && /^[0-9]+$/.test(String(v));
+}
+
+async function isAdminUserId(userId) {
+  const u = await prisma.users.findUnique({
+    where: { id: Number(userId) },
+    include: { user_roles: { include: { roles: true } } },
+  });
+  const roleNames = (u?.user_roles || []).map((ur) => ur?.roles?.name).filter(Boolean);
+  return roleNames.includes("ADMIN");
+}
+
+async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId, actionLabel }) {
+  if (!userId) return { ok: false, status: 401, message: "Unauthorized" };
+  if (!demandeId) return { ok: false, status: 400, message: "demande_id introuvable" };
+
+  if (await isAdminUserId(userId)) return { ok: true };
+
+  const demande = await prisma.demandes_paiement.findUnique({
+    where: { id: Number(demandeId) },
+    select: {
+      id: true,
+      demandeur_id: true,
+      agents_demandes_paiement_demandeur_idToagents: { select: { user_id: true } },
+    },
+  });
+  if (!demande) return { ok: false, status: 404, message: "Demande introuvable" };
+
+  const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
+  if (demandeurUserId != null && Number(demandeurUserId) === Number(userId)) return { ok: true };
+
+  if (agentId != null && Number(demande.demandeur_id) === Number(agentId)) return { ok: true };
+
+  return { ok: false, status: 403, message: `${actionLabel || "Action"} non autorisée` };
 }
 
 async function resolveDemandeIdFromBody(body) {
@@ -119,6 +154,15 @@ exports.uploadMany = async (req, res) => {
       });
     }
 
+    const demandeIdForAuth = await resolveDemandeIdFromBody(req.body);
+    const authz = await assertCanMutateDemandeContext({
+      userId,
+      agentId: agent.id,
+      demandeId: demandeIdForAuth,
+      actionLabel: "Ajout de document",
+    });
+    if (!authz.ok) return res.status(authz.status).json({ success: false, message: authz.message });
+
     const files = req.files || [];
     if (!files.length) throw new Error("Aucun fichier reçu (champ 'files')");
 
@@ -130,7 +174,7 @@ exports.uploadMany = async (req, res) => {
 
     // Notifications after commit (emails non-bloquants)
     try {
-      const demandeId = await resolveDemandeIdFromBody(req.body);
+      const demandeId = demandeIdForAuth;
 
       let excludeUserId = null;
       const uploader = await prisma.agents.findUnique({
@@ -199,16 +243,70 @@ exports.getById = async (req, res) => {
   }
 };
 
+exports.download = async (req, res) => {
+  try {
+    const doc = await documentsService.getDocumentById(req.params.id);
+    if (!doc) {
+      return res.status(404).json({ success: false, message: "Document not found" });
+    }
+
+    const url = String(doc.url || "");
+    // On stocke typiquement: /uploads/<filename>
+    const filename = path.basename(url);
+    if (!filename) {
+      return res.status(400).json({ success: false, message: "URL document invalide" });
+    }
+
+    const uploadDir = path.join(process.cwd(), "uploads");
+    const filePath = path.join(uploadDir, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: "Fichier introuvable sur le serveur" });
+    }
+
+    const contentType = doc.format || "application/octet-stream";
+    res.setHeader("Content-Type", contentType);
+    // inline => preview dans le navigateur, mais téléchargeable
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${String(doc.nom_fichier || filename).replace(/\"/g, "")}"`
+    );
+
+    return res.sendFile(filePath);
+  } catch (e) {
+    return res.status(400).json({ success: false, message: e.message });
+  }
+};
+
 exports.remove = async (req, res) => {
   try {
     const doc = await documentsService.getDocumentById(req.params.id);
+
+    const userId = req.user?.userId;
+    let agentId = null;
+    if (userId) {
+      const a = await prisma.agents.findFirst({
+        where: { user_id: Number(userId), deleted_at: null },
+        select: { id: true },
+      });
+      agentId = a?.id || null;
+    }
+
+    const demandeIdForAuth = await resolveDemandeIdFromDoc(doc);
+    const authz = await assertCanMutateDemandeContext({
+      userId,
+      agentId,
+      demandeId: demandeIdForAuth,
+      actionLabel: "Suppression de document",
+    });
+    if (!authz.ok) return res.status(authz.status).json({ success: false, message: authz.message });
+
     await documentsService.deleteDocument(req.params.id);
 
     // Notifications after commit (emails non-bloquants)
     try {
-      const demandeId = await resolveDemandeIdFromDoc(doc);
+      const demandeId = demandeIdForAuth;
       if (demandeId) {
-        const userId = req.user?.userId;
         const actor = userId
           ? await prisma.agents.findFirst({
               where: { user_id: Number(userId), deleted_at: null },

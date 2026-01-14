@@ -5,6 +5,7 @@ const c = require("../controllers/documents.controllers");
 
 router.post("/upload", auth, upload.array("files", 10), c.uploadMany);
 router.get("/", auth, c.list);
+router.get("/:id/download", auth, c.download);
 router.get("/:id", auth, c.getById);
 router.delete("/:id", auth, c.remove);
 

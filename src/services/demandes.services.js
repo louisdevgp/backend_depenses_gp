@@ -2,6 +2,63 @@ const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
 
+function withStatusCode(err, statusCode) {
+  err.statusCode = statusCode;
+  return err;
+}
+
+function getUserIdFromToken(user) {
+  const userId = user?.userId ?? user?.id;
+  return userId != null ? Number(userId) : null;
+}
+
+function isAdminUser({ tokenRoles = [], agentRoleName }) {
+  if (Array.isArray(tokenRoles) && tokenRoles.includes("ADMIN")) return true;
+  return String(agentRoleName || "").toUpperCase() === "ADMIN";
+}
+
+async function getDemandeurUserId(demandeId) {
+  const row = await prisma.demandes_paiement.findUnique({
+    where: { id: Number(demandeId) },
+    select: {
+      demandeur_id: true,
+      agents_demandes_paiement_demandeur_idToagents: { select: { user_id: true } },
+    },
+  });
+
+  const linkedUserId = row?.agents_demandes_paiement_demandeur_idToagents?.user_id;
+  if (linkedUserId != null) return Number(linkedUserId);
+
+  // Fallback legacy: si la relation est absente, on ne peut pas résoudre le user.
+  // Dans ce cas, on retourne null et on laisse l'appelant gérer un fallback.
+  return null;
+}
+
+async function assertCanEditDemande({ user, demande, action = "Modification" }) {
+  const actorUserId = getUserIdFromToken(user);
+  if (!actorUserId) throw withStatusCode(new Error("Unauthorized"), 401);
+
+  const agent = await getAgentFromUser(user);
+  const isAdmin = isAdminUser({ tokenRoles: user?.roles, agentRoleName: agent?.roles?.name });
+  if (isAdmin) return { agent };
+
+  const demandeurUserId = await getDemandeurUserId(demande.id);
+  if (demandeurUserId != null) {
+    if (Number(demandeurUserId) !== Number(actorUserId)) {
+      throw withStatusCode(new Error(`${action} non autorisée`), 403);
+    }
+    return { agent };
+  }
+
+  // Fallback ultime: compare via agent.id si on ne peut pas résoudre le user_id du demandeur.
+  const demandeurId = Number(demande.demandeur_id);
+  const isOwnerByAgentId = Number.isFinite(demandeurId) && demandeurId === Number(agent.id);
+  const isOwnerByUserId = Number.isFinite(demandeurId) && demandeurId === Number(actorUserId);
+  if (!isOwnerByAgentId && !isOwnerByUserId) throw withStatusCode(new Error(`${action} non autorisée`), 403);
+
+  return { agent };
+}
+
 function isNumericId(v) {
   return /^[0-9]+$/.test(String(v));
 }
@@ -241,6 +298,43 @@ function toStageStatus(roleName) {
   return `validation_${String(roleName).toLowerCase()}`;
 }
 
+function round2(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+}
+
+function normalizePaiementMode(raw) {
+  const s = String(raw || "").trim().toUpperCase();
+  if (!s) return "100/100";
+  if (s === "100/100" || s === "100_100" || s === "100-100") return "100/100";
+  if (s === "70/30" || s === "70_30" || s === "70-30") return "70/30";
+  if (s === "50/50" || s === "50_50" || s === "50-50") return "50/50";
+  return null;
+}
+
+function buildPaiementConditions({ total, mode }) {
+  const m = normalizePaiementMode(mode);
+  if (!m) throw new Error("Condition de paiement invalide (attendu: 70/30, 50/50, 100/100)");
+
+  const t = Number(total);
+  if (!Number.isFinite(t) || t <= 0) throw new Error("Montant demande invalide pour conditions de paiement");
+
+  if (m === "100/100") {
+    return [{ pourcentage: 100, montant_prevu: round2(t), label: "Tranche 1", condition_texte: "100/100" }];
+  }
+
+  const firstPct = m === "70/30" ? 70 : 50;
+  const secondPct = m === "70/30" ? 30 : 50;
+  const firstAmount = round2((t * firstPct) / 100);
+  const secondAmount = round2(t - firstAmount);
+
+  return [
+    { pourcentage: firstPct, montant_prevu: firstAmount, label: "Tranche 1", condition_texte: m },
+    { pourcentage: secondPct, montant_prevu: secondAmount, label: "Tranche 2", condition_texte: m },
+  ];
+}
+
 async function buildValidationStepsCreateInput(tx, demandeId, flow, demandeurAgent) {
   const steps = [];
 
@@ -324,6 +418,28 @@ exports.createDemande = async (user, payload) => {
       },
     });
 
+    // ✅ conditions de paiement (échéancier) - créé dès la création de la demande
+    // Règle: 100/100 = 1 tranche; 70/30 et 50/50 = 2 tranches (la plus grande en premier)
+    const paiementMode = normalizePaiementMode(payload.conditions_paiement_mode);
+    const conditions = buildPaiementConditions({ total: demande.montant, mode: paiementMode || "100/100" });
+
+    await tx.conditions_paiement.createMany({
+      data: conditions.map((c, idx) => ({
+        uuid: uuidv4(),
+        demande_id: demande.id,
+        label: c.label || `Tranche ${idx + 1}`,
+        type_echeance: "pourcentage",
+        pourcentage: c.pourcentage,
+        montant_prevu: c.montant_prevu,
+        date_echeance: null,
+        condition_texte: c.condition_texte,
+        statut: "prevu",
+        paiement_id: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      })),
+    });
+
     if (items.length) {
       await tx.demande_items.createMany({
         data: items.map((it) => ({
@@ -359,6 +475,7 @@ exports.createDemande = async (user, payload) => {
       where: { id: demande.id },
       include: {
         demande_items: true,
+        conditions_paiement: { orderBy: { id: "asc" } },
         validation_flows: { include: { validation_flow_steps: true } },
         validation_steps: { orderBy: { level: "asc" } },
         fournisseurs: true,
@@ -461,6 +578,7 @@ exports.getOne = async (idOrUuid) => {
     where: { ...where, deleted_at: null },
     include: {
       demande_items: true,
+      conditions_paiement: { orderBy: { id: "asc" } },
       fournisseurs: true,
       validation_flows: { include: { validation_flow_steps: { orderBy: { step_order: "asc" } } } },
       validation_steps: { orderBy: { level: "asc" } },
@@ -478,12 +596,8 @@ exports.getOne = async (idOrUuid) => {
 exports.update = async (user, idOrUuid, payload) => {
   const demande = await exports.getOne(idOrUuid);
 
-  // Autorisation: ADMIN ou demandeur uniquement
-  const agent = await getAgentFromUser(user);
-  const role = agent.roles?.name;
-  if (role !== "ADMIN" && demande.demandeur_id !== agent.id) {
-    throw new Error("Modification non autorisée");
-  }
+  // Autorisation: ADMIN ou demandeur uniquement (owner)
+  await assertCanEditDemande({ user, demande, action: "Modification" });
 
   // Verrouillage: la demande est "engagée" dès qu'une validation est passée
   // ou dès que le statut dépasse le stade initial.
@@ -499,7 +613,7 @@ exports.update = async (user, idOrUuid, payload) => {
     statut.startsWith("validation_");
 
   if (anyValidated > 0 || !isEditableStage) {
-    throw new Error("Demande verrouillée (engagée)");
+    throw withStatusCode(new Error("Demande verrouillée (engagée)"), 409);
   }
 
   const nextFournisseurId = payload.fournisseur_id !== undefined ? payload.fournisseur_id : demande.fournisseur_id;
@@ -598,12 +712,9 @@ exports.update = async (user, idOrUuid, payload) => {
 
 exports.softDelete = async (user, idOrUuid) => {
   const demande = await exports.getOne(idOrUuid);
-  const agent = await getAgentFromUser(user);
-  const role = agent.roles?.name;
 
-  if (role !== "ADMIN" && demande.demandeur_id !== agent.id) {
-    throw new Error("Suppression non autorisée");
-  }
+  // Autorisation: ADMIN ou demandeur uniquement (owner)
+  const { agent } = await assertCanEditDemande({ user, demande, action: "Suppression" });
 
   await prisma.demandes_paiement.update({
     where: { id: demande.id },

@@ -18,6 +18,7 @@ router.use("/bons-commande", require("../routes/bons-commandes.routes"));
 router.use("/receptions", require("../routes/receptions.routes"));
 router.use("/documents", require("../routes/documents.routes"));
 router.use("/paiements", require("../routes/paiements.routes"));
+router.use("/qr", require("../routes/qr.routes"));
 router.use("/stats", require("../routes/stats.routes"));
 router.use("/conditions-paiement", require("../routes/condtionsPaiement.routes"));
 router.use("/notifications", require("../routes/notifications.routes"));

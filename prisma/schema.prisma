@@ -403,6 +403,8 @@ model receptions {
   recu_par_id                                 Int               @db.UnsignedInt
   visa_directeur_id                           Int?              @db.UnsignedInt
   visa_daf_id                                 Int?              @db.UnsignedInt
+  visa_directeur_commentaire                  String?           @db.Text
+  visa_daf_commentaire                        String?           @db.Text
   signature_daf_url                           String?           @db.VarChar(500)
   signature_directeur_url                     String?           @db.VarChar(500)
   signature_recu_par_url                      String?           @db.VarChar(500)

@@ -7,7 +7,8 @@ exports.listMyPendingValidations = async (req, res) => {
 
 exports.approveStep = async (req, res) => {
   const { stepId } = req.params;
-  const result = await service.approveStep(stepId, req.user.userId);
+  const { commentaire, signature_data_url } = req.body || {};
+  const result = await service.approveStep(stepId, req.user.userId, commentaire, signature_data_url);
   res.json({ success: true, message: "Étape validée", data: result });
 };
 

@@ -61,7 +61,8 @@ exports.update = async (req, res) => {
     const result = await service.update(req.user, req.params.idOrUuid, req.body);
     return res.json({ success: true, data: result });
   } catch (e) {
-    return res.status(400).json({ success: false, message: e.message });
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message });
   }
 };
 
@@ -70,6 +71,7 @@ exports.softDelete = async (req, res) => {
     await service.softDelete(req.user, req.params.idOrUuid);
     return res.json({ success: true, message: "Demande désactivée (soft delete) ✅" });
   } catch (e) {
-    return res.status(400).json({ success: false, message: e.message });
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message });
   }
 };

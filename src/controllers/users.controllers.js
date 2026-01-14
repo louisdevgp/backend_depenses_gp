@@ -11,6 +11,11 @@ async function list(req, res) {
   return ok(res, data);
 }
 
+async function create(req, res) {
+  const data = await usersService.create(req.body, req.user.userId);
+  return res.status(201).json({ success: true, data });
+}
+
 async function getById(req, res) {
   const data = await usersService.getById(req.params.idOrUuid);
   return ok(res, data);
@@ -26,4 +31,9 @@ async function softDelete(req, res) {
   return ok(res, data);
 }
 
-module.exports = { me, list, getById, update, softDelete };
+async function adminResetPassword(req, res) {
+  const data = await usersService.adminResetPassword(req.params.idOrUuid, req.user.userId);
+  return ok(res, data);
+}
+
+module.exports = { me, list, create, getById, update, adminResetPassword, softDelete };

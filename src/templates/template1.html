@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DEMANDE DE PAIEMENT</title>
+    <style>
+      /* ===== A4 + rendu couleurs fidèle ===== */
+      @page {
+        size: A4;
+        margin: 12mm 12mm;
+      }
+
+      html,
+      body {
+        margin: 0;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+
+      /* ===== Base ===== */
+      body {
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        color: #111;
+      }
+
+      .container {
+        width: 100%;
+      }
+
+      /* ===== Header (fixe) ===== */
+      .header {
+        display: flex;
+        flex-direction: row;
+        justify-content: space-between;
+        gap: 8mm;
+        margin-top: 4mm;
+      }
+      
+      .logo {
+        width: 150px;
+        height: fit-content;
+      }
+
+      .org {
+        margin-top: 2mm;
+      }
+
+      .org p {
+        margin: 2px 0;
+      }
+
+      /* ===== Titre ===== */
+      .title-wrap {
+        display: flex;
+        justify-content: center;
+        margin: 6mm 0 2mm;
+      }
+
+      .title {
+        display: inline-block;
+        padding: 4px 12px;
+        border: 2px solid #000;
+        font-weight: 700;
+        font-size: 18px;
+        letter-spacing: 0.4px;
+        text-align: center;
+        min-width: 65%;
+      }
+
+      /* ===== Grilles ===== */
+      .main-grid {
+        display: grid;
+        grid-template-columns: 1fr 62mm;
+        column-gap: 10mm;
+        align-items: start;
+      }
+
+      .sign-bank-grid {
+        display: grid;
+        grid-template-columns: 1fr 62mm;
+        column-gap: 10mm;
+        align-items: stretch;
+        margin-top: 10mm;
+      }
+
+      /* ===== Montant (rail droit) ===== */
+      .amount-box {
+        border: 2px solid #000;
+        background: #fff;
+        width: 100%;
+        margin-top: 2mm;
+        margin-left: -10px;
+      }
+      .amount-box table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      .amount-box th,
+      .amount-box td {
+        border: 2px solid #000;
+        padding: 8px;
+        text-align: center;
+      }
+
+      .amount-box th {
+        font-weight: 700;
+      }
+
+      .amount-value {
+        font-size: 16px;
+        font-weight: 700;
+        min-height: 34mm;
+      }
+
+      /* ===== Détails (lignes pointillées) ===== */
+      .details {
+        margin-top: 1mm;
+      }
+
+      .row {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        margin: 6px 0;
+      }
+      
+      .label {
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .dotline {
+        position: relative;
+        flex: 1 1 auto;
+        border-bottom: 1px dotted #000;
+        min-height: 18px;
+        padding-bottom: 3px;
+      }
+      .value {
+        display: block;
+        line-height: 1.3;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .letters {
+        text-transform: uppercase;
+      }
+      .row.indent {
+        padding-left: 34mm;
+      } /* 2e ligne visuelle */
+      .row.split .dotline {
+        flex: 0 0 60mm;
+      } /* segments courts à droite */
+      .row.split .gap {
+        width: 16mm;
+        display: inline-block;
+      }
+
+      /* ===== Tableau signatures (manuel) ===== */
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+        margin-top: 0px;
+      }
+      .table,
+      .table td,
+      .table th {
+        border: 2px solid #000;
+      }
+      .table th,
+      .table td {
+        padding: 8px;
+        text-align: center;
+        vertical-align: top;
+        white-space: normal;
+        word-break: keep-all;
+        font-size: 10.5px;
+        min-height: 48px;
+      }
+      .table th {
+        white-space: nowrap;
+        font-size: 13px;
+        letter-spacing: 0.2px;
+      }
+
+      /* ===== Banque (manuel) ===== */
+      .banque-box {
+        border: 2px solid #000;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        background: #fff;
+        margin-top: -2mm;
+      }
+      .banque-box table {
+        width: 100%;
+        height: 100%;
+        border-collapse: collapse;
+        border: none;
+      }
+      .banque-box th,
+      .banque-box td {
+        border: 1px dotted #000;
+        padding: 8px;
+        text-align: left;
+      }
+      .banque-box h4 {
+        margin: 2px 0;
+        text-align: center;
+      }
+
+      /* ===== NB ===== */
+      .note {
+        font-weight: 700;
+        margin-top: 6px;
+      }
+
+      /* ===== Anti-cassures ===== */
+      table,
+      tr,
+      td,
+      th,
+      .main-grid,
+      .sign-bank-grid,
+      .banque-box {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      /* ===== CONTRÔLE DAF (petit tableau avec cases) ===== */
+      .controle-daf {
+        border: 2px solid #000;
+        width: 58%; /* taille compacte comme sur la photo */
+        margin-top: 6mm;
+        background: #fff;
+      }
+      .controle-daf .head {
+        border-bottom: 2px solid #000;
+        font-weight: 700;
+        text-align: center;
+        padding: 6px 4px;
+        font-size: 15px;
+      }
+      .controle-daf table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .controle-daf th,
+      .controle-daf td {
+        border: 1px solid #000;
+        font-size: 15px;
+        padding: 6px 4px;
+        text-align: center;
+      }
+      .controle-daf th.label {
+        text-align: left;
+        font-weight: 600;
+      }
+      .cb {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border: 1.6px solid #000;
+        margin-left: 6px;
+        vertical-align: middle;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <!-- HEADER (FIXE) -->
+      <div class="header">
+        <img
+          src="https://res.cloudinary.com/digitkbit/image/upload/v1744802840/logo_bdj4ks.png"
+          class="logo"
+          alt="Green - Pay"
+        />
+        <div class="org">
+          <p>Tél : 27 22 54 96 97</p>
+          <p>06 BP 6903 ABJ 06</p>
+          <p>CDI : CME COCODY DANGA</p>
+          <p>Régime d'imposition : RSI</p>
+        </div>
+      </div>
+
+      <!-- TITRE -->
+      <div class="title-wrap">
+        <div class="title">FICHE DE DEPENSES</div>
+      </div>
+
+      <!-- CONTENU + RAIL DROIT -->
+      <div class="main-grid">
+        <!-- Détails (montant en lettres variable, le reste à la main) -->
+        <div class="details">
+          <!-- Montant en lettres (2 lignes visuelles) -->
+          <div class="row">
+            <span class="label">MONTANT EN LETTRES :</span>
+            <span class="dotline"
+              ><span class="value">{{montant_lettres}}</span></span
+            >
+          </div>
+          <div class="row indent">
+            <span class="dotline"><span class="value"></span></span>
+          </div>
+
+          <!-- Motif (à la main) -->
+          <div class="row">
+            <span class="label">MOTIF :</span>
+            <span class="dotline"><span class="value">{{motif}}</span></span>
+          </div>
+          <div class="row indent">
+            <span class="dotline"><span class="value"></span></span>
+          </div>
+
+          <!-- Bénéficiaire (à la main) -->
+          <div class="row">
+            <span class="label">BÉNÉFICIAIRE :</span>
+            <span class="dotline"
+              ><span class="value">{{beneficiaire}}</span></span
+            >
+          </div>
+
+          <!-- CNI/Mle + Entreprise (à la main, deux segments) -->
+          <div class="row split">
+            <span class="label">N° CNI / Mle :</span>
+            <span class="dotline"><span class="value"></span></span>
+            <span class="gap"></span>
+            <span class="label">Entreprise :</span>
+            <span class="dotline"><span class="value"></span></span>
+            <span class="gap"></span>
+          </div>
+          <div class="row">
+            <span class="label">Remarque :</span>
+            <span class="dotline"><span class="value">{{note}}</span></span>
+          </div>
+        </div>
+
+        <!-- Rail droit : MONTANT (chiffres variables) -->
+        <div>
+          <div class="amount-box">
+            <table>
+              <tr>
+                <th>MONTANT</th>
+              </tr>
+              <tr>
+                <td class="amount-value">{{montant}} FCFA</td>
+              </tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== CONTRÔLE DAF ===== -->
+      <div class="controle-daf">
+        <div class="head">CONTRÔLE DAF</div>
+        <table>
+          <tr>
+            <th class="label">Prévu au budget?</th>
+            <td>OUI <span class="cb"></span></td>
+            <td>NON <span class="cb"></span></td>
+          </tr>
+          <tr>
+            <th class="label">Budget disponible ?</th>
+            <td>OUI <span class="cb"></span></td>
+            <td>NON <span class="cb"></span></td>
+          </tr>
+          <tr>
+            <th class="label">Paiement immédiat ?</th>
+            <td>OUI <span class="cb"></span></td>
+            <td>NON <span class="cb"></span></td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- SIGNATURES & BANQUE (à la main, alignés en hauteur) -->
+      <div class="sign-bank-grid">
+        <!-- Signatures -->
+        <div>
+          <table class="table">
+            <colgroup>
+              <col style="width: 20%" />
+              <col style="width: 20%" />
+              <col style="width: 20%" />
+              <col style="width: 20%" />
+              <col style="width: 20%" />
+            </colgroup>
+            <tr>
+              <th>DEMANDEUR</th>
+              <th>APPROBATION<br />DG</th>
+              <th>APPROBATION<br />DGA</th>
+              <th>APPROBATION<br />DAF</th>
+              <th>BÉNÉFICIAIRE</th>
+            </tr>
+            <tr>
+              <td style="height: 34mm"></td>
+              <td></td>
+              <td></td>
+              <td></td>
+              <td></td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Banque -->
+        <div>
+          <div class="banque-box">
+            <table>
+              <tr>
+                <th><h4>A remplir si Paiement immediat
+                </h4></th>
+              </tr>
+              <tr>
+                <td><strong>BANQUE :</strong></td>
+              </tr>
+              <tr>
+                <td><strong>N° Chèque :</strong></td>
+              </tr>
+              <tr>
+                <td><strong>Date :</strong></td>
+              </tr>
+              <tr>
+                <td><strong>Compte à débiter :</strong></td>
+              </tr>
+              <tr>
+                <td><strong>N° de pièce :</strong></td>
+              </tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- NB (fixe) -->
+      <!-- <p class="note">NB : Déchargez et retournez ce document</p> -->
+    </div>
+    <!-- /container -->
+  </body>
+</html>
