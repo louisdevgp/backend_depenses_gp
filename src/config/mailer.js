@@ -75,7 +75,7 @@ function getTransporter() {
   return transporter;
 }
 
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, cc, bcc, attachments }) {
   const fromName = getEnvAny(["MAIL_FROM_NAME", "SMTP_FROM_NAME", "EMAIL_FROM_NAME"]) || "GP Achats";
   const fromEmail =
     getEnvAny(["MAIL_FROM_EMAIL", "SMTP_FROM_EMAIL", "EMAIL_FROM_EMAIL"]) ||
@@ -100,9 +100,12 @@ async function sendMail({ to, subject, text, html }) {
   return t.sendMail({
     from: `"${fromName}" <${fromEmail}>`,
     to,
+    ...(cc ? { cc } : {}),
+    ...(bcc ? { bcc } : {}),
     subject,
     text,
     html,
+    ...(attachments?.length ? { attachments } : {}),
   });
 }
 

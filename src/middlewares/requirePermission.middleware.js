@@ -1,11 +1,16 @@
 const prisma = require("../config/prisma");
+const permissionMap = require("../config/permissions");
 
 const ROLE_IMPLICATIONS = {
-  // Director-level roles should satisfy "DIRECTEUR" checks
   DG: ["DIRECTEUR"],
   DGA: ["DIRECTEUR"],
   DAF: ["DIRECTEUR"],
 };
+
+function asArray(v) {
+  if (v == null) return [];
+  return Array.isArray(v) ? v : [v];
+}
 
 function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
@@ -13,7 +18,6 @@ function normalizeRoleName(role) {
 
 function expandRoles(roleNames) {
   const out = new Set((roleNames || []).map(normalizeRoleName).filter(Boolean));
-  // one-pass expansion is enough for our current mapping
   for (const r of Array.from(out)) {
     const implied = ROLE_IMPLICATIONS[r] || [];
     for (const ir of implied) out.add(normalizeRoleName(ir));
@@ -21,12 +25,12 @@ function expandRoles(roleNames) {
   return Array.from(out);
 }
 
-module.exports = (allowed = []) => {
-  const allowedArr = Array.isArray(allowed) ? allowed : [allowed];
+module.exports = (requiredPermissions = []) => {
+  const permissions = asArray(requiredPermissions).map((p) => String(p).trim()).filter(Boolean);
 
   return async (req, res, next) => {
     try {
-      const { userId } = req.user;
+      const { userId } = req.user || {};
       if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
 
       const user = await prisma.users.findUnique({
@@ -38,15 +42,32 @@ module.exports = (allowed = []) => {
         return res.status(401).json({ success: false, message: "Unauthorized" });
       }
 
-      const roleNamesRaw = (user.user_roles || []).map((ur) => ur.roles?.name).filter(Boolean);
+      const roleNamesRaw = (user.user_roles || []).map((ur) => normalizeRoleName(ur.roles?.name)).filter(Boolean);
       const roleNames = expandRoles(roleNamesRaw);
 
-      let ok = allowedArr.length === 0 ? true : allowedArr.some((r) => roleNames.includes(r));
+      // If no permissions requested, allow.
+      if (permissions.length === 0) {
+        req.user.roles = Array.from(new Set(roleNames));
+        req.user.delegatedRoles = [];
+        return next();
+      }
 
-      // ✅ Support délégations: un user sans le rôle peut accéder si une délégation active lui donne un rôle autorisé.
-      // (utile pour les profils qui valident via délégation)
+      // Check permissions using role mapping (any-of semantics).
+      let ok = false;
       let delegatedRoles = [];
-      if (!ok && allowedArr.length > 0) {
+
+      for (const perm of permissions) {
+        const allowedRoles = (permissionMap[perm] || []).map(normalizeRoleName).filter(Boolean);
+
+        // Unknown permission => forbid (safer than allowing).
+        if (!allowedRoles.length) continue;
+
+        if (allowedRoles.some((r) => roleNames.includes(r))) {
+          ok = true;
+          break;
+        }
+
+        // ✅ Support délégations: si une délégation active donne un rôle autorisé, l'accès est permis.
         const agent = await prisma.agents.findFirst({
           where: { user_id: Number(userId), deleted_at: null },
           select: { id: true },
@@ -60,15 +81,17 @@ module.exports = (allowed = []) => {
               is_active: true,
               start_at: { lte: now },
               end_at: { gte: now },
-              role_name: { in: allowedArr },
+              role_name: { in: allowedRoles },
             },
             select: { role_name: true },
           });
 
           delegatedRoles = Array.from(new Set(dels.map((d) => normalizeRoleName(d.role_name)).filter(Boolean)));
-          const delegatedExpanded = expandRoles(delegatedRoles);
-          delegatedRoles = delegatedExpanded;
-          ok = delegatedRoles.length > 0;
+          delegatedRoles = expandRoles(delegatedRoles);
+          if (delegatedRoles.length > 0) {
+            ok = true;
+            break;
+          }
         }
       }
 
@@ -76,7 +99,7 @@ module.exports = (allowed = []) => {
 
       req.user.roles = Array.from(new Set([...roleNames, ...delegatedRoles]));
       req.user.delegatedRoles = delegatedRoles;
-      next();
+      return next();
     } catch (e) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }

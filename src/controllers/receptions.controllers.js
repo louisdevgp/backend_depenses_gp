@@ -48,7 +48,7 @@ exports.getByUuid = async (req, res) => {
 
 exports.pdf = async (req, res) => {
   try {
-    await pdfService.streamReceptionPdf(res, req.params.idOrUuid);
+    await pdfService.streamReceptionPdf(res, req.params.idOrUuid, { req });
   } catch (e) {
     return res.status(404).json({ success: false, message: e.message });
   }

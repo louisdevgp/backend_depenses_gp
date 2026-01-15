@@ -1,6 +1,131 @@
 const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
+const { sendMail } = require("../config/mailer");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const { resolveUploadsPathFromUrl } = require("./signatures.services");
+
+function getEnvAny(keys) {
+  for (const k of keys) {
+    const v = process.env[k];
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return undefined;
+}
+
+function bytesFromMb(mb, fallback) {
+  const n = Number(mb);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.round(n * 1024 * 1024);
+}
+
+function safeFilename(doc) {
+  const name = doc?.nom_fichier ? String(doc.nom_fichier).trim() : "";
+  if (name) return name;
+  const url = doc?.url ? String(doc.url) : "document";
+  try {
+    const u = new URL(url);
+    const base = path.basename(u.pathname || "") || "document";
+    return base;
+  } catch {
+    const base = path.basename(url || "") || "document";
+    return base;
+  }
+}
+
+function normalizeUploadsUrlToLocalPath(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return null;
+
+  // already relative
+  if (raw.startsWith("/uploads/")) return resolveUploadsPathFromUrl(raw);
+
+  // absolute URL that points to /uploads/...
+  try {
+    const u = new URL(raw);
+    if (String(u.pathname || "").startsWith("/uploads/")) return resolveUploadsPathFromUrl(u.pathname);
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+async function buildAttachmentsFromDocuments(docs) {
+  const maxTotalBytes = bytesFromMb(getEnvAny(["MAIL_ATTACHMENTS_MAX_MB", "EMAIL_ATTACHMENTS_MAX_MB"]), 15 * 1024 * 1024);
+  const maxOneBytes = bytesFromMb(getEnvAny(["MAIL_ATTACHMENT_MAX_MB", "EMAIL_ATTACHMENT_MAX_MB"]), 10 * 1024 * 1024);
+
+  const attachments = [];
+  const skipped = [];
+  let total = 0;
+
+  for (const doc of docs || []) {
+    const url = doc?.url ? String(doc.url).trim() : "";
+    const filename = safeFilename(doc);
+    const contentType = doc?.format ? String(doc.format) : undefined;
+
+    try {
+      const localPath = normalizeUploadsUrlToLocalPath(url);
+      if (localPath && fs.existsSync(localPath)) {
+        const stat = fs.statSync(localPath);
+        const size = Number(stat.size || 0);
+        if (size <= 0) {
+          skipped.push({ filename, url, reason: "empty" });
+          continue;
+        }
+        if (size > maxOneBytes) {
+          skipped.push({ filename, url, reason: `too_large_single(${size})` });
+          continue;
+        }
+        if (total + size > maxTotalBytes) {
+          skipped.push({ filename, url, reason: `too_large_total(${total + size})` });
+          continue;
+        }
+
+        const content = await fs.promises.readFile(localPath);
+        attachments.push({ filename, content, ...(contentType ? { contentType } : {}) });
+        total += size;
+        continue;
+      }
+
+      // try remote fetch for http(s)
+      if (/^https?:\/\//i.test(url)) {
+        const res = await axios.get(url, {
+          responseType: "arraybuffer",
+          timeout: 30_000,
+          maxContentLength: maxOneBytes,
+        });
+        const buf = Buffer.from(res.data);
+        const size = buf.length;
+
+        if (size <= 0) {
+          skipped.push({ filename, url, reason: "empty" });
+          continue;
+        }
+        if (size > maxOneBytes) {
+          skipped.push({ filename, url, reason: `too_large_single(${size})` });
+          continue;
+        }
+        if (total + size > maxTotalBytes) {
+          skipped.push({ filename, url, reason: `too_large_total(${total + size})` });
+          continue;
+        }
+
+        attachments.push({ filename, content: buf, ...(contentType ? { contentType } : {}) });
+        total += size;
+        continue;
+      }
+
+      skipped.push({ filename, url, reason: "unhandled_url" });
+    } catch (e) {
+      skipped.push({ filename, url, reason: e?.message ? String(e.message) : "fetch_failed" });
+    }
+  }
+
+  return { attachments, skipped, totalBytes: total, maxTotalBytes };
+}
 
 function round2(v) {
   const n = Number(v);
@@ -284,7 +409,126 @@ async function createPaiement(payload, comptableAgentId) {
           ? `Votre demande a été payée. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
           : `Un paiement partiel a été enregistré. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
         meta: { paiementId: result.id, paiementUuid: result.uuid },
-        sendEmailNow: true,
+        sendEmailNow: false,
+      });
+    }
+  } catch {
+    // ignore email errors
+  }
+
+  // ✅ Email récap paiement + pièces jointes: documents de la demande
+  try {
+    const demande = await prisma.demandes_paiement.findUnique({
+      where: { id: Number(demande_id) },
+      select: {
+        id: true,
+        uuid: true,
+        motif: true,
+        montant: true,
+        devise: true,
+        beneficiaire: true,
+        agents_demandes_paiement_demandeur_idToagents: { select: { users: { select: { email: true } } } },
+      },
+    });
+
+    const demandeurEmail = demande?.agents_demandes_paiement_demandeur_idToagents?.users?.email
+      ? String(demande.agents_demandes_paiement_demandeur_idToagents.users.email)
+      : null;
+
+    const steps = await prisma.validation_steps.findMany({
+      where: { demande_id: Number(demande_id), status: "valide" },
+      select: {
+        role_name: true,
+        validated_by_id: true,
+        agents_validation_steps_validated_by_idToagents: { select: { users: { select: { email: true } } } },
+      },
+      orderBy: { level: "asc" },
+    });
+
+    const validatorEmails = Array.from(
+      new Set(
+        (steps || [])
+          .map((s) => s?.agents_validation_steps_validated_by_idToagents?.users?.email)
+          .filter(Boolean)
+          .map((e) => String(e).trim())
+      )
+    ).filter(Boolean);
+
+    // docs liés à la demande
+    const docs = await prisma.documents.findMany({
+      where: { demande_id: Number(demande_id) },
+      orderBy: { created_at: "asc" },
+      select: { id: true, url: true, nom_fichier: true, format: true, taille: true, type_document: true },
+    });
+
+    const { attachments, skipped, totalBytes, maxTotalBytes } = await buildAttachmentsFromDocuments(docs);
+
+    const recipients = [];
+    if (demandeurEmail) recipients.push(demandeurEmail);
+    for (const e of validatorEmails) recipients.push(e);
+    const uniqueRecipients = Array.from(new Set(recipients.map((x) => String(x).trim()).filter(Boolean)));
+
+    if (uniqueRecipients.length > 0) {
+      const subject = `GP Achats — Paiement effectué (Demande ${demande?.uuid || Number(demande_id)})`;
+
+      const validatorsLine = (steps || [])
+        .map((s) => (s?.role_name ? String(s.role_name) : null))
+        .filter(Boolean)
+        .join(" → ");
+
+      const montantLabel = demande?.montant != null ? String(demande.montant) : "";
+      const devise = demande?.devise ? String(demande.devise) : "XOF";
+
+      const docsListHtml = (docs || [])
+        .map((d) => {
+          const n = safeFilename(d);
+          const u = d?.url ? String(d.url) : "";
+          const t = d?.type_document ? String(d.type_document) : "document";
+          return `<li><b>${t}</b> — ${n}${u ? ` <span style=\"color:#666\">(${u})</span>` : ""}</li>`;
+        })
+        .join("");
+
+      const skippedHtml = skipped.length
+        ? `
+          <p style="margin-top:12px;color:#b45309"><b>Note:</b> certains documents n'ont pas pu être joints (taille/URL). Ils sont listés ci-dessus avec leurs liens.</p>
+          <p style="margin-top:6px;color:#666;font-size:12px">Taille jointe: ${(totalBytes / 1024 / 1024).toFixed(1)}MB / ${(maxTotalBytes / 1024 / 1024).toFixed(1)}MB</p>
+        `
+        : "";
+
+      const html = `
+        <div style="font-family:Arial,sans-serif;line-height:1.5">
+          <h2 style="margin:0 0 8px">Paiement effectué</h2>
+          <p style="margin:0 0 12px">Un paiement a été enregistré pour la demande <b>${demande?.uuid || Number(demande_id)}</b>.</p>
+          <ul style="margin:0 0 12px;padding-left:18px">
+            <li><b>Motif:</b> ${demande?.motif ? String(demande.motif) : "-"}</li>
+            <li><b>Bénéficiaire:</b> ${demande?.beneficiaire ? String(demande.beneficiaire) : "-"}</li>
+            <li><b>Montant demande:</b> ${montantLabel ? `${montantLabel} ${devise}` : "-"}</li>
+            <li><b>Type paiement:</b> ${payload?.type_paiement ? String(payload.type_paiement) : "-"}</li>
+            <li><b>Montant payé:</b> ${payload?.montant != null ? String(payload.montant) : "-"}</li>
+            <li><b>Moyen:</b> ${payload?.moyen_paiement ? String(payload.moyen_paiement) : "-"}</li>
+          </ul>
+          ${validatorsLine ? `<p style="margin:0 0 12px;color:#111"><b>Chaîne de validation:</b> ${validatorsLine}</p>` : ""}
+
+          <div style="margin-top:14px">
+            <div style="font-weight:700;margin-bottom:6px">Documents de la demande</div>
+            <ul style="margin:0;padding-left:18px">${docsListHtml || "<li>Aucun document</li>"}</ul>
+            ${skippedHtml}
+          </div>
+
+          <p style="margin-top:16px;color:#777">— GP Achats</p>
+        </div>
+      `;
+
+      // To = demandeur si dispo, sinon 1er validateur; CC = le reste
+      const to = demandeurEmail || uniqueRecipients[0];
+      const ccList = uniqueRecipients.filter((e) => e !== to);
+      await sendMail({
+        to,
+        ...(ccList.length ? { cc: ccList.join(",") } : {}),
+        subject,
+        text: `Paiement effectué pour la demande ${demande?.uuid || Number(demande_id)}.`,
+        html,
+        attachments,
       });
     }
   } catch {

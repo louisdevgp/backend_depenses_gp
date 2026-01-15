@@ -89,6 +89,8 @@ function subjectForType(type, meta) {
       return `GP Achats — Demande rejetée${m.role ? ` (${m.role})` : ""}`;
     case "paiement_effectue":
       return "GP Achats — Paiement effectué";
+    case "paiement_pending":
+      return "GP Achats — Paiement à effectuer";
     case "paiement_updated":
       return "GP Achats — Paiement modifié";
     case "paiement_deleted":

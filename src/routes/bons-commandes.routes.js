@@ -1,21 +1,22 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
-const requireRole = require("../middlewares/requireRole.middleware");
+const requirePermission = require("../middlewares/requirePermission.middleware");
 const ctrl = require("../controllers/bons-commandes.controllers");
+const P = require("../constants/permissions");
 
 // Base: /api/bon-commandes
-router.post("/", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"]), ctrl.create);
-router.get("/", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"]), ctrl.list);
+router.post("/", auth, requirePermission(P.BON_COMMANDE_CREATE), ctrl.create);
+router.get("/", auth, requirePermission(P.BON_COMMANDE_LIST), ctrl.list);
 
 // utiles dans le flow demande -> BC
-router.get("/by-uuid/:uuid", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"]), ctrl.getByUuid);
-router.get("/:idOrUuid/pdf", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"]), ctrl.pdf);
-router.get("/:id", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"]), ctrl.getById);
+router.get("/by-uuid/:uuid", auth, requirePermission(P.BON_COMMANDE_GET), ctrl.getByUuid);
+router.get("/:idOrUuid/pdf", auth, requirePermission(P.BON_COMMANDE_PDF), ctrl.pdf);
+router.get("/:id", auth, requirePermission(P.BON_COMMANDE_GET), ctrl.getById);
 
-router.put("/:id", auth, requireRole(["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"]), ctrl.update);
-router.patch("/:id/cancel", auth, requireRole(["DAF", "DGA", "DG", "ADMIN"]), ctrl.cancel);
+router.put("/:id", auth, requirePermission(P.BON_COMMANDE_UPDATE), ctrl.update);
+router.patch("/:id/cancel", auth, requirePermission(P.BON_COMMANDE_CANCEL), ctrl.cancel);
 
 // optionnel
-router.delete("/:id", auth, requireRole(["ADMIN"]), ctrl.remove);
+router.delete("/:id", auth, requirePermission(P.BON_COMMANDE_DELETE), ctrl.remove);
 
 module.exports = router;

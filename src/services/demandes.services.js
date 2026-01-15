@@ -538,6 +538,7 @@ exports.listDemandes = async (query) => {
     orderBy: { created_at: "desc" },
     include: {
       fournisseurs: true,
+      conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       documents: true,
     },
@@ -551,6 +552,7 @@ exports.listMyDemandes = async (user) => {
     orderBy: { created_at: "desc" },
     include: {
       fournisseurs: true,
+      conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
       documents: true,
@@ -564,6 +566,7 @@ exports.listByDemandeur = async (demandeurId) => {
     orderBy: { created_at: "desc" },
     include: {
       fournisseurs: true,
+      conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
       documents: true,
@@ -630,32 +633,81 @@ exports.update = async (user, idOrUuid, payload) => {
     if (!beneficiaireFinal) throw new Error("beneficiaire requis");
   }
 
-  const updated = await prisma.demandes_paiement.update({
-    where: { id: demande.id },
-    data: {
-      motif: payload.motif ?? demande.motif,
-      description: payload.description ?? demande.description,
-      montant: payload.montant ?? demande.montant,
-      devise: payload.devise ?? demande.devise,
-      taux_change: payload.taux_change ?? demande.taux_change,
-      montant_base: payload.montant_base ?? demande.montant_base,
-      beneficiaire: beneficiaireFinal,
-      fournisseur_id: payload.fournisseur_id ?? demande.fournisseur_id,
-      remarque: payload.remarque ?? demande.remarque,
-      direction_id: payload.direction_id ?? demande.direction_id,
-      departement_id: payload.departement_id ?? demande.departement_id,
-      service_id: payload.service_id ?? demande.service_id,
-      budget_prevu: payload.budget_prevu ?? demande.budget_prevu,
-      budget_disponible: payload.budget_disponible ?? demande.budget_disponible,
-      paiement_immediat: payload.paiement_immediat ?? demande.paiement_immediat,
-      updated_at: new Date(),
-    },
-    include: {
-      demande_items: true,
-      validation_steps: { orderBy: { level: "asc" } },
-      fournisseurs: true,
-      documents: true,
-    },
+  const updated = await prisma.$transaction(async (tx) => {
+    const updatedDemande = await tx.demandes_paiement.update({
+      where: { id: demande.id },
+      data: {
+        motif: payload.motif ?? demande.motif,
+        description: payload.description ?? demande.description,
+        montant: payload.montant ?? demande.montant,
+        devise: payload.devise ?? demande.devise,
+        taux_change: payload.taux_change ?? demande.taux_change,
+        montant_base: payload.montant_base ?? demande.montant_base,
+        beneficiaire: beneficiaireFinal,
+        fournisseur_id: payload.fournisseur_id ?? demande.fournisseur_id,
+        remarque: payload.remarque ?? demande.remarque,
+        direction_id: payload.direction_id ?? demande.direction_id,
+        departement_id: payload.departement_id ?? demande.departement_id,
+        service_id: payload.service_id ?? demande.service_id,
+        budget_prevu: payload.budget_prevu ?? demande.budget_prevu,
+        budget_disponible: payload.budget_disponible ?? demande.budget_disponible,
+        paiement_immediat: payload.paiement_immediat ?? demande.paiement_immediat,
+        updated_at: new Date(),
+      },
+    });
+
+    // ✅ Modification des conditions de paiement (échéancier) tant que la demande n'est pas engagée.
+    // On recalcule et remplace les tranches "prevu" non associées à un paiement.
+    if (payload.conditions_paiement_mode !== undefined) {
+      const paidOrLinked = await tx.conditions_paiement.count({
+        where: {
+          demande_id: demande.id,
+          OR: [{ paiement_id: { not: null } }, { statut: { in: ["paye", "payé", "regle", "réglé"] } }],
+        },
+      });
+      if (paidOrLinked > 0) throw withStatusCode(new Error("Conditions de paiement déjà engagées"), 409);
+
+      const paiementMode = normalizePaiementMode(payload.conditions_paiement_mode);
+      if (!paiementMode) throw withStatusCode(new Error("Condition de paiement invalide (attendu: 70/30, 50/50, 100/100)"), 400);
+
+      const conditions = buildPaiementConditions({ total: updatedDemande.montant, mode: paiementMode });
+
+      await tx.conditions_paiement.deleteMany({
+        where: {
+          demande_id: demande.id,
+          paiement_id: null,
+          statut: "prevu",
+        },
+      });
+
+      await tx.conditions_paiement.createMany({
+        data: conditions.map((c, idx) => ({
+          uuid: uuidv4(),
+          demande_id: demande.id,
+          label: c.label || `Tranche ${idx + 1}`,
+          type_echeance: "pourcentage",
+          pourcentage: c.pourcentage,
+          montant_prevu: c.montant_prevu,
+          date_echeance: null,
+          condition_texte: c.condition_texte,
+          statut: "prevu",
+          paiement_id: null,
+          created_at: new Date(),
+          updated_at: new Date(),
+        })),
+      });
+    }
+
+    return tx.demandes_paiement.findUnique({
+      where: { id: demande.id },
+      include: {
+        demande_items: true,
+        conditions_paiement: { orderBy: { id: "asc" } },
+        validation_steps: { orderBy: { level: "asc" } },
+        fournisseurs: true,
+        documents: true,
+      },
+    });
   });
 
   // Notifications after commit (emails non-bloquants)

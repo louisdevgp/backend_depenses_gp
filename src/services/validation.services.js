@@ -2,6 +2,39 @@ const prisma = require("../config/prisma");
 const notifications = require("./notifications.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
 
+function getEnvAny(keys) {
+  for (const k of keys) {
+    const v = process.env[k];
+    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+  }
+  return undefined;
+}
+
+function parseCsvUpper(value) {
+  if (!value) return [];
+  return String(value)
+    .split(",")
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+    .map((s) => s.toUpperCase());
+}
+
+async function getPayeurUserIds() {
+  const roleNames =
+    parseCsvUpper(getEnvAny(["PAYEUR_NOTIFY_ROLES", "PAYEUR_ROLES_NOTIFY"])) || [];
+  const roles = roleNames.length ? roleNames : ["DAF", "COMPTABLE"];
+
+  const rows = await prisma.user_roles.findMany({
+    where: {
+      roles: { name: { in: roles }, deleted_at: null, is_active: true },
+      users: { is_active: true, deleted_at: null },
+    },
+    select: { user_id: true },
+  });
+
+  return Array.from(new Set(rows.map((r) => r.user_id).filter(Boolean)));
+}
+
 function parseScope(scopeRaw) {
   if (scopeRaw == null) return null;
   const s = String(scopeRaw).trim();
@@ -303,6 +336,42 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null)
             demande_id: result.demandeId,
             message: `Une demande est en attente de validation (délégation: ${result.nextRole}).`,
             meta: { stepId: result.nextStepId, role: result.nextRole, delegated: true, demandeUuid: result.demandeUuid, validationUuid: result.nextStepUuid },
+            sendEmailNow: true,
+          });
+        }
+      }
+    }
+
+    // ✅ Demande entièrement approuvée => informer les payeurs (DAF/COMPTABLE)
+    if (result?.stage?.statut === "approuvee" && result?.demandeId) {
+      const payeurUserIds = await getPayeurUserIds();
+      if (payeurUserIds.length > 0) {
+        const demande = await prisma.demandes_paiement.findUnique({
+          where: { id: Number(result.demandeId) },
+          select: { uuid: true, motif: true, montant: true, devise: true, beneficiaire: true },
+        });
+
+        const demandeUuid = demande?.uuid || result.demandeUuid || null;
+        const labelMontant = demande?.montant != null ? String(demande.montant) : "";
+        const devise = demande?.devise ? String(demande.devise) : "";
+        const message = `Une demande est maintenant approuvée et peut être payée.${demandeUuid ? ` UUID: ${demandeUuid}.` : ""}${
+          demande?.motif ? ` Motif: ${String(demande.motif)}` : ""
+        }${labelMontant ? ` — Montant: ${labelMontant}${devise ? ` ${devise}` : ""}` : ""}`;
+
+        for (const uid of payeurUserIds) {
+          if (uid === result.demandeurUserId) continue;
+          await notifications.createNotification({
+            user_id: uid,
+            type: "paiement_pending",
+            demande_id: result.demandeId,
+            message,
+            meta: {
+              demandeUuid,
+              motif: demande?.motif || null,
+              montant: demande?.montant != null ? String(demande.montant) : null,
+              devise: demande?.devise || null,
+              beneficiaire: demande?.beneficiaire || null,
+            },
             sendEmailNow: true,
           });
         }

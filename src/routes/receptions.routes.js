@@ -1,19 +1,20 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
-const requireRole = require("../middlewares/requireRole.middleware");
+const requirePermission = require("../middlewares/requirePermission.middleware");
 const c = require("../controllers/receptions.controllers");
+const P = require("../constants/permissions");
 
 // CRUD
-router.post("/", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "COMPTABLE", "ADMIN"]), c.create);
-router.get("/", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"]), c.list);
-router.get("/:idOrUuid/pdf", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"]), c.pdf);
-router.get("/uuid/:uuid", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"]), c.getByUuid);
-router.get("/:id", auth, requireRole(["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"]), c.getById);
-router.put("/:id", auth, requireRole(["DEMANDEUR", "COMPTABLE", "DAF", "ADMIN"]), c.update);
-router.delete("/:id", auth, requireRole(["DEMANDEUR", "COMPTABLE", "DAF", "ADMIN"]), c.remove);
+router.post("/", auth, requirePermission(P.RECEPTION_CREATE), c.create);
+router.get("/", auth, requirePermission(P.RECEPTION_LIST), c.list);
+router.get("/:idOrUuid/pdf", auth, requirePermission(P.RECEPTION_PDF), c.pdf);
+router.get("/uuid/:uuid", auth, requirePermission(P.RECEPTION_GET), c.getByUuid);
+router.get("/:id", auth, requirePermission(P.RECEPTION_GET), c.getById);
+router.put("/:id", auth, requirePermission(P.RECEPTION_UPDATE), c.update);
+router.delete("/:id", auth, requirePermission(P.RECEPTION_DELETE), c.remove);
 
 // Visas
-router.post("/:id/visa-directeur", auth, requireRole(["DIRECTEUR", "ADMIN"]), c.visaDirecteur);
-router.post("/:id/visa-daf", auth, requireRole(["DAF", "ADMIN"]), c.visaDaf);
+router.post("/:id/visa-directeur", auth, requirePermission(P.RECEPTION_VISA_DIRECTEUR), c.visaDirecteur);
+router.post("/:id/visa-daf", auth, requirePermission(P.RECEPTION_VISA_DAF), c.visaDaf);
 
 module.exports = router;

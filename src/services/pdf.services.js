@@ -78,15 +78,33 @@ function mustGetEnv(name, fallbacks = []) {
 }
 
 function getFrontendBaseUrl() {
-  const raw =
-    mustGetEnv("QR_BASE_URL", ["FRONTEND_URL", "APP_FRONTEND_URL", "DASHBOARD_URL", "WEB_URL"]) ||
-    "http://localhost:5173";
-  return String(raw).replace(/\/+$/, "");
+  const raw = mustGetEnv("QR_BASE_URL", ["FRONTEND_URL", "APP_FRONTEND_URL", "DASHBOARD_URL", "WEB_URL"]);
+  if (raw) return String(raw).replace(/\/+$/, "");
+  return "http://localhost:5173";
 }
 
-function buildScanUrl(token) {
+function inferFrontendBaseUrlFromReq(req) {
+  try {
+    const origin = req?.headers?.origin || req?.headers?.Origin;
+    if (origin) {
+      const u = new URL(String(origin));
+      return `${u.protocol}//${u.host}`.replace(/\/+$/, "");
+    }
+
+    const referer = req?.headers?.referer || req?.headers?.referrer;
+    if (referer) {
+      const u = new URL(String(referer));
+      return `${u.protocol}//${u.host}`.replace(/\/+$/, "");
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function buildScanUrl(token, req) {
   if (!token) return null;
-  const base = getFrontendBaseUrl();
+  const base = inferFrontendBaseUrlFromReq(req) || getFrontendBaseUrl();
   if (!base) return null;
   return `${base}/scan?token=${encodeURIComponent(String(token))}`;
 }
@@ -699,12 +717,12 @@ async function getReceptionData(idOrUuid) {
   return reception;
 }
 
-async function streamDemandePdf(res, idOrUuid) {
+async function streamDemandePdf(res, idOrUuid, { req } = {}) {
   const d = await getDemandeData(idOrUuid);
-  return streamDemandePdfFromData(res, d);
+  return streamDemandePdfFromData(res, d, { req });
 }
 
-async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFinalizedAt = null } = {}) {
+async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFinalizedAt = null, req = null } = {}) {
   const filename = `demande_${d.uuid}.pdf`;
 
   const isFinal = forceFinal ? true : isDemandeFullyValidated(d);
@@ -714,7 +732,7 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
   const sig = isFinal ? hmacSignature(tokenBase) : null;
   const token = isFinal && sig ? `${tokenBase}|${sig}` : null;
   const ref = sig ? String(sig).slice(0, 16) : null;
-  const qrText = token ? buildScanUrl(token) || token : null;
+  const qrText = token ? buildScanUrl(token, req) || token : null;
   const qrBuf = qrText ? await qrPngBuffer(qrText) : null;
 
   const template = loadTemplateHtml("template1.html");
@@ -849,18 +867,18 @@ async function streamBonCommandePdf(res, idOrUuid) {
   return sendPdfBuffer(res, filename, pdfBuffer);
 }
 
-async function streamReceptionPdf(res, idOrUuid) {
+async function streamReceptionPdf(res, idOrUuid, { req } = {}) {
   const r = await getReceptionData(idOrUuid);
   if (!isReceptionFullyVised(r)) {
     throw new Error("PDF indisponible: la réception doit être visée par le Directeur et le DAF");
   }
-  return streamReceptionPdfFromData(res, r);
+  return streamReceptionPdfFromData(res, r, { req });
 }
 
 async function streamReceptionPdfFromData(
   res,
   r,
-  { forceFinal = false, forcedFinalizedAt = null } = {}
+  { forceFinal = false, forcedFinalizedAt = null, req = null } = {}
 ) {
   const filename = `reception_${r.uuid}.pdf`;
 
@@ -870,7 +888,7 @@ async function streamReceptionPdfFromData(
   const sig = isFinal ? hmacSignature(tokenBase) : null;
   const token = isFinal && sig ? `${tokenBase}|${sig}` : null;
   const ref = sig ? String(sig).slice(0, 16) : null;
-  const qrText = token ? buildScanUrl(token) || token : null;
+  const qrText = token ? buildScanUrl(token, req) || token : null;
   const qrBuf = qrText ? await qrPngBuffer(qrText) : null;
 
   sendPdf(res, filename, (doc) => {
