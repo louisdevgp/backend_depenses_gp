@@ -21,6 +21,17 @@ Objectif: aligner l’implémentation sur la procédure d’achat Green Pay (Dem
 - [x] Renforcer les guards par route (ex: qui peut créer BC, visa directeur/DAF, payer, etc.)
 - [ ] S’assurer que le token contient `userId` (et idéalement `agentId`), et documenter le payload JWT
 
+### 2.1) Permissions gérées en base (solution "propre")
+- [x] Ajouter les tables `permissions` + `role_permissions` (Prisma)
+- [x] Seeder idempotent: `node src/prisma/seed-permissions.js` (ou `npm.cmd run seed:permissions`)
+- [x] Middleware `requirePermission` lit la DB (fallback vers mapping code si tables absentes)
+- [x] Endpoints admin (ADMIN only):
+	- `GET /api/permissions`
+	- `GET /api/permissions/roles/:roleId`
+	- `PUT /api/permissions/roles/:roleId` { permissionCodes: string[] }
+
+Note Windows/PowerShell: si `npm`/`npx` est bloqué (ExecutionPolicy), utiliser `npm.cmd` et `prisma.cmd`.
+
 ## 3) Circuit de validation (selon rôle du demandeur)
 - [x] Aligner le circuit de validation: RESPONSABLE → DIRECTEUR → DAF → DGA → DG (DG & DGA = approbation finale)
 - [x] Vérifier la résolution hiérarchique (manager_id / manager du manager) pour RESPONSABLE/DIRECTEUR

@@ -3,6 +3,9 @@ const P = require("../constants/permissions");
 // Permission -> roles allowed to perform the action.
 // Keep this small and explicit; it's easy to extend later.
 module.exports = {
+  // RBAC management
+  [P.PERMISSIONS_MANAGE]: ["ADMIN"],
+
   // Receptions (CRUD)
   [P.RECEPTION_CREATE]: ["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "COMPTABLE", "ADMIN"],
   [P.RECEPTION_LIST]: ["DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE", "ADMIN"],

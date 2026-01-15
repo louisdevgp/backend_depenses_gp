@@ -436,9 +436,43 @@ model roles {
   deleted_at  DateTime?    @db.DateTime(0)
   agents      agents[]
   user_roles  user_roles[]
+  role_permissions role_permissions[]
 
   @@index([is_active], map: "idx_roles_active")
   @@index([deleted_at], map: "idx_roles_deleted")
+}
+
+model permissions {
+  id         Int       @id @default(autoincrement()) @db.UnsignedInt
+  uuid       String    @unique(map: "uk_permissions_uuid") @db.Char(36)
+  code       String    @unique(map: "uk_permissions_code") @db.VarChar(100)
+  label      String?   @db.VarChar(150)
+  created_at DateTime  @default(now()) @db.DateTime(0)
+  updated_at DateTime  @default(now()) @db.DateTime(0)
+  is_active  Boolean   @default(true)
+  deleted_at DateTime? @db.DateTime(0)
+
+  role_permissions role_permissions[]
+
+  @@index([is_active], map: "idx_permissions_active")
+  @@index([deleted_at], map: "idx_permissions_deleted")
+}
+
+model role_permissions {
+  id            Int       @id @default(autoincrement()) @db.UnsignedInt
+  uuid          String    @unique(map: "uk_role_permissions_uuid") @db.Char(36)
+  role_id       Int       @db.UnsignedInt
+  permission_id Int       @db.UnsignedInt
+  created_at    DateTime  @default(now()) @db.DateTime(0)
+  deleted_at    DateTime? @db.DateTime(0)
+
+  roles       roles       @relation(fields: [role_id], references: [id], map: "fk_rp_role")
+  permissions permissions @relation(fields: [permission_id], references: [id], map: "fk_rp_permission")
+
+  @@unique([role_id, permission_id], map: "uk_role_permission_pair")
+  @@index([role_id], map: "idx_rp_role")
+  @@index([permission_id], map: "idx_rp_permission")
+  @@index([deleted_at], map: "idx_rp_deleted")
 }
 
 model services {

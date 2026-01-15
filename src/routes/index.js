@@ -11,6 +11,7 @@ router.use("/auth", require("../routes/auth.routes"));
 router.use("/users", require("../routes/users.routes"));
 router.use("/agents", require("../routes/agents.routes"));
 router.use("/roles", require("../routes/roles.routes"));
+router.use("/permissions", require("../routes/permissions.routes"));
 router.use("/validation-flows", require("../routes/validationFlows.routes"));
 router.use("/validations", require("../routes/validation.routes"));
 router.use("/demandes", require("../routes/demandes.routes"));
