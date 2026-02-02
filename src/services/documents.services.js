@@ -11,7 +11,6 @@ async function createDocumentsFromUploads({ files, body, upload_by_id, req }) {
     demande_id = null,
     reception_id = null,
     paiement_id = null,
-    bon_commande_id = null,
     type_document,
   } = body;
 
@@ -22,7 +21,6 @@ async function createDocumentsFromUploads({ files, body, upload_by_id, req }) {
     demande_id: demande_id ? Number(demande_id) : null,
     reception_id: reception_id ? Number(reception_id) : null,
     paiement_id: paiement_id ? Number(paiement_id) : null,
-    bon_commande_id: bon_commande_id ? Number(bon_commande_id) : null,
     type_document,
     // si tu veux URL relative:
     url: `/uploads/${f.filename}`,
@@ -44,7 +42,7 @@ async function createDocumentsFromUploads({ files, body, upload_by_id, req }) {
 
 async function listDocuments(filters = {}) {
   const where = {};
-  for (const key of ["demande_id", "reception_id", "paiement_id", "bon_commande_id"]) {
+  for (const key of ["demande_id", "reception_id", "paiement_id"]) {
     if (filters[key] != null) where[key] = Number(filters[key]);
   }
   if (filters.type_document) where.type_document = filters.type_document;

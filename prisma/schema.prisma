@@ -7,6 +7,11 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum ReceptionPhase {
+  AVANT_PAIEMENT
+  APRES_PAIEMENT
+}
+
 model agent_reporting_lines {
   id                                                 Int       @id @default(autoincrement()) @db.UnsignedInt
   uuid                                               String    @unique(map: "uk_arl_uuid") @db.Char(36)
@@ -133,7 +138,6 @@ model conditions_paiement {
   uuid              String            @unique(map: "uk_cp_uuid") @db.Char(36)
   demande_id        Int               @db.UnsignedInt
   label             String            @db.VarChar(100)
-  type_echeance     String            @db.VarChar(50)
   pourcentage       Decimal?          @db.Decimal(5, 2)
   montant_prevu     Decimal?          @db.Decimal(18, 2)
   date_echeance     DateTime?         @db.Date
@@ -193,6 +197,9 @@ model demandes_paiement {
   motif                                            String                @db.VarChar(255)
   description                                      String?               @db.Text
   montant                                          Decimal               @db.Decimal(18, 2)
+  remise_type                                      String?               @db.VarChar(20)
+  remise_valeur                                    Decimal?              @db.Decimal(18, 2)
+  montant_net                                      Decimal?              @db.Decimal(18, 2)
   devise                                           String?               @db.VarChar(10)
   taux_change                                      Decimal?              @db.Decimal(18, 6)
   montant_base                                     Decimal?              @db.Decimal(18, 2)
@@ -207,6 +214,7 @@ model demandes_paiement {
   budget_prevu                                     Boolean?
   budget_disponible                                Boolean?
   paiement_immediat                                Boolean?
+  daf_critere4                                     String?               @db.VarChar(50)
   ajournee                                         Boolean               @default(false)
   ajournee_le                                      DateTime?             @db.DateTime(0)
   ajournee_par_id                                  Int?                  @db.UnsignedInt
@@ -386,13 +394,16 @@ model paiements {
 
   @@index([comptable_id], map: "idx_paiement_comptable")
   @@index([demande_id], map: "idx_paiement_demande")
+  receptions receptions[]
 }
 
 model receptions {
   id                                          Int               @id @default(autoincrement()) @db.UnsignedInt
   uuid                                        String            @unique(map: "uk_receptions_uuid") @db.Char(36)
   demande_id                                  Int               @db.UnsignedInt
+  paiement_id                                 Int?              @db.UnsignedInt
   bon_commande_id                             Int?              @db.UnsignedInt
+  phase                                       ReceptionPhase    @default(APRES_PAIEMENT)
   fournisseur                                 String            @db.VarChar(255)
   description                                 String            @db.VarChar(500)
   reference_facture                           String?           @db.VarChar(100)
@@ -413,12 +424,15 @@ model receptions {
   documents                                   documents[]
   bons_commande                               bons_commande?    @relation(fields: [bon_commande_id], references: [id], map: "fk_reception_bc")
   demandes_paiement                           demandes_paiement @relation(fields: [demande_id], references: [id], onDelete: Cascade, map: "fk_reception_demande")
+  // paiements?                                  paiements?        @relation(fields: [paiement_id], references: [id])
+  paiements_reception                        paiements?        @relation(fields: [paiement_id], references: [id])
   agents_receptions_recu_par_idToagents       agents            @relation("receptions_recu_par_idToagents", fields: [recu_par_id], references: [id], map: "fk_reception_recu_par")
   agents_receptions_visa_daf_idToagents       agents?           @relation("receptions_visa_daf_idToagents", fields: [visa_daf_id], references: [id], map: "fk_reception_visa_daf")
   agents_receptions_visa_directeur_idToagents agents?           @relation("receptions_visa_directeur_idToagents", fields: [visa_directeur_id], references: [id], map: "fk_reception_visa_directeur")
 
   @@index([bon_commande_id], map: "idx_reception_bc")
   @@index([demande_id], map: "idx_reception_demande")
+  @@index([paiement_id], map: "idx_reception_paiement")
   @@index([recu_par_id], map: "idx_reception_recu_par")
   @@index([visa_daf_id], map: "idx_reception_visa_daf")
   @@index([visa_directeur_id], map: "idx_reception_visa_directeur")

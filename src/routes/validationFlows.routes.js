@@ -1,20 +1,21 @@
 const router = require("express").Router();
 const requireAuth = require("../middlewares/auth.middleware");
-const requireRole = require("../middlewares/requireRole.middleware");
+const requirePermission = require("../middlewares/requirePermission.middleware");
+const P = require("../constants/permissions");
 const ctrl = require("../controllers/validationFlows.controllers");
 
 router.use(requireAuth);
 
-router.post("/", requireRole(["ADMIN"]), ctrl.createFlow);
+router.post("/", requirePermission([P.VALIDATION_FLOWS_MANAGE]), ctrl.createFlow);
 router.get("/", ctrl.listFlows);
 router.get("/:id", ctrl.getFlowById);
-router.put("/:id", requireRole(["ADMIN"]), ctrl.updateFlow);
-router.delete("/:id", requireRole(["ADMIN"]), ctrl.disableFlow);
+router.put("/:id", requirePermission([P.VALIDATION_FLOWS_MANAGE]), ctrl.updateFlow);
+router.delete("/:id", requirePermission([P.VALIDATION_FLOWS_MANAGE]), ctrl.disableFlow);
 
 // steps
-router.post("/:id/steps", requireRole(["ADMIN"]), ctrl.addStep);
-router.put("/:id/steps/:stepId", requireRole(["ADMIN"]), ctrl.updateStep);
-router.delete("/:id/steps/:stepId", requireRole(["ADMIN"]), ctrl.deleteStep);
-router.post("/:id/steps/reorder", requireRole(["ADMIN"]), ctrl.reorderSteps);
+router.post("/:id/steps", requirePermission([P.VALIDATION_FLOWS_MANAGE]), ctrl.addStep);
+router.put("/:id/steps/:stepId", requirePermission([P.VALIDATION_FLOWS_MANAGE]), ctrl.updateStep);
+router.delete("/:id/steps/:stepId", requirePermission([P.VALIDATION_FLOWS_MANAGE]), ctrl.deleteStep);
+router.post("/:id/steps/reorder", requirePermission([P.VALIDATION_FLOWS_MANAGE]), ctrl.reorderSteps);
 
 module.exports = router;

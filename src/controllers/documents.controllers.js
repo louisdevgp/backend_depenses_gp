@@ -19,11 +19,29 @@ async function isAdminUserId(userId) {
   return roleNames.includes("ADMIN");
 }
 
+async function getUserRoleNames(userId) {
+  if (!userId) return [];
+  const u = await prisma.users.findUnique({
+    where: { id: Number(userId) },
+    include: { user_roles: { include: { roles: true } } },
+  });
+  return (u?.user_roles || []).map((ur) => ur?.roles?.name).filter(Boolean);
+}
+
+function hasAnyRole(roleNames, allowed) {
+  const set = new Set((roleNames || []).map((r) => String(r).toUpperCase()));
+  return (allowed || []).some((r) => set.has(String(r).toUpperCase()));
+}
+
+const DOCUMENT_UPLOAD_ROLES = ["DAF", "COMPTABLE", "CAISSE", "DG", "DGA", "DIRECTEUR"];
+
 async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId, actionLabel }) {
   if (!userId) return { ok: false, status: 401, message: "Unauthorized" };
   if (!demandeId) return { ok: false, status: 400, message: "demande_id introuvable" };
 
   if (await isAdminUserId(userId)) return { ok: true };
+  const roleNames = await getUserRoleNames(userId);
+  if (hasAnyRole(roleNames, DOCUMENT_UPLOAD_ROLES)) return { ok: true };
 
   const demande = await prisma.demandes_paiement.findUnique({
     where: { id: Number(demandeId) },
@@ -45,14 +63,6 @@ async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId
 
 async function resolveDemandeIdFromBody(body) {
   if (isNumericId(body?.demande_id)) return Number(body.demande_id);
-
-  if (isNumericId(body?.bon_commande_id)) {
-    const bc = await prisma.bons_commande.findUnique({
-      where: { id: Number(body.bon_commande_id) },
-      select: { demande_id: true },
-    });
-    if (bc?.demande_id) return Number(bc.demande_id);
-  }
 
   if (isNumericId(body?.reception_id)) {
     const r = await prisma.receptions.findUnique({
@@ -76,14 +86,6 @@ async function resolveDemandeIdFromBody(body) {
 async function resolveDemandeIdFromDoc(doc) {
   if (!doc) return null;
   if (doc.demande_id) return Number(doc.demande_id);
-
-  if (doc.bon_commande_id) {
-    const bc = await prisma.bons_commande.findUnique({
-      where: { id: Number(doc.bon_commande_id) },
-      select: { demande_id: true },
-    });
-    if (bc?.demande_id) return Number(bc.demande_id);
-  }
 
   if (doc.reception_id) {
     const r = await prisma.receptions.findUnique({
@@ -202,7 +204,6 @@ exports.uploadMany = async (req, res) => {
                 count,
                 documentIds: (docs || []).map((d) => d.id),
                 demande_id: demandeId,
-                bon_commande_id: isNumericId(req.body?.bon_commande_id) ? Number(req.body.bon_commande_id) : null,
                 reception_id: isNumericId(req.body?.reception_id) ? Number(req.body.reception_id) : null,
                 paiement_id: isNumericId(req.body?.paiement_id) ? Number(req.body.paiement_id) : null,
               },
@@ -330,7 +331,6 @@ exports.remove = async (req, res) => {
                   type_document: doc.type_document,
                   nom_fichier: doc.nom_fichier,
                   demande_id: demandeId,
-                  bon_commande_id: doc.bon_commande_id ? Number(doc.bon_commande_id) : null,
                   reception_id: doc.reception_id ? Number(doc.reception_id) : null,
                   paiement_id: doc.paiement_id ? Number(doc.paiement_id) : null,
                 },

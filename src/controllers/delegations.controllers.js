@@ -85,6 +85,45 @@ function isAdmin(req) {
   return Array.isArray(roles) && roles.includes("ADMIN");
 }
 
+function normalizeRoleName(role) {
+  return String(role || "").trim().toUpperCase();
+}
+
+function isGlobalViewer(req) {
+  const roles = new Set((req.user?.roles || []).map(normalizeRoleName));
+  if (roles.has("ADMIN")) return true;
+  for (const role of ALLOWED_PRINCIPAL_ROLES) {
+    if (roles.has(role)) return true;
+  }
+  return false;
+}
+
+async function listActiveSubordinateIds(managerAgentId) {
+  if (!managerAgentId) return [];
+  const now = new Date();
+
+  const byLines = await prisma.agent_reporting_lines.findMany({
+    where: {
+      manager_id: Number(managerAgentId),
+      start_at: { lte: now },
+      OR: [{ end_at: null }, { end_at: { gte: now } }],
+    },
+    select: { agent_id: true },
+  });
+
+  const bySnapshot = await prisma.agents.findMany({
+    where: { manager_id: Number(managerAgentId), deleted_at: null },
+    select: { id: true },
+  });
+
+  const ids = new Set([
+    ...(byLines || []).map((x) => Number(x.agent_id)).filter((x) => Number.isFinite(x) && x > 0),
+    ...(bySnapshot || []).map((x) => Number(x.id)).filter((x) => Number.isFinite(x) && x > 0),
+  ]);
+
+  return Array.from(ids);
+}
+
 async function resolveActorAgentId(req) {
   const tokenAgentId = Number(req.user?.agentId);
   if (Number.isFinite(tokenAgentId) && tokenAgentId > 0) return tokenAgentId;
@@ -172,12 +211,13 @@ exports.list = async (req, res) => {
   const where = {};
 
   const admin = isAdmin(req);
+  const globalViewer = isGlobalViewer(req);
   const actorAgentId = await resolveActorAgentId(req);
-  if (!admin && !actorAgentId) {
+  if (!admin && !globalViewer && !actorAgentId) {
     return res.status(403).json({ success: false, message: "Agent non trouvé pour cet utilisateur" });
   }
 
-  if (admin) {
+  if (admin || globalViewer) {
     if (principalIdOrUuid) {
       const id = await resolveAgentId(principalIdOrUuid);
       if (!id) return res.status(400).json({ success: false, message: "Invalid principalIdOrUuid" });
@@ -191,7 +231,13 @@ exports.list = async (req, res) => {
     }
   } else {
     // non-admin: visibilité limitée aux délégations où l'agent est principal OU délégué
-    where.OR = [{ principal_id: actorAgentId }, { delegate_id: actorAgentId }];
+    // + aperçu manager: délégations des subordonnés (principal/délégué)
+    const subs = await listActiveSubordinateIds(actorAgentId);
+    where.OR = [
+      { principal_id: actorAgentId },
+      { delegate_id: actorAgentId },
+      ...(subs.length ? [{ principal_id: { in: subs } }, { delegate_id: { in: subs } }] : []),
+    ];
   }
 
   if (String(activeNow) === "1") {
@@ -226,10 +272,14 @@ exports.getOne = async (req, res) => {
   if (!row) return res.status(404).json({ success: false, message: "Not found" });
 
   const admin = isAdmin(req);
-  if (!admin) {
+  const globalViewer = isGlobalViewer(req);
+  if (!admin && !globalViewer) {
     const actorAgentId = await resolveActorAgentId(req);
     if (!actorAgentId) return res.status(403).json({ success: false, message: "Agent non trouvé" });
-    if (row.principal_id !== actorAgentId && row.delegate_id !== actorAgentId) {
+    const subs = await listActiveSubordinateIds(actorAgentId);
+    const canSeeByManager = subs.length ? subs.includes(Number(row.principal_id)) || subs.includes(Number(row.delegate_id)) : false;
+
+    if (row.principal_id !== actorAgentId && row.delegate_id !== actorAgentId && !canSeeByManager) {
       return res.status(404).json({ success: false, message: "Not found" });
     }
   }

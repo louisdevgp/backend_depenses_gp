@@ -214,7 +214,6 @@ async function ensureConditionsForDemande(tx, demandeId) {
       uuid: uuidv4(),
       demande_id: Number(demandeId),
       label: "Tranche 1",
-      type_echeance: "pourcentage",
       pourcentage: 100,
       montant_prevu: round2(d.montant),
       date_echeance: null,

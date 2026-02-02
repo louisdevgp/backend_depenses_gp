@@ -2,6 +2,35 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { v4: uuidv4 } = require("uuid");
 const { hashPassword } = require("../utils/password");
+const permissionMap = require("../config/permissions");
+
+const ROLE_IMPLICATIONS = {
+  DG: ["DIRECTEUR"],
+  DGA: ["DIRECTEUR"],
+  DAF: ["DIRECTEUR"],
+};
+
+function normalizeRoleName(role) {
+  return String(role || "").trim().toUpperCase();
+}
+
+function expandRoles(roleNames) {
+  const out = new Set((roleNames || []).map(normalizeRoleName).filter(Boolean));
+  for (const r of Array.from(out)) {
+    const implied = ROLE_IMPLICATIONS[r] || [];
+    for (const ir of implied) out.add(normalizeRoleName(ir));
+  }
+  return Array.from(out);
+}
+
+function isMissingPermissionsTables(err) {
+  const code = String(err?.code || "");
+  const msg = String(err?.message || "").toLowerCase();
+  if (code === "P2021") return true;
+  if (msg.includes("does not exist") && (msg.includes("permissions") || msg.includes("role_permissions"))) return true;
+  if (msg.includes("unknown table") && (msg.includes("permissions") || msg.includes("role_permissions"))) return true;
+  return false;
+}
 
 function generateTemporaryPassword() {
   // Simple, readable, avoids ambiguous chars.
@@ -27,7 +56,7 @@ async function me(userId) {
 
   if (!user || user.deleted_at) throw new Error("User not found");
 
-  const baseRoles = user.user_roles.map((ur) => ur.roles.name);
+  const baseRoles = user.user_roles.map((ur) => normalizeRoleName(ur.roles.name)).filter(Boolean);
 
   // ✅ délégations actives: ajout au /me pour que le frontend puisse autoriser l'accès
   const agentRecord = user.agents?.[0] || null;
@@ -45,11 +74,38 @@ async function me(userId) {
       },
       select: { id: true, uuid: true, role_name: true, principal_id: true, start_at: true, end_at: true, is_active: true },
     });
-    delegatedRoles = Array.from(new Set(dels.map((d) => d.role_name).filter(Boolean)));
+    delegatedRoles = Array.from(new Set(dels.map((d) => normalizeRoleName(d.role_name)).filter(Boolean)));
     delegated = dels;
   }
 
-  const roles = Array.from(new Set([...baseRoles, ...delegatedRoles]));
+  const roles = Array.from(new Set(expandRoles([...baseRoles, ...delegatedRoles])));
+
+  // ✅ permissions effectives (DB-first, fallback mapping)
+  let permissions = [];
+  try {
+    const rows = await prisma.role_permissions.findMany({
+      where: {
+        deleted_at: null,
+        roles: {
+          deleted_at: null,
+          is_active: true,
+          name: { in: roles },
+        },
+        permissions: { deleted_at: null, is_active: true },
+      },
+      select: { permissions: { select: { code: true } } },
+    });
+    permissions = Array.from(new Set(rows.map((r) => r.permissions.code).filter(Boolean)));
+  } catch (e) {
+    if (!isMissingPermissionsTables(e)) throw e;
+
+    const out = new Set();
+    for (const [code, allowedRoles] of Object.entries(permissionMap || {})) {
+      const allowed = (allowedRoles || []).map(normalizeRoleName).filter(Boolean);
+      if (allowed.some((r) => roles.includes(r))) out.add(String(code));
+    }
+    permissions = Array.from(out);
+  }
 
   return {
     id: user.id,
@@ -60,6 +116,7 @@ async function me(userId) {
     is_active: user.is_active,
     roles,
     delegatedRoles,
+    permissions,
     agent: agentRecord ? { ...agentRecord, delegations: delegated } : null,
   };
 }

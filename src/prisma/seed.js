@@ -6,6 +6,7 @@ async function main() {
   const roles = [
     { name: "ADMIN", label: "Administrateur" },
     { name: "DEMANDEUR", label: "Demandeur" },
+    { name: "ASSISTANTE_TECHNIQUE", label: "Assistante technique" },
     { name: "RESPONSABLE", label: "Responsable" },
     { name: "DIRECTEUR", label: "Directeur" },
     { name: "DAF", label: "Direction Administrative et Financière" },

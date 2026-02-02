@@ -102,7 +102,6 @@ async function createDemandeWithConditions({ mode, montant, demandeurId }) {
       uuid: uuidv4(),
       demande_id: Number(demande.id),
       label: `Tranche ${i + 1}`,
-      type_echeance: "pourcentage",
       pourcentage: t.pourcentage,
       montant_prevu: t.montant_prevu,
       date_echeance: null,

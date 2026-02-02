@@ -7,8 +7,15 @@ exports.listMyPendingValidations = async (req, res) => {
 
 exports.approveStep = async (req, res) => {
   const { stepId } = req.params;
-  const { commentaire, signature_data_url } = req.body || {};
-  const result = await service.approveStep(stepId, req.user.userId, commentaire, signature_data_url);
+  const { commentaire, budget_prevu, budget_disponible, paiement_immediat, daf_critere4 } =
+    req.body || {};
+  // On ignore signature_data_url car on ne gère plus les signatures électroniques
+  const result = await service.approveStep(stepId, req.user.userId, commentaire, null, {
+    budget_prevu,
+    budget_disponible,
+    paiement_immediat,
+    daf_critere4,
+  });
   res.json({ success: true, message: "Étape validée", data: result });
 };
 
@@ -22,6 +29,24 @@ exports.rejectStep = async (req, res) => {
 
   const result = await service.rejectStep(stepId, req.user.userId, commentaire);
   res.json({ success: true, message: "Demande rejetée", data: result });
+};
+
+exports.returnForModification = async (req, res) => {
+  const { stepId } = req.params;
+  const { commentaire } = req.body || {};
+
+  const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
+  if (!commentaireTrimmed) {
+    return res.status(400).json({ success: false, message: "Commentaire obligatoire" });
+  }
+
+  try {
+    const result = await service.returnForModification(stepId, req.user.userId, commentaireTrimmed);
+    return res.json({ success: true, message: "Demande retournée pour modification", data: result });
+  } catch (e) {
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message });
+  }
 };
 
 exports.listByDemande = async (req, res) => {

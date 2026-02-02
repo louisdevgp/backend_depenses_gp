@@ -51,7 +51,7 @@ async function main() {
       console.log("DRY RUN (aucune suppression). Compteurs des données transactionnelles:");
       console.log(Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join("\n"));
       console.log(
-        "Conservé: users, agents, roles, user_roles, validation_flows, validation_flow_steps, directions/departements/services, fournisseurs, etc.",
+        "Conservé: users, agents, roles, user_roles, validation_flows, validation_flow_steps, directions/departements/services, etc.",
       );
       return;
     }
@@ -87,7 +87,7 @@ async function main() {
     console.log("Reset OK (données transactionnelles supprimées):");
     console.log(lines.join("\n"));
     console.log(
-      "Conservé: users, agents, roles, validation_flows, validation_flow_steps, directions/departements/services, fournisseurs, etc.",
+      "Conservé: users, agents, roles, validation_flows, validation_flow_steps, directions/departements/services, etc.",
     );
   } finally {
     await prisma.$disconnect();

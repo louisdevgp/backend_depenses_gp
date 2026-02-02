@@ -7,7 +7,6 @@ async function createConditionPaiement(data) {
       uuid: data.uuid,
       demande_id: data.demande_id,
       label: data.label,
-      type_echeance: data.type_echeance,
       pourcentage: data.pourcentage ?? null,
       montant_prevu: data.montant_prevu ?? null,
       date_echeance: data.date_echeance ?? null,
@@ -39,7 +38,6 @@ async function updateConditionPaiement(id, data) {
     where: { id: Number(id) },
     data: {
       label: data.label,
-      type_echeance: data.type_echeance,
       pourcentage: data.pourcentage ?? null,
       montant_prevu: data.montant_prevu ?? null,
       date_echeance: data.date_echeance ?? null,

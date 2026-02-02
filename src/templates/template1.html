@@ -255,6 +255,11 @@
         padding: 6px 4px;
         text-align: center;
       }
+      .controle-daf td.daf-value {
+        text-align: left;
+        font-weight: 600;
+        padding-left: 8px;
+      }
       .controle-daf th.label {
         text-align: left;
         font-weight: 600;
@@ -346,7 +351,24 @@
                 <th>MONTANT</th>
               </tr>
               <tr>
-                <td class="amount-value">{{montant}} FCFA</td>
+                <td class="amount-value">
+                  {{#has_remise}}
+                    <div style="display:flex; justify-content: space-between; gap: 12px;">
+                      <div style="font-size: 12px; color: #5a5a5a;">Montant brut</div>
+                      <div style="font-size: 12px; color: #1a3d7c; font-weight: 600;">{{montant_brut}} FCFA</div>
+                    </div>
+                    <div style="display:flex; justify-content: space-between; gap: 12px;">
+                      <div style="font-size: 12px; color: #5a5a5a;">{{remise_label}}</div>
+                      <div style="font-size: 12px; color: #c0392b; font-weight: 600;">- {{remise_montant}} FCFA</div>
+                    </div>
+                    <div style="height: 1px; background: rgba(26,61,124,0.2); margin: 6px 0;"></div>
+                    <div style="font-size: 18px; font-weight: bold; color: #1a3d7c;">{{montant_net}} FCFA</div>
+                  {{/has_remise}}
+
+                  {{^has_remise}}
+                    {{montant}} FCFA
+                  {{/has_remise}}
+                </td>
               </tr>
             </table>
           </div>
@@ -359,18 +381,22 @@
         <table>
           <tr>
             <th class="label">Prévu au budget?</th>
-            <td>OUI <span class="cb"></span></td>
-            <td>NON <span class="cb"></span></td>
+            <td>OUI <span class="cb">{{budget_prevu_oui}}</span></td>
+            <td>NON <span class="cb">{{budget_prevu_non}}</span></td>
           </tr>
           <tr>
             <th class="label">Budget disponible ?</th>
-            <td>OUI <span class="cb"></span></td>
-            <td>NON <span class="cb"></span></td>
+            <td>OUI <span class="cb">{{budget_disponible_oui}}</span></td>
+            <td>NON <span class="cb">{{budget_disponible_non}}</span></td>
           </tr>
           <tr>
             <th class="label">Paiement immédiat ?</th>
-            <td>OUI <span class="cb"></span></td>
-            <td>NON <span class="cb"></span></td>
+            <td>OUI <span class="cb">{{paiement_immediat_oui}}</span></td>
+            <td>NON <span class="cb">{{paiement_immediat_non}}</span></td>
+          </tr>
+          <tr>
+            <th class="label">{{daf_critere4_label}}</th>
+            <td colspan="2" class="daf-value">{{daf_critere4_value}}</td>
           </tr>
         </table>
       </div>
@@ -389,9 +415,9 @@
             </colgroup>
             <tr>
               <th>DEMANDEUR</th>
-              <th>APPROBATION<br />DG</th>
-              <th>APPROBATION<br />DGA</th>
               <th>APPROBATION<br />DAF</th>
+              <th>APPROBATION<br />DGA</th>
+              <th>APPROBATION<br />DG</th>
               <th>BÉNÉFICIAIRE</th>
             </tr>
             <tr>

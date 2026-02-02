@@ -13,7 +13,7 @@ exports.create = async (req, res) => {
 
 exports.list = async (req, res) => {
   try {
-    const result = await service.listDemandes(req.query);
+    const result = await service.listDemandes(req.user, req.query);
     return res.json({ success: true, data: result });
   } catch (e) {
     return res.status(400).json({ success: false, message: e.message });
@@ -41,18 +41,22 @@ exports.listByDemandeur = async (req, res) => {
 
 exports.getOne = async (req, res) => {
   try {
-    const result = await service.getOne(req.params.idOrUuid);
+    const result = await service.getOne(req.user, req.params.idOrUuid);
     return res.json({ success: true, data: result });
   } catch (e) {
-    return res.status(404).json({ success: false, message: e.message });
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 404;
+    return res.status(status).json({ success: false, message: e.message });
   }
 };
 
 exports.pdf = async (req, res) => {
   try {
+    // ✅ même contrôle d'accès que le détail (ex: assistante technique par direction)
+    await service.assertCanReadDemandeByIdOrUuid(req.user, req.params.idOrUuid);
     await pdfService.streamDemandePdf(res, req.params.idOrUuid, { req });
   } catch (e) {
-    return res.status(404).json({ success: false, message: e.message });
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 404;
+    return res.status(status).json({ success: false, message: e.message });
   }
 };
 

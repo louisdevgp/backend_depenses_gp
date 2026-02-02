@@ -3,11 +3,12 @@ const router = express.Router();
 
 const agentsController = require("../controllers/agents.controllers");
 const requireAuth = require("../middlewares/auth.middleware");
-const requireRole = require("../middlewares/requireRole.middleware");
+const requirePermission = require("../middlewares/requirePermission.middleware");
+const P = require("../constants/permissions");
 // const { requireRole } = require("../middlewares/requireRole"); // optionnel
 
 router.use(requireAuth);
-router.use(requireRole(["ADMIN"]));
+router.use(requirePermission([P.AGENTS_MANAGE]));
 
 // CRUD
 router.post("/", agentsController.createAgent);

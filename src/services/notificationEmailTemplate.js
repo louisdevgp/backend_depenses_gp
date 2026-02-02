@@ -42,15 +42,6 @@ function inferCta(type, meta) {
     return { label: "Ouvrir la réception", url: joinUrl(front, `/receptions/${m.receptionUuid}`) };
   }
 
-  if (m.bonCommandeUuid) {
-    return { label: "Ouvrir le bon de commande", url: joinUrl(front, `/bons-commande/${m.bonCommandeUuid}`) };
-  }
-
-  // some older meta keys used by controllers
-  if (m.bonCommandeId) {
-    return { label: "Ouvrir le bon de commande", url: joinUrl(front, `/bons-commande/${m.bonCommandeId}`) };
-  }
-
   if (m.validationUuid) {
     return { label: "Ouvrir la validation", url: joinUrl(front, `/validations/uuid/${m.validationUuid}`) };
   }
@@ -87,6 +78,8 @@ function subjectForType(type, meta) {
       return `GP Achats — Demande validée${m.role ? ` (${m.role})` : ""}`;
     case "validation_rejected":
       return `GP Achats — Demande rejetée${m.role ? ` (${m.role})` : ""}`;
+    case "demande_returned_for_modification":
+      return `GP Achats — Demande retournée pour modification${m.fromRole ? ` (${m.fromRole})` : ""}`;
     case "paiement_effectue":
       return "GP Achats — Paiement effectué";
     case "paiement_pending":
@@ -115,14 +108,6 @@ function subjectForType(type, meta) {
       return "GP Achats — Délégation mise à jour";
     case "delegation_deleted":
       return "GP Achats — Délégation supprimée";
-    case "bc_created":
-      return `GP Achats — Bon de commande créé${m.numero ? ` (#${m.numero})` : ""}`;
-    case "bc_updated":
-      return `GP Achats — Bon de commande modifié${m.numero ? ` (#${m.numero})` : ""}`;
-    case "bc_cancelled":
-      return `GP Achats — Bon de commande annulé${m.numero ? ` (#${m.numero})` : ""}`;
-    case "bc_deleted":
-      return `GP Achats — Bon de commande supprimé${m.numero ? ` (#${m.numero})` : ""}`;
     default:
       return `GP Achats — ${t}`;
   }
@@ -147,8 +132,11 @@ function pickHighlights(type, meta) {
     if (m.actor) items.push({ label: "Action par", value: String(m.actor) });
   }
 
-  if (t.startsWith("bc_") && m.demandeUuid) {
-    items.push({ label: "Demande liée", value: String(m.demandeUuid) });
+  if (t === "demande_returned_for_modification") {
+    if (m.fromRole) items.push({ label: "Rôle validateur", value: String(m.fromRole) });
+    if (m.previousRole) items.push({ label: "Étape précédente", value: String(m.previousRole) });
+    if (m.previousLevel != null) items.push({ label: "Niveau précédent", value: String(m.previousLevel) });
+    if (m.commentaire) items.push({ label: "Motif", value: String(m.commentaire) });
   }
 
   return items.slice(0, 6);

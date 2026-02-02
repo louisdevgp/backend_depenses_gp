@@ -1,9 +1,10 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
 const rolesController = require("../controllers/roles.controllers")
-const requireRole = require("../middlewares/requireRole.middleware");
+const requirePermission = require("../middlewares/requirePermission.middleware");
+const P = require("../constants/permissions");
 
-router.use(auth, requireRole(["ADMIN"]));
+router.use(auth, requirePermission([P.ROLES_MANAGE]));
 
 router.get("/", rolesController.list);
 router.get("/:id", rolesController.getById);

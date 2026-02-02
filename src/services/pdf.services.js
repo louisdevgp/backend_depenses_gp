@@ -38,7 +38,8 @@ function asMoney(v) {
   if (v == null) return "-";
   const n = Number(v);
   if (Number.isNaN(n)) return asText(v);
-  return new Intl.NumberFormat("fr-FR").format(n);
+  const formatted = new Intl.NumberFormat("fr-FR").format(n);
+  return formatted.replace(/[\u202F\u00A0]/g, " ");
 }
 
 function asDate(d) {
@@ -128,6 +129,36 @@ function agentDisplayName(agent) {
 
 function userDisplayNameFromAgent(agent) {
   return agentDisplayName(agent);
+}
+
+function signatureLabelLinesFromValidationStep(step) {
+  const validatedByName = step?.agents_validation_steps_validated_by_idToagents
+    ? userDisplayNameFromAgent(step.agents_validation_steps_validated_by_idToagents)
+    : "-";
+  const validatorName = step?.agents_validation_steps_validator_idToagents
+    ? userDisplayNameFromAgent(step.agents_validation_steps_validator_idToagents)
+    : "-";
+
+  const delegated =
+    step?.validated_by_id != null &&
+    step?.validator_id != null &&
+    Number(step.validated_by_id) !== Number(step.validator_id);
+
+  if (delegated) {
+    const poLine = validatorName && validatorName !== "-" ? `PO ${validatorName}` : "PO";
+    const byLine = validatedByName && validatedByName !== "-" ? `Par: ${validatedByName}` : null;
+    return [poLine, byLine].filter(Boolean);
+  }
+
+  if (step?.validated_by_id != null) {
+    return [validatedByName];
+  }
+
+  if (step?.validator_id != null) {
+    return [validatorName];
+  }
+
+  return ["-"];
 }
 
 function demandeFinalizedAt(d) {
@@ -347,13 +378,58 @@ function injectQrOverlay(html, { qrDataUrl, ref }) {
   return `${html}${overlay}`;
 }
 
+function injectWatermark(html, { text, color = "#c62828", opacity = 0.12 } = {}) {
+  if (!text) return html;
+  const overlay = `\n<style>
+  .gp-watermark{
+    position:fixed;
+    top:50%;
+    left:50%;
+    transform:translate(-50%, -50%) rotate(-28deg);
+    font-family:Arial,sans-serif;
+    font-size:130px;
+    font-weight:700;
+    letter-spacing:6px;
+    text-transform:uppercase;
+    color:${escapeHtml(color)};
+    opacity:${Number(opacity).toFixed(2)};
+    z-index:1;
+    pointer-events:none;
+  }
+  </style>
+  <div class="gp-watermark">${escapeHtml(text)}</div>\n`;
+  if (String(html).includes("</body>")) return String(html).replace("</body>", `${overlay}</body>`);
+  return `${html}${overlay}`;
+}
+
+function buildPaiementWatermark(demande) {
+  const statut = String(demande?.statut || "").toLowerCase();
+  if (["paye", "payé", "cloture", "clôture"].includes(statut)) {
+    return { text: "PAYÉ", color: "#1b5e20", opacity: 0.12 };
+  }
+  if (statut === "en_attente_paiement") {
+    return { text: "PAYÉ PARTIEL", color: "#b45309", opacity: 0.12 };
+  }
+
+  const paiements = Array.isArray(demande?.paiements) ? demande.paiements : [];
+  const conditions = Array.isArray(demande?.conditions_paiement) ? demande.conditions_paiement : [];
+  if (!paiements.length) return null;
+
+  const unpaid = conditions.filter((c) => !c.paiement_id && String(c.statut || "").toLowerCase() !== "paye");
+  if (conditions.length && unpaid.length === 0) {
+    return { text: "PAYÉ", color: "#1b5e20", opacity: 0.12 };
+  }
+  return { text: "PAYÉ PARTIEL", color: "#b45309", opacity: 0.12 };
+}
+
 function injectDemandeSignataires(html, { demandeur, dg, dga, daf, beneficiaire }) {
   if (!cheerio) return html;
   const $ = cheerio.load(String(html), { decodeEntities: false });
   const tds = $("table.table tr").eq(1).find("td");
   if (tds.length < 5) return $.html();
 
-  const cells = [demandeur, dg, dga, daf, beneficiaire].map((v) => String(v || "").trim());
+  // Order must match the PDF header: Demandeur -> DAF -> DGA -> DG -> Bénéficiaire
+  const cells = [demandeur, daf, dga, dg, beneficiaire].map((v) => String(v || "").trim());
   for (let i = 0; i < 5; i += 1) {
     const text = cells[i];
     // Note: ici `text` peut déjà contenir du HTML généré par le serveur (images signatures).
@@ -378,8 +454,12 @@ function signatureUrlToDataUrl(signatureUrl) {
   }
 }
 
-function signatureCellHtml({ name, at, signatureDataUrl }) {
-  const meta = [name ? escapeHtml(name) : "", at ? escapeHtml(at) : ""].filter(Boolean).join("<br/>");
+function signatureCellHtml({ name, nameLines, at, signatureDataUrl }) {
+  const safeLines = Array.isArray(nameLines)
+    ? nameLines.map((x) => (x != null ? escapeHtml(String(x)) : "")).filter(Boolean)
+    : [name ? escapeHtml(String(name)) : ""].filter(Boolean);
+  const metaParts = [...safeLines, at ? escapeHtml(String(at)) : ""].filter(Boolean);
+  const meta = metaParts.join("<br/>");
   const img = signatureDataUrl
     ? `<div style="height:44px;display:flex;align-items:center;justify-content:center;margin-bottom:4px;">
          <img src="${escapeHtml(signatureDataUrl)}" alt="signature" style="max-width:100%;max-height:44px;object-fit:contain;" />
@@ -491,7 +571,6 @@ function drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref }) {
     y += rowH;
   };
 
-  row("FOURNISSEUR :", r.fournisseur);
   row("DESCRIPTION BIEN/PRESTATION :", r.description);
 
   // 2e ligne description (sans le petit carré vert)
@@ -568,19 +647,21 @@ function drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref }) {
   const cellY = sigY + headH + 10;
   const cellW = colW - 20;
 
-  const leftSigBuf = tryLoadSig(r.signature_directeur_url);
-  const rightSigBuf = tryLoadSig(r.signature_daf_url);
+  // On n'affiche plus les signatures électroniques, seulement les noms des validateurs
+  // const leftSigBuf = tryLoadSig(r.signature_directeur_url);
+  // const rightSigBuf = tryLoadSig(r.signature_daf_url);
   const sigImgH = 52;
 
-  if (leftSigBuf) {
-    doc.image(leftSigBuf, leftCellX, cellY, { fit: [cellW, sigImgH], align: "center" });
-  }
-  if (rightSigBuf) {
-    doc.image(rightSigBuf, rightCellX, cellY, { fit: [cellW, sigImgH], align: "center" });
-  }
+  // On ne charge plus les images de signature
+  // if (leftSigBuf) {
+  //   doc.image(leftSigBuf, leftCellX, cellY, { fit: [cellW, sigImgH], align: "center" });
+  // }
+  // if (rightSigBuf) {
+  //   doc.image(rightSigBuf, rightCellX, cellY, { fit: [cellW, sigImgH], align: "center" });
+  // }
 
-  const leftTextY = cellY + (leftSigBuf ? sigImgH + 6 : 0);
-  const rightTextY = cellY + (rightSigBuf ? sigImgH + 6 : 0);
+  const leftTextY = cellY; // Pas de signature, donc pas de décalage vertical
+  const rightTextY = cellY; // Pas de signature, donc pas de décalage vertical
 
   if (leftInfo.length) {
     doc.text(leftInfo.join("\n"), leftCellX, leftTextY, { width: cellW });
@@ -664,12 +745,14 @@ async function getDemandeData(idOrUuid) {
     where: { ...where, deleted_at: null },
     include: {
       demande_items: true,
-      fournisseurs: true,
+      conditions_paiement: { orderBy: { id: "asc" } },
       documents: true,
+      paiements: true,
       validation_steps: {
         orderBy: { level: "asc" },
         include: {
           agents_validation_steps_validated_by_idToagents: { include: { users: true } },
+          agents_validation_steps_validator_idToagents: { include: { users: true } },
         },
       },
       agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
@@ -679,34 +762,12 @@ async function getDemandeData(idOrUuid) {
   return demande;
 }
 
-async function getBonCommandeData(idOrUuid) {
-  const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
-  const bc = await prisma.bons_commande.findFirst({
-    where,
-    include: {
-      bon_commande_items: true,
-      fournisseurs: true,
-      demandes_paiement: {
-        include: {
-          agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
-        },
-      },
-      documents: true,
-      receptions: true,
-      agents: { include: { users: true } },
-    },
-  });
-  if (!bc) throw new Error("Bon de commande introuvable");
-  return bc;
-}
-
 async function getReceptionData(idOrUuid) {
   const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
   const reception = await prisma.receptions.findFirst({
     where,
     include: {
       demandes_paiement: true,
-      bons_commande: true,
       documents: true,
       agents_receptions_recu_par_idToagents: { include: { users: true } },
       agents_receptions_visa_directeur_idToagents: { include: { users: true } },
@@ -736,15 +797,82 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
   const qrBuf = qrText ? await qrPngBuffer(qrText) : null;
 
   const template = loadTemplateHtml("template1.html");
+
+  const parseBooleanLike = (value) => {
+    if (value === true || value === false) return value;
+    if (typeof value === "number") return value ? true : false;
+    if (typeof value === "string") {
+      const v = value.trim().toLowerCase();
+      if (!v) return null;
+      if (["true", "1", "oui", "yes"].includes(v)) return true;
+      if (["false", "0", "non", "no"].includes(v)) return false;
+    }
+    return null;
+  };
+
+  const yesNoMarks = (value) => {
+    const b = parseBooleanLike(value);
+    if (b === true) return { oui: "X", non: "" };
+    if (b === false) return { oui: "", non: "X" };
+    return { oui: "", non: "" };
+  };
+
+  const formatDafCritere4 = (value) => {
+    const envLabel = process.env.DAF_CRITERE4_LABEL || "Critère 4";
+    const b = parseBooleanLike(value);
+    if (b === true) return { label: envLabel, value: "Oui" };
+    if (b === false) return { label: envLabel, value: "Non" };
+    const str = value == null ? "" : String(value).trim();
+    if (!str) return { label: envLabel, value: "" };
+    return { label: "Moyen de paiement", value: str };
+  };
+
+  const bp = yesNoMarks(d.budget_prevu);
+  const bd = yesNoMarks(d.budget_disponible);
+  const pi = yesNoMarks(d.paiement_immediat);
+  const c4 = formatDafCritere4(d.daf_critere4);
+
+  const montantBrut = Number(d.montant ?? 0);
+  const montantNet = d.montant_net != null ? Number(d.montant_net) : montantBrut;
+  const remiseType = String(d.remise_type || "").toLowerCase();
+  const remiseValeur = d.remise_valeur != null ? Number(d.remise_valeur) : null;
+  const remiseMontant = Math.max(0, montantBrut - montantNet);
+  const remiseLabel =
+    remiseType === "pourcentage" && remiseValeur != null
+      ? `Remise (${asMoney(remiseValeur)}%)`
+      : remiseType === "montant" && remiseValeur != null
+        ? "Remise"
+        : "Remise";
+
   const vars = {
-    montant: asMoney(d.montant),
-    montant_lettres: amountToFrenchWordsFcfa(d.montant),
+    montant: asMoney(montantNet),
+    montant_lettres: amountToFrenchWordsFcfa(montantNet),
+    montant_brut: asMoney(montantBrut),
+    remise_label: remiseType ? remiseLabel : "",
+    remise_montant: remiseType ? asMoney(remiseMontant) : "",
+    montant_net: asMoney(montantNet),
+    has_remise: Boolean(remiseType),
     motif: d.motif || "",
     beneficiaire: d.beneficiaire || "",
     note: d.note || d.remarque || d.description || "",
+
+    budget_prevu_oui: bp.oui,
+    budget_prevu_non: bp.non,
+    budget_disponible_oui: bd.oui,
+    budget_disponible_non: bd.non,
+    paiement_immediat_oui: pi.oui,
+    paiement_immediat_non: pi.non,
+
+    daf_critere4_label: c4.label,
+    daf_critere4_value: c4.value,
   };
 
   let html = applyTemplateVars(template, vars);
+
+  {
+    const watermark = buildPaiementWatermark(d);
+    if (watermark) html = injectWatermark(html, watermark);
+  }
 
   {
     const demandeurName = userDisplayNameFromAgent(d.agents_demandes_paiement_demandeur_idToagents);
@@ -754,32 +882,29 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
     const dga = pick("DGA");
     const daf = pick("DAF");
 
-    const dgSig = dg?.signature_url ? signatureUrlToDataUrl(dg.signature_url) : null;
-    const dgaSig = dga?.signature_url ? signatureUrlToDataUrl(dga.signature_url) : null;
-    const dafSig = daf?.signature_url ? signatureUrlToDataUrl(daf.signature_url) : null;
-
+    // On n'affiche plus les signatures électroniques, seulement les noms des validateurs
     html = injectDemandeSignataires(html, {
       // Demandeur: affiché dès la soumission (création)
       demandeur: signatureCellHtml({ name: demandeurName, at: asDateTime(d.created_at), signatureDataUrl: null }),
-      dg: dg?.validated_by_id
+      daf: daf?.validated_by_id
         ? signatureCellHtml({
-            name: userDisplayNameFromAgent(dg.agents_validation_steps_validated_by_idToagents),
-            at: asDateTime(dg.validated_at),
-            signatureDataUrl: dgSig,
+            nameLines: signatureLabelLinesFromValidationStep(daf),
+            at: asDateTime(daf.validated_at),
+            signatureDataUrl: null, // Plus de signature
           })
         : "",
       dga: dga?.validated_by_id
         ? signatureCellHtml({
-            name: userDisplayNameFromAgent(dga.agents_validation_steps_validated_by_idToagents),
+            nameLines: signatureLabelLinesFromValidationStep(dga),
             at: asDateTime(dga.validated_at),
-            signatureDataUrl: dgaSig,
+            signatureDataUrl: null, // Plus de signature
           })
         : "",
-      daf: daf?.validated_by_id
+      dg: dg?.validated_by_id
         ? signatureCellHtml({
-            name: userDisplayNameFromAgent(daf.agents_validation_steps_validated_by_idToagents),
-            at: asDateTime(daf.validated_at),
-            signatureDataUrl: dafSig,
+            nameLines: signatureLabelLinesFromValidationStep(dg),
+            at: asDateTime(dg.validated_at),
+            signatureDataUrl: null, // Plus de signature
           })
         : "",
       beneficiaire: d.beneficiaire ? escapeHtml(String(d.beneficiaire)) : "",
@@ -791,78 +916,6 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
     html = injectQrOverlay(html, { qrDataUrl, ref });
   }
 
-  const pdfBuffer = await renderHtmlToPdfBuffer(html);
-  return sendPdfBuffer(res, filename, pdfBuffer);
-}
-
-async function streamBonCommandePdf(res, idOrUuid) {
-  const bc = await getBonCommandeData(idOrUuid);
-  const filename = `bon_commande_${bc.numero || bc.uuid}.pdf`;
-
-  const template = loadTemplateHtml("bc.html");
-
-  const items = Array.isArray(bc.bon_commande_items) ? bc.bon_commande_items : [];
-  const subtotal = items.reduce((acc, it) => {
-    const line = it?.total_ligne != null ? Number(it.total_ligne) : Number(it?.prix_unitaire || 0) * Number(it?.quantite || 0);
-    return acc + (Number.isFinite(line) ? line : 0);
-  }, 0);
-  const tax = 0;
-  const total = subtotal + tax;
-
-  const vendorName = bc.fournisseurs?.raison_sociale || bc.fournisseurs?.nom || "-";
-  const vendorAddress = bc.fournisseurs?.adresse || bc.fournisseurs?.address || "-";
-  const vendorPhone = bc.fournisseurs?.telephone || bc.fournisseurs?.tel || bc.fournisseurs?.phone || "-";
-  const requisitioner = bc?.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents
-    ? userDisplayNameFromAgent(bc.demandes_paiement.agents_demandes_paiement_demandeur_idToagents)
-    : bc?.agents
-      ? userDisplayNameFromAgent(bc.agents)
-      : "-";
-
-  const view = {
-    company: {
-      address: process.env.COMPANY_ADRESSE || process.env.COMPANY_ADDRESS || "-",
-      phone: process.env.COMPANY_TELEPHONE || process.env.COMPANY_TEL || "-",
-      email: process.env.COMPANY_EMAIL || "-",
-    },
-    po: {
-      number: bc.numero || bc.uuid,
-      date: asDate(bc.date_commande) || "-",
-      requisitioner,
-      ship_via: "-",
-      fob: "-",
-      shipping_terms: "-",
-      comments: bc.statut ? `Statut: ${bc.statut}` : "",
-    },
-    vendor: {
-      name: vendorName,
-      address: vendorAddress,
-      phone: vendorPhone,
-    },
-    ship_to: {
-      name: "GREENPAY",
-      address: process.env.COMPANY_ADRESSE || process.env.COMPANY_ADDRESS || "-",
-      phone: process.env.COMPANY_TELEPHONE || process.env.COMPANY_TEL || "-",
-    },
-    items: items.map((it, idx) => {
-      const qty = Number(it?.quantite || 0);
-      const up = it?.prix_unitaire != null ? Number(it.prix_unitaire) : null;
-      const line = it?.total_ligne != null ? Number(it.total_ligne) : (up != null ? up * qty : null);
-      return {
-        sku: it?.unite ? String(it.unite) : String(idx + 1),
-        name: it?.designation ? String(it.designation) : "-",
-        qty: Number.isFinite(qty) ? qty : "-",
-        unit_price: up != null && Number.isFinite(up) ? `${asMoney(up)} FCFA` : "-",
-        line_total: line != null && Number.isFinite(line) ? `${asMoney(line)} FCFA` : "-",
-      };
-    }),
-    totals: {
-      subtotal: `${asMoney(subtotal)} FCFA`,
-      tax: `${asMoney(tax)} FCFA`,
-      total: `${asMoney(total)} FCFA`,
-    },
-  };
-
-  const html = Mustache.render(template, view);
   const pdfBuffer = await renderHtmlToPdfBuffer(html);
   return sendPdfBuffer(res, filename, pdfBuffer);
 }
@@ -899,7 +952,6 @@ async function streamReceptionPdfFromData(
 module.exports = {
   streamDemandePdf,
   streamDemandePdfFromData,
-  streamBonCommandePdf,
   streamReceptionPdf,
   streamReceptionPdfFromData,
 };

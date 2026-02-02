@@ -2,6 +2,40 @@ const prisma = require("../config/prisma");
 const notifications = require("./notifications.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
 
+function withStatusCode(err, statusCode) {
+  err.statusCode = Number(statusCode);
+  return err;
+}
+
+function isBoolean(v) {
+  return typeof v === "boolean";
+}
+
+function normalizeBooleanLikeString(value) {
+  if (typeof value !== "string") return null;
+  const v = value.trim().toLowerCase();
+  if (!v) return null;
+  if (["true", "1", "oui", "yes"].includes(v)) return true;
+  if (["false", "0", "non", "no"].includes(v)) return false;
+  return null;
+}
+
+function normalizeDafCritere4(value) {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const boolLike = normalizeBooleanLikeString(trimmed);
+    if (boolLike === true) return "Oui";
+    if (boolLike === false) return "Non";
+    return trimmed;
+  }
+  if (typeof value === "boolean") return value ? "Oui" : "Non";
+  if (typeof value === "number") return value ? "Oui" : "Non";
+  const fallback = String(value).trim();
+  return fallback || null;
+}
+
 function getEnvAny(keys) {
   for (const k of keys) {
     const v = process.env[k];
@@ -22,7 +56,7 @@ function parseCsvUpper(value) {
 async function getPayeurUserIds() {
   const roleNames =
     parseCsvUpper(getEnvAny(["PAYEUR_NOTIFY_ROLES", "PAYEUR_ROLES_NOTIFY"])) || [];
-  const roles = roleNames.length ? roleNames : ["DAF", "COMPTABLE"];
+  const roles = roleNames.length ? roleNames : ["DAF", "COMPTABLE", "CAISSE"];
 
   const rows = await prisma.user_roles.findMany({
     where: {
@@ -169,16 +203,17 @@ async function getPendingForUser(userId) {
     where,
     include: {
       demandes_paiement: true,
-      agents_validation_steps_validator_idToagents: { select: { id: true, nom: true, prenom: true } },
+      agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
+      agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
     },
     orderBy: { id: "desc" },
   });
 }
 
 
-async function approveStep(stepId, userId, commentaire, signatureDataUrl = null) {
+async function approveStep(stepId, userId, commentaire, signatureDataUrl = null, extra = {}) {
   const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
-  const signatureDataUrlTrimmed = signatureDataUrl != null ? String(signatureDataUrl).trim() : "";
+  // On ignore la signatureDataUrl car on ne gère plus les signatures électroniques
 
   const result = await prisma.$transaction(async (tx) => {
     const step = await tx.validation_steps.findUnique({
@@ -194,6 +229,8 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null)
 
     if (!step || step.status !== "en_attente") throw new Error("Étape invalide");
 
+    const roleUpper = String(step.role_name || "").toUpperCase();
+
     const agent = await tx.agents.findFirst({
       where: { user_id: Number(userId), deleted_at: null },
       include: { roles: true, users: true },
@@ -204,11 +241,40 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null)
     const ok = await canActByDelegation(tx, step, agent);
     if (!ok) throw new Error("Non autorisé");
 
-    let signature_url = null;
-    if (signatureDataUrlTrimmed) {
-      signature_url = saveSignaturePngDataUrl(signatureDataUrlTrimmed, { prefix: `validation_${step.id}` }).url;
+    // ✅ Contrôle DAF: champs obligatoires au moment de la validation DAF
+    if (roleUpper === "DAF") {
+      const { budget_prevu, budget_disponible, paiement_immediat, daf_critere4 } = extra || {};
+      if (!isBoolean(budget_prevu) || !isBoolean(budget_disponible) || !isBoolean(paiement_immediat)) {
+        throw withStatusCode(
+          new Error(
+            "Contrôle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat' (booléens)"
+          ),
+          400
+        );
+      }
+
+      // Pour le 4e critère, on accepte maintenant une chaîne (moyen de paiement) ou un booléen (legacy)
+      const dafCritere4Value = normalizeDafCritere4(daf_critere4);
+      if (!dafCritere4Value) {
+        throw withStatusCode(
+          new Error("Contrôle DAF incomplet: renseignez le moyen de paiement (critère 4)"),
+          400
+        );
+      }
+
+      await tx.demandes_paiement.update({
+        where: { id: Number(step.demande_id) },
+        data: {
+          budget_prevu: Boolean(budget_prevu),
+          budget_disponible: Boolean(budget_disponible),
+          paiement_immediat: Boolean(paiement_immediat),
+          daf_critere4: dafCritere4Value,
+          updated_at: new Date(),
+        },
+      });
     }
 
+    // Mise à jour de l'étape de validation sans signature
     await tx.validation_steps.update({
       where: { id: step.id },
       data: {
@@ -216,7 +282,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null)
         validated_by_id: agent.id,
         validated_at: new Date(),
         commentaire: commentaireTrimmed || null,
-        ...(signature_url ? { signature_url } : {}),
+        // Plus de signature_url
         updated_at: new Date(),
       },
     });
@@ -455,10 +521,128 @@ async function rejectStep(stepId, userId, commentaire) {
   return { rejected: true, stepId: result.stepId, demandeId: result.demandeId };
 }
 
+async function returnForModification(stepId, userId, commentaire) {
+  const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
+  if (!commentaireTrimmed) throw withStatusCode(new Error("Commentaire obligatoire"), 400);
+
+  const result = await prisma.$transaction(async (tx) => {
+    const step = await tx.validation_steps.findUnique({
+      where: { id: Number(stepId) },
+      include: {
+        demandes_paiement: {
+          include: {
+            agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+          },
+        },
+      },
+    });
+
+    if (!step || step.status !== "en_attente") throw withStatusCode(new Error("Étape invalide"), 400);
+    const stepLevel = Number(step.level || 0);
+    if (!stepLevel) {
+      throw withStatusCode(new Error("Étape invalide"), 400);
+    }
+
+    const agent = await tx.agents.findFirst({
+      where: { user_id: Number(userId), deleted_at: null },
+      include: { roles: true, users: true },
+    });
+    if (!agent || !agent.roles?.name) throw withStatusCode(new Error("Non autorisé"), 403);
+
+    const ok = await canActByDelegation(tx, step, agent);
+    if (!ok) throw withStatusCode(new Error("Non autorisé"), 403);
+
+    const previous =
+      stepLevel > 1
+        ? await tx.validation_steps.findFirst({
+            where: { demande_id: Number(step.demande_id), level: stepLevel - 1 },
+          })
+        : null;
+    if (stepLevel > 1 && !previous) throw withStatusCode(new Error("Étape précédente introuvable"), 400);
+
+    // 1) Marquer l'étape courante comme "retour_modification" (on garde le motif)
+    await tx.validation_steps.update({
+      where: { id: step.id },
+      data: {
+        status: "retour_modification",
+        commentaire: commentaireTrimmed,
+        updated_at: new Date(),
+      },
+    });
+
+    // 2) Forcer la re-validation de l'étape N-1 (elle sera rouverte après correction)
+    if (previous) {
+      await tx.validation_steps.update({
+        where: { id: previous.id },
+        data: {
+          status: "bloque",
+          validated_by_id: null,
+          validated_at: null,
+          signature_url: null,
+          commentaire: null,
+          updated_at: new Date(),
+        },
+      });
+    }
+
+    // 3) Bloquer les étapes suivantes (sécurité)
+    await tx.validation_steps.updateMany({
+      where: { demande_id: Number(step.demande_id), level: { gt: Number(step.level) } },
+      data: { status: "bloque", updated_at: new Date() },
+    });
+
+    // 4) Passer la demande en "a_modifier" (éditable par le demandeur)
+    await tx.demandes_paiement.update({
+      where: { id: Number(step.demande_id) },
+      data: { statut: "a_modifier", updated_at: new Date() },
+    });
+
+    const demandeurUser = step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users;
+    return {
+      returned: true,
+      stepId: step.id,
+      demandeId: step.demande_id,
+      demandeUuid: step.demandes_paiement?.uuid || null,
+      demandeurUserId: demandeurUser?.id || null,
+      role: step.role_name,
+      commentaire: commentaireTrimmed,
+      previousRole: previous?.role_name || null,
+      previousLevel: previous?.level || null,
+    };
+  });
+
+  try {
+    if (result?.demandeurUserId) {
+      await notifications.createNotification({
+        user_id: result.demandeurUserId,
+        type: "demande_returned_for_modification",
+        demande_id: result.demandeId,
+        message: `Votre demande a été retournée pour modification (${result.role}). Motif: ${result.commentaire}`,
+        meta: {
+          demandeUuid: result.demandeUuid,
+          fromRole: result.role,
+          previousRole: result.previousRole,
+          previousLevel: result.previousLevel,
+          commentaire: result.commentaire,
+        },
+        sendEmailNow: true,
+      });
+    }
+  } catch {
+    // ignore
+  }
+
+  return { returned: true, stepId: result.stepId, demandeId: result.demandeId };
+}
+
 async function getStepsByDemande(demandeId) {
   return prisma.validation_steps.findMany({
     where: { demande_id: Number(demandeId) },
     orderBy: { level: "asc" },
+    include: {
+      agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
+      agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
+    },
   });
 }
 
@@ -473,7 +657,11 @@ async function getValidationsDoneBydemande(demandeIdOrUuid) {
 
   return prisma.validation_steps.findMany({
     where: { demande_id: demande.id, status: "valide", demandes_paiement: { is: { deleted_at: null } } },
-    include: { demandes_paiement: true },
+    include: {
+      demandes_paiement: true,
+      agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
+      agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
+    },
     orderBy: { validated_at: "desc" },
   });
 }
@@ -485,14 +673,22 @@ async function validationDone(userId) {
   return prisma.validation_steps.findMany({
     where: { validated_by_id: agent.id, status: "valide", demandes_paiement: { is: { deleted_at: null } } },
     orderBy: { validated_at: "desc" },
-    include: { demandes_paiement: true },
+    include: {
+      demandes_paiement: true,
+      agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
+      agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
+    },
   });
 }
 
 async function getByUuid(uuid) {
   return prisma.validation_steps.findFirst({
     where: { uuid: String(uuid), demandes_paiement: { is: { deleted_at: null } } },
-    include: { demandes_paiement: { include: { documents: true } } },
+    include: {
+      demandes_paiement: { include: { documents: true } },
+      agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
+      agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
+    },
   });
 }
 
@@ -500,6 +696,7 @@ module.exports = {
   getPendingForUser,
   approveStep,
   rejectStep,
+  returnForModification,
   getStepsByDemande,
   validationDone,
   getByUuid,

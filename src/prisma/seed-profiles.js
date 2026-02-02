@@ -12,7 +12,7 @@ function hasFlag(name) {
   return process.argv.includes(name);
 }
 
-async function upsertUserWithRole({ prisma, email, password, nom, prenom, roleName, forcePassword }) {
+async function upsertUserWithRole({ prisma, email, password, nom, prenom, roleName, forcePassword, pruneGlobalValidators }) {
   const role = await prisma.roles.findUnique({ where: { name: roleName } });
   if (!role) throw new Error(`ROLE_NOT_FOUND:${roleName}`);
 
@@ -74,6 +74,18 @@ async function upsertUserWithRole({ prisma, email, password, nom, prenom, roleNa
     });
   }
 
+  // Optional: prune duplicate agents for global validator roles so resolver picks the seeded profile.
+  if (pruneGlobalValidators && ["DG", "DGA", "DAF"].includes(String(roleName || "").toUpperCase())) {
+    await prisma.agents.updateMany({
+      where: {
+        role_id: role.id,
+        deleted_at: null,
+        user_id: { not: user.id },
+      },
+      data: { deleted_at: new Date() },
+    });
+  }
+
   return user;
 }
 
@@ -86,10 +98,12 @@ async function main() {
     "Test@1234";
 
   const forcePassword = hasFlag("--force-password");
+  const pruneGlobalValidators = hasFlag("--prune-global-validators");
 
   const profiles = [
     { roleName: "ADMIN", email: "admin@gp.local", nom: "Admin", prenom: "GP" },
     { roleName: "DEMANDEUR", email: "demandeur@gp.local", nom: "Demandeur", prenom: "GP" },
+    { roleName: "ASSISTANTE_TECHNIQUE", email: "assistante.tech@gp.local", nom: "Assistante", prenom: "Technique" },
     { roleName: "RESPONSABLE", email: "responsable@gp.local", nom: "Responsable", prenom: "GP" },
     { roleName: "DIRECTEUR", email: "directeur@gp.local", nom: "Directeur", prenom: "GP" },
     { roleName: "DAF", email: "daf@gp.local", nom: "DAF", prenom: "GP" },
@@ -109,6 +123,7 @@ async function main() {
         prenom: p.prenom,
         roleName: p.roleName,
         forcePassword,
+        pruneGlobalValidators,
       });
       results.push({ role: p.roleName, email: user.email, userId: user.id });
     }
@@ -120,6 +135,9 @@ async function main() {
     console.log(`Mot de passe: ${password === "Test@1234" ? "Test@1234" : "(custom)"}`);
     if (!forcePassword) {
       console.log("Note: utilise --force-password pour réécrire les mots de passe existants.");
+    }
+    if (pruneGlobalValidators) {
+      console.log("Note: --prune-global-validators actif (DG/DGA/DAF: suppression soft des doublons d'agents). ");
     }
   } finally {
     await prisma.$disconnect();

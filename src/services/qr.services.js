@@ -248,9 +248,8 @@ async function verifyToken({ token, user = null }) {
     isFinal,
     finalizedAt: String(parsed.finalizedIso),
     ref: String(parsed.sig).slice(0, 16),
-    document: showDetails
+        document: showDetails
       ? {
-          fournisseur: reception.fournisseur,
           description: reception.description,
           conforme: reception.conforme,
           date_reception: asIsoDateTime(reception.date_reception),

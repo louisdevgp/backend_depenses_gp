@@ -1,9 +1,10 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
-const requireRole = require("../middlewares/requireRole.middleware");
+const requirePermission = require("../middlewares/requirePermission.middleware");
+const P = require("../constants/permissions");
 const ctrl = require("../controllers/userRoles.controllers");
 
-router.use(auth, requireRole(["ADMIN"]));
+router.use(auth, requirePermission([P.USER_ROLES_MANAGE]));
 
 // remplacer tous les rôles d’un user (mode SET)
 router.put("/users/:idOrUuid/roles", ctrl.setRoles);

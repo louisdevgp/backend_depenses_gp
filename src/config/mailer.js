@@ -81,6 +81,12 @@ async function sendMail({ to, subject, text, html, cc, bcc, attachments }) {
     getEnvAny(["MAIL_FROM_EMAIL", "SMTP_FROM_EMAIL", "EMAIL_FROM_EMAIL"]) ||
     getEnvAny(["MAIL_USER", "SMTP_USER", "EMAIL_USER", "NODEMAILER_USER"]);
 
+  // Allow explicitly disabling email sending in dev/test environments.
+  // Example: set `MAIL_DISABLED=true` to avoid long SMTP connection timeouts.
+  if (getEnvBool(["MAIL_DISABLED", "SMTP_DISABLED", "EMAIL_DISABLED"], false)) {
+    return { skipped: true, reason: "Mailer disabled by env (MAIL_DISABLED/SMTP_DISABLED/EMAIL_DISABLED)" };
+  }
+
   if (!to) throw new Error("sendMail: to is required");
 
   const t = getTransporter();

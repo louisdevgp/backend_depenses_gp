@@ -30,27 +30,40 @@ exports.create = async (req, res) => {
 
 
 exports.list = async (req, res) => {
-  const rows = await receptionsService.listReceptions(req.query);
-  res.json({ success: true, data: rows });
+  try {
+    const rows = await receptionsService.listReceptions(req.query, req.user);
+    res.json({ success: true, data: rows });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
 };
 
 exports.getById = async (req, res) => {
-  const row = await receptionsService.getReceptionById(req.params.id);
-  if (!row) return res.status(404).json({ success: false, message: "Not found" });
-  res.json({ success: true, data: row });
+  try {
+    const row = await receptionsService.getReceptionById(req.params.id, req.user);
+    if (!row) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({ success: true, data: row });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
 };
 
 exports.getByUuid = async (req, res) => {
-  const row = await receptionsService.getReceptionByUuid(req.params.uuid);
-  if (!row) return res.status(404).json({ success: false, message: "Not found" });
-  res.json({ success: true, data: row });
+  try {
+    const row = await receptionsService.getReceptionByUuid(req.params.uuid, req.user);
+    if (!row) return res.status(404).json({ success: false, message: "Not found" });
+    res.json({ success: true, data: row });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
 };
 
 exports.pdf = async (req, res) => {
   try {
+    await receptionsService.assertCanReadReception(req.params.idOrUuid, req.user);
     await pdfService.streamReceptionPdf(res, req.params.idOrUuid, { req });
   } catch (e) {
-    return res.status(404).json({ success: false, message: e.message });
+    return res.status(e.statusCode || 404).json({ success: false, message: e.message });
   }
 };
 

@@ -7,6 +7,12 @@ const P = require("../constants/permissions");
 router.get("/pending", auth, requirePermission(P.VALIDATION_LIST_PENDING), ctrl.listMyPendingValidations);
 router.post("/:stepId/approve", auth, requirePermission(P.VALIDATION_APPROVE), ctrl.approveStep);
 router.post("/:stepId/reject", auth, requirePermission(P.VALIDATION_REJECT), ctrl.rejectStep);
+router.post(
+	"/:stepId/return-for-modification",
+	auth,
+	requirePermission(P.VALIDATION_RETURN_FOR_MODIFICATION),
+	ctrl.returnForModification
+);
 
 router.get("/demande/:demandeId", auth, ctrl.listByDemande);
 router.get("/done", auth, requirePermission(P.VALIDATION_LIST_DONE), ctrl.validationDone);
