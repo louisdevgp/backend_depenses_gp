@@ -5,6 +5,7 @@ const QRCode = require("qrcode");
 const fs = require("fs");
 const path = require("path");
 const Mustache = require("mustache");
+const axios = require("axios");
 const { resolveUploadsPathFromUrl } = require("./signatures.services");
 
 let puppeteer;
@@ -339,6 +340,45 @@ function amountToFrenchWordsFcfa(amount) {
 }
 
 const TEMPLATE_CACHE = new Map();
+const LOGO_CACHE = new Map();
+const DEFAULT_LOGO_URL = "https://res.cloudinary.com/digitkbit/image/upload/v1744802840/logo_bdj4ks.png";
+
+function getCompanyLogoUrl() {
+  return (
+    process.env.COMPANY_LOGO_URL ||
+    process.env.LOGO_URL ||
+    process.env.COMPANY_LOGO ||
+    DEFAULT_LOGO_URL
+  );
+}
+
+async function loadLogoBuffer(url) {
+  if (!url) return null;
+  if (LOGO_CACHE.has(url)) return LOGO_CACHE.get(url);
+
+  let buf = null;
+  try {
+    if (String(url).startsWith("data:image/")) {
+      const base64 = String(url).split(",")[1] || "";
+      buf = base64 ? Buffer.from(base64, "base64") : null;
+    } else {
+      const uploadPath = resolveUploadsPathFromUrl(url);
+      if (uploadPath && fs.existsSync(uploadPath)) {
+        buf = fs.readFileSync(uploadPath);
+      } else if (/^https?:\/\//i.test(String(url))) {
+        const res = await axios.get(String(url), { responseType: "arraybuffer", timeout: 15_000 });
+        buf = Buffer.from(res.data);
+      } else if (fs.existsSync(String(url))) {
+        buf = fs.readFileSync(String(url));
+      }
+    }
+  } catch {
+    buf = null;
+  }
+
+  LOGO_CACHE.set(url, buf);
+  return buf;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -358,10 +398,20 @@ function loadTemplateHtml(filename) {
 }
 
 function applyTemplateVars(html, vars) {
-  return String(html).replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (m, key) => {
-    if (!Object.prototype.hasOwnProperty.call(vars, key)) return "";
-    return escapeHtml(vars[key]);
-  });
+  return Mustache.render(String(html), vars);
+}
+
+function guessLogoMime(url) {
+  const raw = String(url || "").split("?")[0].split("#")[0].toLowerCase();
+  if (raw.endsWith(".svg")) return "image/svg+xml";
+  if (raw.endsWith(".jpg") || raw.endsWith(".jpeg")) return "image/jpeg";
+  if (raw.endsWith(".webp")) return "image/webp";
+  return "image/png";
+}
+
+function dataUrlFromBuffer(buf, mime) {
+  if (!buf) return null;
+  return `data:${mime};base64,${buf.toString("base64")}`;
 }
 
 function injectQrOverlay(html, { qrDataUrl, ref }) {
@@ -509,7 +559,7 @@ function drawCheckBox(doc, x, y, size, checked) {
   }
 }
 
-function drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref }) {
+function drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref, logoBuf }) {
   // Mise en page inspirée du template HTML back/src/templates/reception.html
   // On respecte la procédure: affichage des infos + visas, et QR uniquement quand les deux visas sont présents.
 
@@ -521,10 +571,18 @@ function drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref }) {
   // Typo proche du rendu (Times)
   doc.font("Times-Roman").fontSize(12);
 
-  // Header gauche (logo remplacé par texte + infos société si dispo)
+  // Header gauche (logo + infos société si dispo)
   const brandX = pageLeft;
   const brandY = pageTop - 10;
-  doc.font("Times-Bold").fontSize(18).text("GREEN PAY", brandX, brandY);
+  let infoStartY = brandY + 22;
+  if (logoBuf) {
+    const logoW = 90;
+    const logoH = 36;
+    doc.image(logoBuf, brandX, brandY, { fit: [logoW, logoH] });
+    infoStartY = brandY + logoH + 6;
+  } else {
+    doc.font("Times-Bold").fontSize(18).text("GREEN PAY", brandX, brandY);
+  }
   doc.font("Times-Roman").fontSize(11);
   const tel = process.env.COMPANY_TELEPHONE || process.env.COMPANY_TEL || "";
   const bp = process.env.COMPANY_BP || "";
@@ -537,7 +595,7 @@ function drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref }) {
     reg ? `Régime d'imposition : ${reg}` : null,
   ].filter(Boolean);
   if (lines.length) {
-    doc.text(lines.join("\n"), brandX, brandY + 22, { lineGap: 3 });
+    doc.text(lines.join("\n"), brandX, infoStartY, { lineGap: 3 });
   }
 
   // Titre centré dans un cadre
@@ -670,8 +728,9 @@ function drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref }) {
     doc.text(rightInfo.join("\n"), rightCellX, rightTextY, { width: cellW });
   }
 
-  // QR à droite (uniquement si final)
-  if (isFinal && token && qrBuf) {
+  // QR à droite (uniquement si final) - désactivé par défaut sur réception
+  const showReceptionQr = String(process.env.RECEPTION_QR_ENABLED || "").toLowerCase() === "true";
+  if (showReceptionQr && isFinal && token && qrBuf) {
     const qrSize = 120;
     const qrX = pageRight - qrSize;
     const qrY = sigY + sigH - qrSize;
@@ -818,13 +877,12 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
   };
 
   const formatDafCritere4 = (value) => {
-    const envLabel = process.env.DAF_CRITERE4_LABEL || "Critère 4";
+    const label = "Moyen de paiement";
     const b = parseBooleanLike(value);
-    if (b === true) return { label: envLabel, value: "Oui" };
-    if (b === false) return { label: envLabel, value: "Non" };
+    if (b === true) return { label, value: "Oui" };
+    if (b === false) return { label, value: "Non" };
     const str = value == null ? "" : String(value).trim();
-    if (!str) return { label: envLabel, value: "" };
-    return { label: "Moyen de paiement", value: str };
+    return { label, value: str || "-" };
   };
 
   const bp = yesNoMarks(d.budget_prevu);
@@ -844,7 +902,12 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
         ? "Remise"
         : "Remise";
 
+  const companyLogoUrl = getCompanyLogoUrl();
+  const companyLogoBuf = await loadLogoBuffer(companyLogoUrl);
+  const companyLogoDataUrl = companyLogoBuf ? dataUrlFromBuffer(companyLogoBuf, guessLogoMime(companyLogoUrl)) : null;
+
   const vars = {
+    company_logo_url: companyLogoDataUrl || companyLogoUrl,
     montant: asMoney(montantNet),
     montant_lettres: amountToFrenchWordsFcfa(montantNet),
     montant_brut: asMoney(montantBrut),
@@ -943,9 +1006,10 @@ async function streamReceptionPdfFromData(
   const ref = sig ? String(sig).slice(0, 16) : null;
   const qrText = token ? buildScanUrl(token, req) || token : null;
   const qrBuf = qrText ? await qrPngBuffer(qrText) : null;
+  const logoBuf = await loadLogoBuffer(getCompanyLogoUrl());
 
   sendPdf(res, filename, (doc) => {
-    drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref });
+    drawReceptionSheet(doc, r, { isFinal, qrBuf, token, ref, logoBuf });
   }, { compress: false });
 }
 

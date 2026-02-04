@@ -40,7 +40,10 @@
       
       .logo {
         width: 150px;
-        height: fit-content;
+        height: auto;
+        max-height: 60px;
+        object-fit: contain;
+        display: block;
       }
 
       .org {
@@ -279,7 +282,7 @@
       <!-- HEADER (FIXE) -->
       <div class="header">
         <img
-          src="https://res.cloudinary.com/digitkbit/image/upload/v1744802840/logo_bdj4ks.png"
+          src="{{{company_logo_url}}}"
           class="logo"
           alt="Green - Pay"
         />

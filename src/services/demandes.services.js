@@ -58,7 +58,8 @@ async function assertCanEditDemande({ user, demande, action = "Modification" }) 
   if (demandeurUserId != null) {
     const isOwnerByUserId = Number(demandeurUserId) === Number(actorUserId);
     const isOwnerByAgentId = Number(demande.demandeur_id) === Number(agent.id);
-    if (!isOwnerByUserId && !isOwnerByAgentId) {
+    const isOwnerByUserIdFallback = Number(demande.demandeur_id) === Number(actorUserId);
+    if (!isOwnerByUserId && !isOwnerByAgentId && !isOwnerByUserIdFallback) {
       throw withStatusCode(new Error(`${action} non autorisee`), 403);
     }
     return { agent };
@@ -123,6 +124,15 @@ function assertCanReadDemande({ demande, roles, agent }) {
     throw err;
   }
 
+  const agentUserId = agent?.user_id ?? agent?.users?.id;
+  const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
+  const isOwnerByAgentId = Number(demande.demandeur_id) === Number(agent?.id);
+  const isOwnerByUserId =
+    agentUserId != null && demandeurUserId != null && Number(demandeurUserId) === Number(agentUserId);
+  const isOwnerByUserIdFallback =
+    agentUserId != null && Number(demande.demandeur_id) === Number(agentUserId);
+  if (isOwnerByAgentId || isOwnerByUserId || isOwnerByUserIdFallback) return true;
+
   if (hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"])) return true;
 
   if (hasAnyRole(roles, ["ASSISTANTE_TECHNIQUE"])) {
@@ -146,7 +156,12 @@ function assertCanReadDemande({ demande, roles, agent }) {
   }
 
   if (hasAnyRole(roles, ["DEMANDEUR"])) {
-    if (Number(demande.demandeur_id) !== Number(agent.id)) {
+    const agentUserId = agent?.user_id ?? agent?.users?.id;
+    const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
+    const isOwnerByAgentId = Number(demande.demandeur_id) === Number(agent.id);
+    const isOwnerByUserId =
+      agentUserId != null && demandeurUserId != null && Number(demandeurUserId) === Number(agentUserId);
+    if (!isOwnerByAgentId && !isOwnerByUserId) {
       const err = new Error("Acces refuse");
       err.statusCode = 403;
       throw err;

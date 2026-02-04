@@ -283,8 +283,12 @@ async function createPaiement(payload, comptableAgentId) {
         throw err;
       }
 
-      // Règle: une seule fois par tranche, et ordre imposé (tranche 1 puis tranche 2)
-      const nextTranche = unpaid[0];
+      // Règle: une seule fois par tranche, et ordre imposé (montant le plus élevé en premier)
+      const nextTranche = [...unpaid].sort((a, b) => {
+        const diff = Number(b.montant_prevu || 0) - Number(a.montant_prevu || 0);
+        if (diff !== 0) return diff;
+        return Number(a.id || 0) - Number(b.id || 0);
+      })[0];
       if (!nextTranche) {
         const err = new Error("Aucune tranche à payer");
         err.statusCode = 400;
@@ -350,7 +354,11 @@ async function createPaiement(payload, comptableAgentId) {
     const remainingAfterCreate = unpaidAfterCreate;
 
     if (String(type_paiement).toLowerCase() === "partiel") {
-      const nextTranche = remainingAfterCreate[0];
+      const nextTranche = [...remainingAfterCreate].sort((a, b) => {
+        const diff = Number(b.montant_prevu || 0) - Number(a.montant_prevu || 0);
+        if (diff !== 0) return diff;
+        return Number(a.id || 0) - Number(b.id || 0);
+      })[0];
       if (!nextTranche) {
         const err = new Error("Aucune tranche à payer");
         err.statusCode = 400;
