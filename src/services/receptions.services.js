@@ -64,8 +64,38 @@ async function canActAsDirectorForDemande(tx, agentId, demandeOrg) {
   return !!delegation;
 }
 
-const GLOBAL_READ_ROLES = new Set(["ADMIN", "DG", "DGA", "DAF", "COMPTABLE"]);
-const DIRECTION_READ_ROLES = new Set(["DIRECTEUR", "RESPONSABLE", "ASSISTANTE_TECHNIQUE"]);
+async function canActAsResponsableForDemande(tx, agentId, demandeOrg) {
+  const client = tx || prisma;
+  const agent = await getAgentById(client, agentId);
+  if (!agent || agent.deleted_at) return false;
+
+  const role = normalizeRoleName(agent?.roles?.name);
+  if (role === "ADMIN") return true;
+
+  if (role === "RESPONSABLE") {
+    if (!agent.direction_id || !demandeOrg?.direction_id) return false;
+    return Number(agent.direction_id) === Number(demandeOrg.direction_id);
+  }
+
+  const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
+  const now = new Date();
+  const delegation = await client.delegations.findFirst({
+    where: {
+      delegate_id: Number(agent.id),
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+      role_name: "RESPONSABLE",
+      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    },
+    select: { id: true },
+  });
+
+  return !!delegation;
+}
+
+const GLOBAL_READ_ROLES = new Set(["ADMIN", "DAF"]);
+const DIRECTION_READ_ROLES = new Set(["DIRECTEUR", "RESPONSABLE"]);
 
 async function getAgentFromAuthUser(user) {
   const userId = user?.userId;
@@ -233,12 +263,37 @@ async function createReception(payload, userAgentId) {
       service_id: demande?.service_id ?? null,
     };
 
-    const canCreate = await canActAsDirectorForDemande(tx, userAgentId, demandeOrg);
-    if (!canCreate) {
-      const err = new Error("Seul le Directeur de la direction peut créer une réception");
+    const isOwner = Number(demande.demandeur_id) === Number(userAgentId);
+    const canDirector = await canActAsDirectorForDemande(tx, userAgentId, demandeOrg);
+    const canResponsable = await canActAsResponsableForDemande(tx, userAgentId, demandeOrg);
+    if (!isOwner && !canDirector && !canResponsable) {
+      const err = new Error("Seul le Directeur de la direction, le responsable ou le demandeur peut créer une réception");
       err.statusCode = 403;
       throw err;
     }
+    if ((isOwner || canResponsable) && !canDirector) {
+      const pending = await tx.validation_steps.count({
+        where: {
+          demande_id: Number(demande.id),
+          status: { not: "valide" },
+        },
+      });
+      if (pending > 0) {
+        const err = new Error("Demande non eligible: validations incompl?tes");
+        err.statusCode = 409;
+        throw err;
+      }
+
+      const statut = String(demande?.statut || "").toLowerCase();
+      const allowedStatuts = new Set(["approuvee", "en_attente_paiement", "paye", "payee"]);
+      if (!allowedStatuts.has(statut)) {
+        const err = new Error("Demande non eligible pour r?ception");
+        err.statusCode = 409;
+        throw err;
+      }
+    }
+
+
 
     let hasPaiement = Boolean(paiement_id);
     if (!hasPaiement) {
@@ -268,6 +323,8 @@ async function createReception(payload, userAgentId) {
       throw err;
     }
 
+    const autoVisaDirecteur = canDirector && (conforme != null ? Boolean(conforme) : true);
+
     const reception = await tx.receptions.create({
       data: {
         uuid: uuidv4(),
@@ -277,7 +334,7 @@ async function createReception(payload, userAgentId) {
         date_reception: date_reception ? new Date(date_reception) : new Date(),
         conforme: conforme != null ? Boolean(conforme) : true,
         recu_par_id: Number(userAgentId),
-        visa_directeur_id: (conforme != null ? Boolean(conforme) : true) ? Number(userAgentId) : null,
+        visa_directeur_id: autoVisaDirecteur ? Number(userAgentId) : null,
         created_at: new Date(),
         description: description ? String(description) : "",
         fournisseur: "",
@@ -289,14 +346,10 @@ async function createReception(payload, userAgentId) {
     });
 
     // ✅ statut demande:
-    // - si totalement payée -> cloture
-    // - sinon -> receptionnee
-    const stillUnpaid = await tx.conditions_paiement.count({
-      where: { demande_id: Number(demande.id), paiement_id: null },
-    });
-    const fullyPaid = stillUnpaid === 0;
+    // - si en attente paiement, on conserve
+    // - sinon -> receptionnee (la cloture est manuelle)
     const currentStatut = String(demande?.statut || "").toLowerCase();
-    const nextStatut = fullyPaid ? "cloture" : (currentStatut === "en_attente_paiement" ? "en_attente_paiement" : "receptionnee");
+    const nextStatut = currentStatut === "en_attente_paiement" ? "en_attente_paiement" : "receptionnee";
 
     await tx.demandes_paiement.update({
       where: { id: Number(demande.id) },
@@ -310,7 +363,7 @@ async function createReception(payload, userAgentId) {
       demandeId: Number(demande.id),
       nextStatut,
       paiementId: paiement ? paiement.id : null,
-      autoVisaDirecteur: (conforme != null ? Boolean(conforme) : true),
+      autoVisaDirecteur,
     };
   });
 
@@ -447,7 +500,7 @@ async function assertCanReadReception(idOrUuid, authUser = null) {
 async function updateReception(id, payload, actorAgentId) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) return null;
-  if (existing.visa_daf_id) throw new Error("Reception already approved by DAF");
+  if (existing.visa_directeur_id) throw new Error("Réception déjà visée par le Directeur");
 
   // Autorisation: le receveur ou rôles privilégiés
   const actor = await prisma.agents.findUnique({
@@ -455,7 +508,7 @@ async function updateReception(id, payload, actorAgentId) {
     include: { roles: true },
   });
   const role = String(actor?.roles?.name || "").toUpperCase();
-  const privileged = new Set(["COMPTABLE", "DAF", "ADMIN"]);
+  const privileged = new Set(["ADMIN"]);
   const isOwner = Number(existing.recu_par_id) === Number(actorAgentId);
   if (!isOwner && !privileged.has(role)) throw new Error("Modification non autorisée");
 
@@ -566,23 +619,14 @@ async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire 
   // On ignore les signatures car on ne les gère plus
   const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
 
-  const updated = await prisma.$transaction(async (tx) => {
-    const reception = await tx.receptions.update({
-      where: { id: Number(id) },
-      data: {
-        visa_daf_id: Number(dafAgentId),
-        // Plus de signature_daf_url
-        visa_daf_commentaire: commentaireTrimmed ? commentaireTrimmed : null,
-        updated_at: new Date(),
-      },
-    });
-
-    await tx.demandes_paiement.update({
-      where: { id: Number(existing.demande_id) },
-      data: { statut: "cloture", updated_at: new Date() },
-    });
-
-    return reception;
+  const updated = await prisma.receptions.update({
+    where: { id: Number(id) },
+    data: {
+      visa_daf_id: Number(dafAgentId),
+      // Plus de signature_daf_url
+      visa_daf_commentaire: commentaireTrimmed ? commentaireTrimmed : null,
+      updated_at: new Date(),
+    },
   });
 
   try {
@@ -594,7 +638,7 @@ async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire 
         user_id: demandeurUserId,
         type: "reception_visa_daf",
         demande_id: existing.demande_id,
-        message: "La réception a été visée par le DAF.",
+        message: "La réception a été visée par le DAF. Tous les visas sont faits, vous pouvez clôturer votre demande.",
         meta: { receptionId: updated.id, receptionUuid: updated.uuid },
         sendEmailNow: true,
       });
@@ -609,11 +653,16 @@ async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire 
 async function deleteReception(id, actorAgentId) {
   const existing = await prisma.receptions.findUnique({
     where: { id: Number(id) },
-    select: { id: true, uuid: true, demande_id: true, recu_par_id: true },
+    select: { id: true, uuid: true, demande_id: true, recu_par_id: true, visa_directeur_id: true },
   });
   if (!existing) {
     const err = new Error("Reception introuvable");
     err.statusCode = 404;
+    throw err;
+  }
+  if (existing.visa_directeur_id) {
+    const err = new Error("Réception déjà visée par le Directeur");
+    err.statusCode = 409;
     throw err;
   }
 
@@ -623,7 +672,7 @@ async function deleteReception(id, actorAgentId) {
     include: { roles: true },
   });
   const role = String(actor?.roles?.name || "").toUpperCase();
-  const privileged = new Set(["COMPTABLE", "DAF", "ADMIN"]);
+  const privileged = new Set(["ADMIN"]);
   const isOwner = Number(existing.recu_par_id) === Number(actorAgentId);
   if (!isOwner && !privileged.has(role)) {
     const err = new Error("Suppression non autorisée");

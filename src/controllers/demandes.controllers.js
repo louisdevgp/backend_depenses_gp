@@ -79,3 +79,13 @@ exports.softDelete = async (req, res) => {
     return res.status(status).json({ success: false, message: e.message });
   }
 };
+
+exports.close = async (req, res) => {
+  try {
+    const result = await service.closeDemande(req.user, req.params.idOrUuid);
+    return res.json({ success: true, data: result });
+  } catch (e) {
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message });
+  }
+};

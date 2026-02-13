@@ -102,6 +102,35 @@ function demandeWhereForScope(scopeRaw) {
   return null;
 }
 
+function normalizeCancelAction(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (!v || ["cancel", "annuler", "annulation"].includes(v)) return "cancel";
+  if (
+    [
+      "return",
+      "retour",
+      "retour_modification",
+      "return_for_modification",
+      "modification",
+      "a_modifier",
+    ].includes(v)
+  ) {
+    return "return_for_modification";
+  }
+  if (
+    [
+      "cancel_demande",
+      "annuler_demande",
+      "annulation_demande",
+      "demande_cancel",
+      "delete_demande",
+    ].includes(v)
+  ) {
+    return "cancel_demande";
+  }
+  return "cancel";
+}
+
 function toStageStatus(roleName) {
   return `validation_${String(roleName).toLowerCase()}`;
 }
@@ -692,6 +721,176 @@ async function getByUuid(uuid) {
   });
 }
 
+async function cancelStep(stepId, userId, payload = {}) {
+  const action = normalizeCancelAction(payload?.action ?? payload?.mode ?? payload?.type);
+  const commentaireTrimmed = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
+
+  if (["return_for_modification", "cancel_demande"].includes(action) && !commentaireTrimmed) {
+    throw withStatusCode(new Error("Commentaire obligatoire"), 400);
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const step = await tx.validation_steps.findUnique({
+      where: { id: Number(stepId) },
+      include: {
+        demandes_paiement: {
+          include: {
+            agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+          },
+        },
+      },
+    });
+
+    if (!step) throw withStatusCode(new Error("Etape introuvable"), 404);
+    if (step.status !== "valide") throw withStatusCode(new Error("Etape non annulable"), 409);
+
+    const laterValidated = await tx.validation_steps.count({
+      where: {
+        demande_id: Number(step.demande_id),
+        level: { gt: Number(step.level) },
+        status: "valide",
+      },
+    });
+    if (laterValidated > 0) {
+      throw withStatusCode(new Error("Annulation impossible: validation superieure deja effectuee"), 409);
+    }
+
+    const agent = await getAgentFromUserId(userId);
+    if (!agent || !agent.roles?.name) throw withStatusCode(new Error("Non autorise"), 403);
+
+    const canSelf = await canActByDelegation(tx, step, agent);
+    let canByNext = false;
+    let nextStep = null;
+
+    if (!canSelf) {
+      nextStep = await tx.validation_steps.findFirst({
+        where: { demande_id: Number(step.demande_id), level: Number(step.level) + 1 },
+      });
+      if (nextStep && String(nextStep.status || "").toLowerCase() !== "valide") {
+        canByNext = await canActByDelegation(tx, nextStep, agent);
+      }
+    }
+
+    if (!canSelf && !canByNext) {
+      throw withStatusCode(new Error("Non autorise"), 403);
+    }
+
+    await tx.validation_steps.updateMany({
+      where: { demande_id: Number(step.demande_id), level: { gt: Number(step.level) } },
+      data: { status: "bloque", updated_at: new Date() },
+    });
+
+    if (action === "return_for_modification") {
+      await tx.validation_steps.update({
+        where: { id: step.id },
+        data: {
+          status: "retour_modification",
+          commentaire: commentaireTrimmed || null,
+          updated_at: new Date(),
+        },
+      });
+
+      if (Number(step.level) > 1) {
+        const previous = await tx.validation_steps.findFirst({
+          where: { demande_id: Number(step.demande_id), level: Number(step.level) - 1 },
+        });
+        if (previous) {
+          await tx.validation_steps.update({
+            where: { id: previous.id },
+            data: {
+              status: "bloque",
+              validated_by_id: null,
+              validated_at: null,
+              signature_url: null,
+              commentaire: null,
+              updated_at: new Date(),
+            },
+          });
+        }
+      }
+
+      await tx.demandes_paiement.update({
+        where: { id: Number(step.demande_id) },
+        data: { statut: "a_modifier", updated_at: new Date() },
+      });
+
+      return {
+        action,
+        stepId: step.id,
+        demandeId: step.demande_id,
+        demandeUuid: step.demandes_paiement?.uuid || null,
+        demandeurUserId: step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null,
+      };
+    }
+
+    await tx.validation_steps.update({
+      where: { id: step.id },
+      data: {
+        status: "en_attente",
+        validated_by_id: null,
+        validated_at: null,
+        signature_url: null,
+        commentaire: commentaireTrimmed || null,
+        updated_at: new Date(),
+      },
+    });
+
+    if (action === "cancel_demande") {
+      await tx.demandes_paiement.update({
+        where: { id: Number(step.demande_id) },
+        data: { deleted_at: new Date(), updated_at: new Date() },
+      });
+
+      return {
+        action,
+        stepId: step.id,
+        demandeId: step.demande_id,
+        demandeUuid: step.demandes_paiement?.uuid || null,
+        demandeurUserId: step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null,
+      };
+    }
+
+    const stage = await setDemandeStageFromCurrentStep(tx, step.demande_id);
+
+    return {
+      action,
+      stepId: step.id,
+      demandeId: step.demande_id,
+      demandeUuid: step.demandes_paiement?.uuid || null,
+      demandeurUserId: step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null,
+      stage,
+    };
+  });
+
+  try {
+    if (result?.demandeurUserId) {
+      const message =
+        result.action === "cancel_demande"
+          ? "Une validation a ete annulee et la demande a ete annulee."
+          : result.action === "return_for_modification"
+            ? "Une validation a ete annulee et la demande est retournee pour modification."
+            : "Une validation a ete annulee.";
+
+      await notifications.createNotification({
+        user_id: result.demandeurUserId,
+        type: "validation_cancelled",
+        demande_id: result.demandeId,
+        message,
+        meta: {
+          stepId: result.stepId,
+          demandeUuid: result.demandeUuid,
+          action: result.action,
+        },
+        sendEmailNow: false,
+      });
+    }
+  } catch {
+    // ignore notification errors
+  }
+
+  return result;
+}
+
 module.exports = {
   getPendingForUser,
   approveStep,
@@ -701,4 +900,5 @@ module.exports = {
   validationDone,
   getByUuid,
   getValidationsDoneBydemande,
+  cancelStep,
 };

@@ -381,13 +381,10 @@ async function createPaiement(payload, comptableAgentId) {
       where: { demande_id: Number(demande_id), paiement_id: null },
     });
     const fullyPaid = stillUnpaid === 0;
-    const hasReception = await tx.receptions.count({ where: { demande_id: Number(demande_id) } });
 
     // Règle: un paiement partiel ne doit jamais "bloquer" la capacité à payer.
     // Donc tant que ce n'est pas totalement payé => en_attente_paiement (même si réception existe).
-    const nextStatut = fullyPaid
-      ? (hasReception > 0 ? "cloture" : "paye")
-      : "en_attente_paiement";
+    const nextStatut = fullyPaid ? "paye" : "en_attente_paiement";
 
     await tx.demandes_paiement.update({
       where: { id: Number(demande_id) },
@@ -403,10 +400,7 @@ async function createPaiement(payload, comptableAgentId) {
     if (demandeurUser?.id) {
       const stillUnpaid = await prisma.conditions_paiement.count({ where: { demande_id: Number(demande_id), paiement_id: null } });
       const fullyPaid = stillUnpaid === 0;
-      const hasReception = await prisma.receptions.count({ where: { demande_id: Number(demande_id) } });
-      const nextStatut = fullyPaid
-        ? (hasReception > 0 ? "cloture" : "paye")
-        : "en_attente_paiement";
+      const nextStatut = fullyPaid ? "paye" : "en_attente_paiement";
 
       await notifications.createNotification({
         user_id: demandeurUser.id,
@@ -687,11 +681,10 @@ async function deletePaiement(id, actorAgentId) {
     const demandeId = Number(snapshot.demande_id);
     const stillUnpaid = await tx.conditions_paiement.count({ where: { demande_id: demandeId, paiement_id: null } });
     const fullyPaid = stillUnpaid === 0;
-    const hasReception = await tx.receptions.count({ where: { demande_id: demandeId } });
     const hasAnyPaiement = await tx.paiements.count({ where: { demande_id: demandeId } });
 
     const nextStatut = fullyPaid
-      ? (hasReception > 0 ? "cloture" : "paye")
+      ? "paye"
       : (hasAnyPaiement > 0 ? "en_attente_paiement" : "approuvee");
 
     await tx.demandes_paiement.update({

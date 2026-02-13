@@ -7,6 +7,7 @@ const P = require("../constants/permissions");
 router.get("/pending", auth, requirePermission(P.VALIDATION_LIST_PENDING), ctrl.listMyPendingValidations);
 router.post("/:stepId/approve", auth, requirePermission(P.VALIDATION_APPROVE), ctrl.approveStep);
 router.post("/:stepId/reject", auth, requirePermission(P.VALIDATION_REJECT), ctrl.rejectStep);
+router.post("/:stepId/cancel", auth, requirePermission(P.VALIDATION_CANCEL), ctrl.cancelStep);
 router.post(
 	"/:stepId/return-for-modification",
 	auth,

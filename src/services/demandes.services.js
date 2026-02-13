@@ -99,12 +99,6 @@ function hasAnyRole(roles, needles) {
 function applyListScopeForUser({ where, roles, agent }) {
   if (hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"])) return where;
 
-  if (hasAnyRole(roles, ["ASSISTANTE_TECHNIQUE"])) {
-    const dirId = agent?.direction_id ? Number(agent.direction_id) : null;
-    if (!dirId) return { ...where, id: -1 };
-    return { ...where, direction_id: dirId };
-  }
-
   if (hasAnyRole(roles, ["RESPONSABLE", "DIRECTEUR"])) {
     const dirId = agent?.direction_id ? Number(agent.direction_id) : null;
     if (!dirId) return { ...where, id: -1 };
@@ -134,16 +128,6 @@ function assertCanReadDemande({ demande, roles, agent }) {
   if (isOwnerByAgentId || isOwnerByUserId || isOwnerByUserIdFallback) return true;
 
   if (hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"])) return true;
-
-  if (hasAnyRole(roles, ["ASSISTANTE_TECHNIQUE"])) {
-    const dirId = agent?.direction_id ? Number(agent.direction_id) : null;
-    if (!dirId || Number(demande.direction_id) !== dirId) {
-      const err = new Error("Acces refuse: demande hors de votre direction");
-      err.statusCode = 403;
-      throw err;
-    }
-    return true;
-  }
 
   if (hasAnyRole(roles, ["RESPONSABLE", "DIRECTEUR"])) {
     const dirId = agent?.direction_id ? Number(agent.direction_id) : null;
@@ -948,10 +932,43 @@ exports.softDelete = async (user, idOrUuid) => {
   const demande = await exports.getOne(user, idOrUuid);
   await assertCanEditDemande({ user, demande, action: "Suppression" });
 
+  const engaged = await prisma.validation_steps.count({
+    where: {
+      demande_id: demande.id,
+      status: { notIn: ["en_attente", "bloque"] },
+    },
+  });
+  if (engaged > 0) {
+    throw withStatusCode(new Error("Suppression interdite: validation deja engagee"), 409);
+  }
+
   await prisma.demandes_paiement.update({
     where: { id: demande.id },
     data: { deleted_at: new Date(), updated_at: new Date() },
   });
 
   return true;
+};
+
+exports.closeDemande = async (user, idOrUuid) => {
+  const demande = await exports.getOne(user, idOrUuid);
+  await assertCanEditDemande({ user, demande, action: "Cloture" });
+
+  const statut = String(demande?.statut || "").toLowerCase();
+  if (["cloture", "cloturee"].includes(statut)) return demande;
+
+  const hasVisaDaf =
+    Array.isArray(demande?.receptions) &&
+    demande.receptions.some((r) => r?.visa_daf_id);
+
+  if (!hasVisaDaf) {
+    throw withStatusCode(new Error("Cloture interdite: visa DAF requis"), 409);
+  }
+
+  const updated = await prisma.demandes_paiement.update({
+    where: { id: demande.id },
+    data: { statut: "cloture", updated_at: new Date() },
+  });
+
+  return updated;
 };

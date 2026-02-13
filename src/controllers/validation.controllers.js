@@ -49,6 +49,24 @@ exports.returnForModification = async (req, res) => {
   }
 };
 
+exports.cancelStep = async (req, res) => {
+  const { stepId } = req.params;
+  const { commentaire, action, mode, type } = req.body || {};
+
+  try {
+    const result = await service.cancelStep(stepId, req.user.userId, {
+      commentaire,
+      action,
+      mode,
+      type,
+    });
+    return res.json({ success: true, message: "Validation annulee", data: result });
+  } catch (e) {
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message });
+  }
+};
+
 exports.listByDemande = async (req, res) => {
   const data = await service.getStepsByDemande(req.params.demandeId);
   res.json({ success: true, data });
