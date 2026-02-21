@@ -279,7 +279,7 @@ async function createReception(payload, userAgentId) {
         },
       });
       if (pending > 0) {
-        const err = new Error("Demande non eligible: validations incompl?tes");
+        const err = new Error("Demande non eligible: validations incomplètes");
         err.statusCode = 409;
         throw err;
       }
@@ -287,7 +287,7 @@ async function createReception(payload, userAgentId) {
       const statut = String(demande?.statut || "").toLowerCase();
       const allowedStatuts = new Set(["approuvee", "en_attente_paiement", "paye", "payee"]);
       if (!allowedStatuts.has(statut)) {
-        const err = new Error("Demande non eligible pour r?ception");
+        const err = new Error("Demande non eligible pour réception");
         err.statusCode = 409;
         throw err;
       }
@@ -349,7 +349,8 @@ async function createReception(payload, userAgentId) {
     // - si en attente paiement, on conserve
     // - sinon -> receptionnee (la cloture est manuelle)
     const currentStatut = String(demande?.statut || "").toLowerCase();
-    const nextStatut = currentStatut === "en_attente_paiement" ? "en_attente_paiement" : "receptionnee";
+    const keepStatuts = new Set(["en_attente_paiement", "paye", "payee", "cloture", "cloturee", "receptionnee"]);
+    const nextStatut = keepStatuts.has(currentStatut) ? currentStatut : "receptionnee";
 
     await tx.demandes_paiement.update({
       where: { id: Number(demande.id) },
@@ -390,7 +391,7 @@ async function createReception(payload, userAgentId) {
           user_id: dafUserId,
           type: "reception_visa_pending",
           demande_id: result.demandeId,
-          message: "Une rÃ©ception attend votre Visa DAF.",
+          message: "Une réception attend votre Visa DAF.",
           meta: {
             receptionId: result.reception.id,
             receptionUuid: result.reception.uuid,
