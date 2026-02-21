@@ -17,6 +17,12 @@ router.get(
   ctrl.pdf
 );
 router.get(
+  "/:idOrUuid/validation-history",
+  auth,
+  requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_SELF, P.VALIDATION_LIST_PENDING, P.VALIDATION_LIST_DONE]),
+  ctrl.validationHistory
+);
+router.get(
   "/:idOrUuid",
   auth,
   requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_SELF, P.VALIDATION_LIST_PENDING, P.VALIDATION_LIST_DONE]),

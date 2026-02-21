@@ -170,6 +170,21 @@ exports.assertCanReadDemandeByIdOrUuid = async (user, idOrUuid) => {
   return true;
 };
 
+exports.getDemandeHeader = async (user, idOrUuid) => {
+  const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
+
+  const demande = await prisma.demandes_paiement.findFirst({
+    where: { ...where, deleted_at: null },
+    select: { id: true, uuid: true, demandeur_id: true, direction_id: true },
+  });
+
+  const agent = await getAgentFromUser(user);
+  const roles = userEffectiveRoles(user, agent);
+  assertCanReadDemande({ demande, roles, agent });
+
+  return demande;
+};
+
 function normalizeBooleanLikeString(value) {
   if (typeof value !== "string") return null;
   const v = value.trim().toLowerCase();
@@ -335,6 +350,22 @@ async function resolveValidatorForRole(tx, roleName, demandeOrg) {
     deleted_at: null,
     roles: { is: { name: role } },
   };
+
+  if (role === "RESPONSABLE") {
+    const demandeurId = demandeOrg?.demandeur_id ? Number(demandeOrg.demandeur_id) : null;
+    if (demandeurId) {
+      const demandeur = await tx.agents.findFirst({
+        where: { id: demandeurId, deleted_at: null },
+        select: { manager_id: true },
+      });
+      if (demandeur?.manager_id) {
+        const manager = await tx.agents.findFirst({
+          where: { id: Number(demandeur.manager_id), deleted_at: null },
+        });
+        if (manager) return manager;
+      }
+    }
+  }
 
   if (["RESPONSABLE", "DIRECTEUR", "ASSISTANTE_TECHNIQUE"].includes(role)) {
     if (!demandeOrg?.direction_id) return null;

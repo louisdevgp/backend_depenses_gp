@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const notifications = require("./notifications.services");
+const auditLogs = require("./auditLogs.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
 
 function withStatusCode(err, statusCode) {
@@ -102,6 +103,23 @@ function demandeWhereForScope(scopeRaw) {
   return null;
 }
 
+function buildDemandeSnapshot(demande) {
+  if (!demande) return null;
+  const toPlainNumber = (value) => {
+    if (value == null) return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : String(value);
+  };
+  return {
+    id: demande.id ?? null,
+    uuid: demande.uuid ?? null,
+    motif: demande.motif ?? null,
+    montant: toPlainNumber(demande.montant),
+    montant_net: toPlainNumber(demande.montant_net),
+    beneficiaire: demande.beneficiaire ?? null,
+  };
+}
+
 function normalizeCancelAction(value) {
   const v = String(value || "").trim().toLowerCase();
   if (!v || ["cancel", "annuler", "annulation"].includes(v)) return "cancel";
@@ -129,6 +147,15 @@ function normalizeCancelAction(value) {
     return "cancel_demande";
   }
   return "cancel";
+}
+
+function statusFromAuditAction(action) {
+  const a = String(action || "").toLowerCase();
+  if (a === "validation_approved") return "valide";
+  if (a === "validation_rejected") return "rejete";
+  if (a === "validation_returned") return "retour_modification";
+  if (a === "validation_cancelled") return "annulee";
+  return null;
 }
 
 function toStageStatus(roleName) {
@@ -362,10 +389,12 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         departement_id: step.demandes_paiement?.departement_id || null,
         service_id: step.demandes_paiement?.service_id || null,
       },
+      demandeSnapshot: buildDemandeSnapshot(step.demandes_paiement),
       validationUuid: step.uuid || null,
       stage,
       demandeurUserId: demandeurUser?.id || null,
       role: step.role_name,
+      commentaire: commentaireTrimmed || null,
       nextValidatorUserId,
       nextValidatorAgentId,
       nextRole,
@@ -373,6 +402,32 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       nextStepUuid,
     };
   });
+
+  try {
+    await auditLogs.logAudit({
+      userId,
+      entity_type: "validation_steps",
+      entity_id: result.stepId,
+      action: "validation_approved",
+      old_value: null,
+      new_value: {
+        action: "approved",
+        status: "valide",
+        step_id: result.stepId,
+        step_uuid: result.validationUuid || null,
+        role_name: result.role || null,
+        demande_id: result.demandeId,
+        demande_uuid: result.demandeUuid || null,
+        commentaire: result.commentaire || null,
+        demande_motif: result.demandeSnapshot?.motif ?? null,
+        demande_montant: result.demandeSnapshot?.montant ?? null,
+        demande_montant_net: result.demandeSnapshot?.montant_net ?? null,
+        demande_beneficiaire: result.demandeSnapshot?.beneficiaire ?? null,
+      },
+    });
+  } catch {
+    // ignore audit errors
+  }
 
   // Notifications after commit (safe for email)
   try {
@@ -528,9 +583,36 @@ async function rejectStep(stepId, userId, commentaire) {
       validationUuid: step.uuid || null,
       demandeurUserId: demandeurUser?.id || null,
       role: step.role_name,
+      demandeSnapshot: buildDemandeSnapshot(step.demandes_paiement),
       commentaire,
     };
   });
+
+  try {
+    await auditLogs.logAudit({
+      userId,
+      entity_type: "validation_steps",
+      entity_id: result.stepId,
+      action: "validation_rejected",
+      old_value: null,
+      new_value: {
+        action: "rejected",
+        status: "rejete",
+        step_id: result.stepId,
+        step_uuid: result.validationUuid || null,
+        role_name: result.role || null,
+        demande_id: result.demandeId,
+        demande_uuid: result.demandeUuid || null,
+        commentaire: result.commentaire || null,
+        demande_motif: result.demandeSnapshot?.motif ?? null,
+        demande_montant: result.demandeSnapshot?.montant ?? null,
+        demande_montant_net: result.demandeSnapshot?.montant_net ?? null,
+        demande_beneficiaire: result.demandeSnapshot?.beneficiaire ?? null,
+      },
+    });
+  } catch {
+    // ignore audit errors
+  }
 
   try {
     if (result?.demandeurUserId) {
@@ -632,13 +714,41 @@ async function returnForModification(stepId, userId, commentaire) {
       stepId: step.id,
       demandeId: step.demande_id,
       demandeUuid: step.demandes_paiement?.uuid || null,
+      validationUuid: step.uuid || null,
       demandeurUserId: demandeurUser?.id || null,
       role: step.role_name,
+      demandeSnapshot: buildDemandeSnapshot(step.demandes_paiement),
       commentaire: commentaireTrimmed,
       previousRole: previous?.role_name || null,
       previousLevel: previous?.level || null,
     };
   });
+
+  try {
+    await auditLogs.logAudit({
+      userId,
+      entity_type: "validation_steps",
+      entity_id: result.stepId,
+      action: "validation_returned",
+      old_value: null,
+      new_value: {
+        action: "return_for_modification",
+        status: "retour_modification",
+        step_id: result.stepId,
+        step_uuid: result.validationUuid || null,
+        role_name: result.role || null,
+        demande_id: result.demandeId,
+        demande_uuid: result.demandeUuid || null,
+        commentaire: result.commentaire || null,
+        demande_motif: result.demandeSnapshot?.motif ?? null,
+        demande_montant: result.demandeSnapshot?.montant ?? null,
+        demande_montant_net: result.demandeSnapshot?.montant_net ?? null,
+        demande_beneficiaire: result.demandeSnapshot?.beneficiaire ?? null,
+      },
+    });
+  } catch {
+    // ignore audit errors
+  }
 
   try {
     if (result?.demandeurUserId) {
@@ -721,11 +831,214 @@ async function getByUuid(uuid) {
   });
 }
 
+async function validationHistory(userId, options = {}) {
+  const takeRaw = options?.take;
+  const take = Number.isFinite(Number(takeRaw)) ? Number(takeRaw) : 200;
+
+  const logs = await prisma.audit_logs.findMany({
+    where: {
+      user_id: Number(userId),
+      entity_type: "validation_steps",
+    },
+    orderBy: { created_at: "desc" },
+    take,
+  });
+
+  if (!logs.length) return [];
+
+  let entries = logs.map((log) => {
+    const nv = log?.new_value && typeof log.new_value === "object" ? log.new_value : {};
+    const stepIdRaw = nv.step_id ?? log.entity_id;
+    const stepId = stepIdRaw != null ? Number(stepIdRaw) : null;
+    const status = nv.status || statusFromAuditAction(log.action) || null;
+    const demande =
+      nv.demande_uuid || nv.demande_motif || nv.demande_montant != null
+        ? {
+            uuid: nv.demande_uuid ?? null,
+            motif: nv.demande_motif ?? null,
+            montant: nv.demande_montant ?? null,
+            montant_net: nv.demande_montant_net ?? null,
+            beneficiaire: nv.demande_beneficiaire ?? null,
+          }
+        : null;
+
+    return {
+      audit_id: log.id,
+      step_id: stepId,
+      id: stepId,
+      uuid: nv.step_uuid ?? null,
+      role_name: nv.role_name ?? null,
+      status,
+      action: nv.action ?? log.action ?? null,
+      cancel_mode: nv.cancel_mode ?? null,
+      commentaire: nv.commentaire ?? null,
+      validated_at: log.created_at,
+      demande_id: nv.demande_id != null ? Number(nv.demande_id) : null,
+      demande_uuid: nv.demande_uuid ?? null,
+      demande,
+    };
+  });
+
+  const stepIdsRaw = Array.from(new Set(entries.map((e) => e.step_id).filter(Boolean)));
+  if (stepIdsRaw.length > 0) {
+    const steps = await prisma.validation_steps.findMany({
+      where: { id: { in: stepIdsRaw }, demandes_paiement: { is: { deleted_at: null } } },
+      select: { id: true, demande_id: true, level: true, status: true },
+    });
+    const stepMap = new Map(steps.map((s) => [Number(s.id), s]));
+    const existingIds = new Set(Array.from(stepMap.keys()));
+    const demandeIds = Array.from(new Set(steps.map((s) => s.demande_id).filter((v) => v != null)));
+    const demandes =
+      demandeIds.length > 0
+        ? await prisma.demandes_paiement.findMany({
+            where: { id: { in: demandeIds }, deleted_at: null },
+            select: { id: true, uuid: true },
+          })
+        : [];
+    const demandeUuidById = new Map(demandes.map((d) => [Number(d.id), String(d.uuid)]));
+
+    entries = entries.filter((e) => {
+      if (!e.step_id || !existingIds.has(Number(e.step_id))) return false;
+      const step = stepMap.get(Number(e.step_id));
+      if (!step) return false;
+      if (e.demande_id == null) return false;
+      if (Number(e.demande_id) !== Number(step.demande_id)) return false;
+      const expectedUuid = demandeUuidById.get(Number(step.demande_id));
+      if (!expectedUuid) return false;
+      if (!e.demande_uuid) return false;
+      return String(e.demande_uuid) === String(expectedUuid);
+    });
+    if (!entries.length) return [];
+
+    const validatedSteps =
+      demandeIds.length > 0
+        ? await prisma.validation_steps.findMany({
+            where: { demande_id: { in: demandeIds }, status: "valide" },
+            select: { demande_id: true, level: true },
+          })
+        : [];
+
+    const maxValidatedLevelByDemande = new Map();
+    for (const vs of validatedSteps) {
+      const did = Number(vs.demande_id);
+      const lvl = Number(vs.level);
+      if (!Number.isFinite(lvl)) continue;
+      const current = maxValidatedLevelByDemande.get(did);
+      if (current == null || lvl > current) {
+        maxValidatedLevelByDemande.set(did, lvl);
+      }
+    }
+
+    for (const entry of entries) {
+      const step = entry.step_id ? stepMap.get(Number(entry.step_id)) : null;
+      if (!step) continue;
+      const maxLevel = maxValidatedLevelByDemande.get(Number(step.demande_id));
+      const isCurrent =
+        String(step.status || "").toLowerCase() === "valide" &&
+        Number.isFinite(Number(maxLevel)) &&
+        Number(step.level) === Number(maxLevel);
+      entry.can_cancel = !!isCurrent;
+      entry.current_status = step.status || null;
+    }
+  }
+
+  return entries;
+}
+
+async function validationHistoryByDemandeId(demandeId, options = {}) {
+  const takeRaw = options?.take;
+  const take = Number.isFinite(Number(takeRaw)) ? Number(takeRaw) : 500;
+  const demandeIdNum = Number(demandeId);
+  const demandeUuid =
+    options?.demandeUuid != null && String(options.demandeUuid).trim()
+      ? String(options.demandeUuid).trim()
+      : null;
+
+  const steps = await prisma.validation_steps.findMany({
+    where: { demande_id: demandeIdNum },
+    select: { id: true, level: true, status: true, role_name: true },
+  });
+
+  if (!steps.length) return [];
+
+  const stepMap = new Map(steps.map((s) => [Number(s.id), s]));
+  const stepIds = steps.map((s) => Number(s.id)).filter(Boolean);
+
+  const logsRaw = await prisma.audit_logs.findMany({
+    where: {
+      entity_type: "validation_steps",
+      entity_id: { in: stepIds },
+    },
+    orderBy: [{ created_at: "asc" }, { id: "asc" }],
+    take,
+  });
+
+  const logs = logsRaw.filter((log) => {
+    const nv = log?.new_value && typeof log.new_value === "object" ? log.new_value : null;
+    if (!nv) return false;
+    if (demandeUuid && nv.demande_uuid && String(nv.demande_uuid) === demandeUuid) return true;
+    return false;
+  });
+
+  if (!logs.length) return [];
+
+  const actorUserIds = Array.from(
+    new Set(logs.map((l) => (l.user_id != null ? Number(l.user_id) : null)).filter(Boolean))
+  );
+
+  const actors =
+    actorUserIds.length > 0
+      ? await prisma.agents.findMany({
+          where: { user_id: { in: actorUserIds } },
+          include: { users: true },
+        })
+      : [];
+
+  const actorByUserId = new Map(actors.map((a) => [Number(a.user_id), a]));
+
+  const actorNameFromAgent = (agent) => {
+    if (!agent) return null;
+    const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+    const nom = agent?.nom ? String(agent.nom).trim() : "";
+    const full = `${prenom} ${nom}`.trim();
+    if (full) return full;
+    const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+    return email || null;
+  };
+
+  return logs.map((log) => {
+    const nv = log?.new_value && typeof log.new_value === "object" ? log.new_value : {};
+    const stepIdRaw = nv.step_id ?? log.entity_id;
+    const stepId = stepIdRaw != null ? Number(stepIdRaw) : null;
+    const step = stepId != null ? stepMap.get(Number(stepId)) : null;
+    const status = nv.status || statusFromAuditAction(log.action) || null;
+    const roleName = nv.role_name || step?.role_name || null;
+    const actorUserId = log?.user_id != null ? Number(log.user_id) : null;
+    const actorAgent = actorUserId != null ? actorByUserId.get(actorUserId) : null;
+    const actorName = actorNameFromAgent(actorAgent);
+
+    return {
+      audit_id: log.id,
+      step_id: stepId,
+      uuid: nv.step_uuid ?? null,
+      role_name: roleName,
+      level: step?.level ?? null,
+      status,
+      action: nv.action ?? log.action ?? null,
+      cancel_mode: nv.cancel_mode ?? null,
+      commentaire: nv.commentaire ?? null,
+      actor_user_id: actorUserId,
+      actor_name: actorName,
+      created_at: log.created_at,
+    };
+  });
+}
+
 async function cancelStep(stepId, userId, payload = {}) {
   const action = normalizeCancelAction(payload?.action ?? payload?.mode ?? payload?.type);
   const commentaireTrimmed = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
 
-  if (["return_for_modification", "cancel_demande"].includes(action) && !commentaireTrimmed) {
+  if (!commentaireTrimmed) {
     throw withStatusCode(new Error("Commentaire obligatoire"), 400);
   }
 
@@ -785,7 +1098,7 @@ async function cancelStep(stepId, userId, payload = {}) {
         where: { id: step.id },
         data: {
           status: "retour_modification",
-          commentaire: commentaireTrimmed || null,
+          commentaire: commentaireTrimmed,
           updated_at: new Date(),
         },
       });
@@ -820,6 +1133,10 @@ async function cancelStep(stepId, userId, payload = {}) {
         demandeId: step.demande_id,
         demandeUuid: step.demandes_paiement?.uuid || null,
         demandeurUserId: step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null,
+        validationUuid: step.uuid || null,
+        role: step.role_name,
+        demandeSnapshot: buildDemandeSnapshot(step.demandes_paiement),
+        commentaire: commentaireTrimmed,
       };
     }
 
@@ -830,7 +1147,7 @@ async function cancelStep(stepId, userId, payload = {}) {
         validated_by_id: null,
         validated_at: null,
         signature_url: null,
-        commentaire: commentaireTrimmed || null,
+        commentaire: commentaireTrimmed,
         updated_at: new Date(),
       },
     });
@@ -847,6 +1164,10 @@ async function cancelStep(stepId, userId, payload = {}) {
         demandeId: step.demande_id,
         demandeUuid: step.demandes_paiement?.uuid || null,
         demandeurUserId: step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null,
+        validationUuid: step.uuid || null,
+        role: step.role_name,
+        demandeSnapshot: buildDemandeSnapshot(step.demandes_paiement),
+        commentaire: commentaireTrimmed,
       };
     }
 
@@ -859,17 +1180,53 @@ async function cancelStep(stepId, userId, payload = {}) {
       demandeUuid: step.demandes_paiement?.uuid || null,
       demandeurUserId: step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null,
       stage,
+      validationUuid: step.uuid || null,
+      role: step.role_name,
+      demandeSnapshot: buildDemandeSnapshot(step.demandes_paiement),
+      commentaire: commentaireTrimmed,
     };
   });
 
   try {
+    const status =
+      result.action === "return_for_modification"
+        ? "retour_modification"
+        : "annulee";
+    await auditLogs.logAudit({
+      userId,
+      entity_type: "validation_steps",
+      entity_id: result.stepId,
+      action: "validation_cancelled",
+      old_value: null,
+      new_value: {
+        action: "cancel",
+        cancel_mode: result.action,
+        status,
+        step_id: result.stepId,
+        step_uuid: result.validationUuid || null,
+        role_name: result.role || null,
+        demande_id: result.demandeId,
+        demande_uuid: result.demandeUuid || null,
+        commentaire: result.commentaire || null,
+        demande_motif: result.demandeSnapshot?.motif ?? null,
+        demande_montant: result.demandeSnapshot?.montant ?? null,
+        demande_montant_net: result.demandeSnapshot?.montant_net ?? null,
+        demande_beneficiaire: result.demandeSnapshot?.beneficiaire ?? null,
+      },
+    });
+  } catch {
+    // ignore audit errors
+  }
+
+  try {
     if (result?.demandeurUserId) {
+      const commentaireInfo = result?.commentaire ? ` Motif: ${result.commentaire}` : "";
       const message =
         result.action === "cancel_demande"
-          ? "Une validation a ete annulee et la demande a ete annulee."
+          ? `Une validation a ete annulee et la demande a ete annulee.${commentaireInfo}`
           : result.action === "return_for_modification"
-            ? "Une validation a ete annulee et la demande est retournee pour modification."
-            : "Une validation a ete annulee.";
+            ? `Une validation a ete annulee et la demande est retournee pour modification.${commentaireInfo}`
+            : `Une validation a ete annulee.${commentaireInfo}`;
 
       await notifications.createNotification({
         user_id: result.demandeurUserId,
@@ -880,6 +1237,7 @@ async function cancelStep(stepId, userId, payload = {}) {
           stepId: result.stepId,
           demandeUuid: result.demandeUuid,
           action: result.action,
+          commentaire: result.commentaire || null,
         },
         sendEmailNow: false,
       });
@@ -898,6 +1256,8 @@ module.exports = {
   returnForModification,
   getStepsByDemande,
   validationDone,
+  validationHistory,
+  validationHistoryByDemandeId,
   getByUuid,
   getValidationsDoneBydemande,
   cancelStep,

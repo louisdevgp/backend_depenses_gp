@@ -17,6 +17,7 @@ router.post(
 
 router.get("/demande/:demandeId", auth, ctrl.listByDemande);
 router.get("/done", auth, requirePermission(P.VALIDATION_LIST_DONE), ctrl.validationDone);
+router.get("/history", auth, requirePermission(P.VALIDATION_LIST_DONE), ctrl.validationHistory);
 router.get("/uuid/:uuid", auth, requirePermission(P.VALIDATION_GET), ctrl.getByUuid);
 router.get("/done-by-demande/:demandeUuid", auth, requirePermission(P.VALIDATION_LIST_DONE), ctrl.getValidationsDoneBydemande);
 

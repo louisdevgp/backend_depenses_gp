@@ -77,6 +77,11 @@ exports.validationDone = async (req, res) => {
   res.json({ success: true, data });
 };
 
+exports.validationHistory = async (req, res) => {
+  const data = await service.validationHistory(req.user.userId, req.query || {});
+  res.json({ success: true, data });
+};
+
 exports.getByUuid = async (req, res) => {
   const data = await service.getByUuid(req.params.uuid);
   res.json({ success: true, data });

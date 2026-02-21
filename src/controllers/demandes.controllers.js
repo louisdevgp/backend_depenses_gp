@@ -1,4 +1,5 @@
 const service = require("../services/demandes.services");
+const validationService = require("../services/validation.services");
 const pdfService = require("../services/pdf.services");
 
 exports.create = async (req, res) => {
@@ -56,6 +57,20 @@ exports.pdf = async (req, res) => {
     await pdfService.streamDemandePdf(res, req.params.idOrUuid, { req });
   } catch (e) {
     const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 404;
+    return res.status(status).json({ success: false, message: e.message });
+  }
+};
+
+exports.validationHistory = async (req, res) => {
+  try {
+    const demande = await service.getDemandeHeader(req.user, req.params.idOrUuid);
+    const data = await validationService.validationHistoryByDemandeId(demande.id, {
+      ...(req.query || {}),
+      demandeUuid: demande.uuid,
+    });
+    return res.json({ success: true, data });
+  } catch (e) {
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
     return res.status(status).json({ success: false, message: e.message });
   }
 };
