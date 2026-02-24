@@ -23,6 +23,19 @@ function expandRoles(roleNames) {
   return Array.from(out);
 }
 
+function uniqRoles(list) {
+  return Array.from(new Set((list || []).map(normalizeRoleName).filter(Boolean)));
+}
+
+function buildRoleBreakdown({ baseRoles = [], primaryRole = null, delegatedRoles = [] }) {
+  const primary = normalizeRoleName(primaryRole) || null;
+  const base = uniqRoles(baseRoles);
+  const baseWithPrimary = primary ? Array.from(new Set([...base, primary])) : base;
+  const secondaryRoles = primary ? baseWithPrimary.filter((r) => r !== primary) : baseWithPrimary.slice();
+  const roles = Array.from(new Set(expandRoles([...baseWithPrimary, ...delegatedRoles])));
+  return { primaryRole: primary, secondaryRoles, roles, baseWithPrimary };
+}
+
 function isMissingPermissionsTables(err) {
   const code = String(err?.code || "");
   const msg = String(err?.message || "").toLowerCase();
@@ -51,7 +64,20 @@ function idWhere(idOrUuid) {
 async function me(userId) {
   const user = await prisma.users.findUnique({
     where: { id: userId },
-    include: { user_roles: { include: { roles: true } }, agents: true },
+    include: {
+      user_roles: { include: { roles: true } },
+      agents: {
+        where: { deleted_at: null },
+        take: 1,
+        include: {
+          roles: true,
+          directions: true,
+          departements: true,
+          services: true,
+          agents: { select: { id: true, nom: true, prenom: true, roles: { select: { name: true } } } },
+        },
+      },
+    },
   });
 
   if (!user || user.deleted_at) throw new Error("User not found");
@@ -60,6 +86,7 @@ async function me(userId) {
 
   // ✅ délégations actives: ajout au /me pour que le frontend puisse autoriser l'accès
   const agentRecord = user.agents?.[0] || null;
+  const primaryRole = agentRecord?.roles?.name || null;
   const agentId = agentRecord?.id;
   let delegatedRoles = [];
   let delegated = [];
@@ -78,7 +105,11 @@ async function me(userId) {
     delegated = dels;
   }
 
-  const roles = Array.from(new Set(expandRoles([...baseRoles, ...delegatedRoles])));
+  const roleBreakdown = buildRoleBreakdown({
+    baseRoles,
+    primaryRole,
+    delegatedRoles,
+  });
 
   // ✅ permissions effectives (DB-first, fallback mapping)
   let permissions = [];
@@ -89,7 +120,7 @@ async function me(userId) {
         roles: {
           deleted_at: null,
           is_active: true,
-          name: { in: roles },
+          name: { in: roleBreakdown.roles },
         },
         permissions: { deleted_at: null, is_active: true },
       },
@@ -102,7 +133,7 @@ async function me(userId) {
     const out = new Set();
     for (const [code, allowedRoles] of Object.entries(permissionMap || {})) {
       const allowed = (allowedRoles || []).map(normalizeRoleName).filter(Boolean);
-      if (allowed.some((r) => roles.includes(r))) out.add(String(code));
+      if (allowed.some((r) => roleBreakdown.roles.includes(r))) out.add(String(code));
     }
     permissions = Array.from(out);
   }
@@ -114,7 +145,9 @@ async function me(userId) {
     nom: user.nom,
     prenom: user.prenom,
     is_active: user.is_active,
-    roles,
+    roles: roleBreakdown.roles,
+    primaryRole: roleBreakdown.primaryRole,
+    secondaryRoles: roleBreakdown.secondaryRoles,
     delegatedRoles,
     permissions,
     agent: agentRecord ? { ...agentRecord, delegations: delegated } : null,
@@ -150,7 +183,14 @@ async function list(query) {
       skip,
       take: limit,
       orderBy: { created_at: "desc" },
-      include: { user_roles: { include: { roles: true } } },
+      include: {
+        user_roles: { include: { roles: true } },
+        agents: {
+          where: { deleted_at: null },
+          take: 1,
+          include: { roles: true },
+        },
+      },
     }),
   ]);
 
@@ -158,16 +198,23 @@ async function list(query) {
     page,
     limit,
     total,
-    items: items.map((u) => ({
-      id: u.id,
-      uuid: u.uuid,
-      email: u.email,
-      nom: u.nom,
-      prenom: u.prenom,
-      is_active: u.is_active,
-      roles: u.user_roles.map((ur) => ur.roles.name),
-      created_at: u.created_at,
-    })),
+    items: items.map((u) => {
+      const baseRoles = u.user_roles.map((ur) => normalizeRoleName(ur.roles.name)).filter(Boolean);
+      const primaryRole = u.agents?.[0]?.roles?.name || null;
+      const roleBreakdown = buildRoleBreakdown({ baseRoles, primaryRole, delegatedRoles: [] });
+      return {
+        id: u.id,
+        uuid: u.uuid,
+        email: u.email,
+        nom: u.nom,
+        prenom: u.prenom,
+        is_active: u.is_active,
+        roles: roleBreakdown.baseWithPrimary,
+        primaryRole: roleBreakdown.primaryRole,
+        secondaryRoles: roleBreakdown.secondaryRoles,
+        created_at: u.created_at,
+      };
+    }),
   };
 }
 
@@ -211,12 +258,24 @@ async function create(payload, performedByUserId) {
 async function getById(idOrUuid) {
   const user = await prisma.users.findFirst({
     where: { ...idWhere(idOrUuid), deleted_at: null },
-    include: { user_roles: { include: { roles: true } }, agents: true },
+    include: {
+      user_roles: { include: { roles: true } },
+      agents: {
+        where: { deleted_at: null },
+        take: 1,
+        include: { roles: true },
+      },
+    },
   });
   if (!user) throw new Error("User not found");
+  const baseRoles = user.user_roles.map((ur) => normalizeRoleName(ur.roles.name)).filter(Boolean);
+  const primaryRole = user.agents?.[0]?.roles?.name || null;
+  const roleBreakdown = buildRoleBreakdown({ baseRoles, primaryRole, delegatedRoles: [] });
   return {
     ...user,
-    roles: user.user_roles.map((ur) => ur.roles.name),
+    roles: roleBreakdown.baseWithPrimary,
+    primaryRole: roleBreakdown.primaryRole,
+    secondaryRoles: roleBreakdown.secondaryRoles,
     agent: user.agents?.[0] || null,
   };
 }

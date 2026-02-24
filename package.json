@@ -10,6 +10,7 @@
     "seed:permissions": "node src/prisma/seed-permissions.js",
     "seed:profiles": "node src/prisma/seed-profiles.js",
     "reset:testdata": "node src/prisma/reset-test-data.js",
+    "sync:primary-roles": "node src/scripts/sync-primary-roles.js",
     "mail:check": "node src/scripts/mail-check.js",
     "pdf:smoke": "node src/scripts/pdf-smoke.js",
     "pdf:check": "node src/scripts/pdf-mini-check.js",
@@ -20,10 +21,10 @@
     "delegations:check": "node src/scripts/delegations-check.js"
   },
   "dependencies": {
-    "@prisma/client": "^6.11.0",
+    "@prisma/client": "^6.19.2",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
-    "mustache": "^4.2.0",
+    "cheerio": "^1.1.2",
     "cloudinary": "^2.8.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -32,9 +33,9 @@
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
+    "mustache": "^4.2.0",
     "nodemailer": "^7.0.12",
     "pdfkit": "^0.16.0",
-    "cheerio": "^1.1.2",
     "puppeteer": "^24.35.0",
     "qrcode": "^1.5.4",
     "uuid": "^13.0.0",
@@ -42,6 +43,6 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.11",
-    "prisma": "^6.11.0"
+    "prisma": "^6.19.2"
   }
 }

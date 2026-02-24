@@ -58,18 +58,53 @@ async function register({ email, password, nom, prenom, agent }) {
 }
 
 async function login({ email, password }) {
-  const user = await prisma.users.findUnique({
-    where: { email },
+  const emailValue = String(email || "").trim();
+  let user = await prisma.users.findFirst({
+    where: { email: emailValue },
     include: {
       user_roles: { include: { roles: true } },
       agents: true,
     },
   });
 
+  if (!user && emailValue) {
+    try {
+      const rows = await prisma.$queryRaw`SELECT id FROM users WHERE LOWER(email) = LOWER(${emailValue}) LIMIT 1`;
+      const rowId = Array.isArray(rows) && rows[0]?.id ? Number(rows[0].id) : null;
+      if (rowId) {
+        user = await prisma.users.findUnique({
+          where: { id: rowId },
+          include: {
+            user_roles: { include: { roles: true } },
+            agents: true,
+          },
+        });
+      }
+    } catch {
+      // ignore fallback query errors
+    }
+  }
+
   if (!user || user.deleted_at) throw new Error("INVALID_CREDENTIALS");
   if (!user.is_active) throw new Error("USER_DISABLED");
 
-  const ok = await comparePassword(password, user.password_hash);
+  let ok = await comparePassword(password, user.password_hash);
+  if (!ok) {
+    const storedHash = String(user.password_hash || "");
+    const looksBcrypt = storedHash.startsWith("$2a$") || storedHash.startsWith("$2b$") || storedHash.startsWith("$2y$");
+    if (!looksBcrypt && storedHash && storedHash === String(password || "")) {
+      const newHash = await hashPassword(password);
+      try {
+        await prisma.users.update({
+          where: { id: user.id },
+          data: { password_hash: newHash },
+        });
+      } catch {
+        // ignore update error
+      }
+      ok = true;
+    }
+  }
   if (!ok) throw new Error("INVALID_CREDENTIALS");
 
   const isFirstLogin = user.last_login_at == null;

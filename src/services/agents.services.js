@@ -19,6 +19,15 @@ function parseDateTime(v, name) {
   return d;
 }
 
+async function ensureUserHasRole(userId, roleId) {
+  if (!userId || !roleId) return;
+  await prisma.user_roles.upsert({
+    where: { user_id_role_id: { user_id: Number(userId), role_id: Number(roleId) } },
+    update: {},
+    create: { user_id: Number(userId), role_id: Number(roleId) },
+  });
+}
+
 /**
  * Create Agent
  * - user_id obligatoire
@@ -89,6 +98,10 @@ async function createAgent(payload, userCtx) {
       agents: true, // manager (self relation)
     },
   });
+
+  if (role_id) {
+    await ensureUserHasRole(user_id, role_id);
+  }
 
   // Optionnel: si manager_id fourni, on crée une ligne d’historique “active”
   if (manager_id) {
@@ -234,6 +247,10 @@ async function updateAgent(id, payload) {
       agents: { select: { id: true, nom: true, prenom: true } },
     },
   });
+
+  if (data.role_id) {
+    await ensureUserHasRole(updated.user_id, data.role_id);
+  }
 
   return updated;
 }
