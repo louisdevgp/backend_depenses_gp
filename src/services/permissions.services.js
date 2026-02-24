@@ -1,5 +1,44 @@
 const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
+const permissionMeta = require("../config/permissions.meta");
+
+const VALID_APPLIES_TO = new Set(["menu", "action"]);
+
+function normalizeAppliesTo(raw) {
+  let items = [];
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === "string") {
+    const s = raw.trim().toLowerCase();
+    if (s === "both") {
+      items = ["menu", "action"];
+    } else {
+      items = [raw];
+    }
+  }
+
+  const out = items
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter((v) => VALID_APPLIES_TO.has(v));
+
+  if (!out.length) return ["action"];
+  return Array.from(new Set(out));
+}
+
+function mergePermissionMeta(row) {
+  const meta = permissionMeta[row.code] || {};
+  const appliesTo = normalizeAppliesTo(meta.appliesTo ?? meta.scope);
+  const moduleName = String(meta.module || "").trim() || "Other";
+  const label = row.label || meta.label || row.code;
+
+  return {
+    ...row,
+    label,
+    module: moduleName,
+    appliesTo,
+    description: meta.description || undefined,
+  };
+}
 
 function toIntId(id) {
   const n = Number(id);
@@ -20,10 +59,11 @@ function normalizeCodes(codes) {
 }
 
 exports.listPermissions = async () => {
-  return prisma.permissions.findMany({
+  const rows = await prisma.permissions.findMany({
     where: { deleted_at: null, is_active: true },
     orderBy: { code: "asc" },
   });
+  return rows.map(mergePermissionMeta);
 };
 
 exports.getRolePermissionCodes = async (roleId) => {

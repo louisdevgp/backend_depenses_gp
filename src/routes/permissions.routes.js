@@ -4,12 +4,14 @@ const requirePermission = require("../middlewares/requirePermission.middleware")
 const P = require("../constants/permissions");
 const ctrl = require("../controllers/permissions.controllers");
 
-router.use(auth, requirePermission([P.PERMISSIONS_MANAGE]));
+// Auth for all permission endpoints
+router.use(auth);
 
-// list all permissions
+// list all permissions (needed by sidebar to know menu/action)
 router.get("/", ctrl.list);
 
-// get/set permissions for a role
+// get/set permissions for a role (admin only)
+router.use(requirePermission([P.PERMISSIONS_MANAGE]));
 router.get("/roles/:roleId", ctrl.getRolePermissions);
 router.put("/roles/:roleId", ctrl.setRolePermissions);
 

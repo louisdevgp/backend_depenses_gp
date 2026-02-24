@@ -30,8 +30,29 @@ async function getAgentById(tx, agentId) {
   if (!agentId) return null;
   return client.agents.findUnique({
     where: { id: Number(agentId) },
-    select: { id: true, direction_id: true, deleted_at: true, roles: { select: { name: true } } },
+    select: {
+      id: true,
+      direction_id: true,
+      deleted_at: true,
+      roles: { select: { name: true } },
+      users: {
+        select: {
+          user_roles: { select: { roles: { select: { name: true } } } },
+        },
+      },
+    },
   });
+}
+
+function agentRoleSet(agent) {
+  const out = new Set();
+  const primary = normalizeRoleName(agent?.roles?.name);
+  if (primary) out.add(primary);
+  const secondary = (agent?.users?.user_roles || [])
+    .map((ur) => normalizeRoleName(ur?.roles?.name))
+    .filter(Boolean);
+  secondary.forEach((r) => out.add(r));
+  return out;
 }
 
 async function canActAsDirectorForDemande(tx, agentId, demandeOrg) {
@@ -39,10 +60,10 @@ async function canActAsDirectorForDemande(tx, agentId, demandeOrg) {
   const agent = await getAgentById(client, agentId);
   if (!agent || agent.deleted_at) return false;
 
-  const role = normalizeRoleName(agent?.roles?.name);
-  if (role === "ADMIN") return true;
+  const roles = agentRoleSet(agent);
+  if (roles.has("ADMIN")) return true;
 
-  if (role === "DIRECTEUR") {
+  if (roles.has("DIRECTEUR")) {
     if (!agent.direction_id || !demandeOrg?.direction_id) return false;
     return Number(agent.direction_id) === Number(demandeOrg.direction_id);
   }
@@ -69,10 +90,10 @@ async function canActAsResponsableForDemande(tx, agentId, demandeOrg) {
   const agent = await getAgentById(client, agentId);
   if (!agent || agent.deleted_at) return false;
 
-  const role = normalizeRoleName(agent?.roles?.name);
-  if (role === "ADMIN") return true;
+  const roles = agentRoleSet(agent);
+  if (roles.has("ADMIN")) return true;
 
-  if (role === "RESPONSABLE") {
+  if (roles.has("RESPONSABLE")) {
     if (!agent.direction_id || !demandeOrg?.direction_id) return false;
     return Number(agent.direction_id) === Number(demandeOrg.direction_id);
   }

@@ -111,6 +111,52 @@ function applyListScopeForUser({ where, roles, agent }) {
 
   return where;
 }
+
+async function resolveStakeholderUserIds({ demandeId, demande = null, excludeUserId = null }) {
+  let demandeRow = demande;
+  if (!demandeRow && demandeId) {
+    demandeRow = await prisma.demandes_paiement.findUnique({
+      where: { id: Number(demandeId) },
+      select: {
+        id: true,
+        uuid: true,
+        agents_demandes_paiement_demandeur_idToagents: { select: { users: { select: { id: true } } } },
+      },
+    });
+  }
+
+  const demandeurUserId = demandeRow?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null;
+
+  const steps = await prisma.validation_steps.findMany({
+    where: { demande_id: Number(demandeId) },
+    select: { validator_id: true, validated_by_id: true },
+  });
+
+  const agentIds = Array.from(
+    new Set(
+      steps
+        .flatMap((s) => [s.validator_id, s.validated_by_id])
+        .filter((v) => v != null)
+        .map((v) => Number(v))
+    )
+  );
+
+  let stakeholderUserIds = [];
+  if (agentIds.length > 0) {
+    const agents = await prisma.agents.findMany({
+      where: { id: { in: agentIds } },
+      select: { users: { select: { id: true } } },
+    });
+    stakeholderUserIds = agents.map((a) => a?.users?.id).filter(Boolean);
+  }
+
+  const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
+  const recipients = uniq([demandeurUserId, ...stakeholderUserIds]).filter(
+    (id) => Number(id) !== Number(excludeUserId)
+  );
+
+  return { demande: demandeRow, demandeurUserId, recipients };
+}
 function assertCanReadDemande({ demande, roles, agent }) {
   if (!demande) {
     const err = new Error("Demande introuvable");
@@ -318,56 +364,104 @@ function toStageStatus(roleName) {
   return `validation_${String(roleName).toLowerCase()}`;
 }
 
-function roleToFlowCode(roleName) {
-  const r = String(roleName || "").toUpperCase();
-  if (r === "RESPONSABLE") return "FLOW_RESPONSABLE";
-  if (r === "DIRECTEUR") return "FLOW_DIRECTEUR";
-  if (r === "DAF") return "FLOW_DAF";
-  if (r === "DGA") return "FLOW_DGA";
-  if (r === "DG") return "FLOW_DG";
+function resolveHierarchyLevel(agent) {
+  if (agent?.service_id) return "SERVICE";
+  if (agent?.departement_id) return "DEPARTEMENT";
+  if (agent?.direction_id) return "DIRECTION";
+  return "UNKNOWN";
+}
+
+function flowCodeForHierarchy(level) {
+  if (level === "SERVICE") return "FLOW_DEMANDEUR_LAMBDA";
+  if (level === "DEPARTEMENT") return "FLOW_RESPONSABLE";
+  if (level === "DIRECTION") return "FLOW_DIRECTEUR";
   return "FLOW_DEMANDEUR_LAMBDA";
 }
 
 async function resolveValidationFlowForAgent(agent) {
-  const code = roleToFlowCode(agent.roles.name);
-  const flow = await prisma.validation_flows.findFirst({
+  const level = resolveHierarchyLevel(agent);
+  const code = flowCodeForHierarchy(level);
+
+  let flow = await prisma.validation_flows.findFirst({
     where: { code, is_active: true },
     include: { validation_flow_steps: { orderBy: { step_order: "asc" } } },
   });
   if (flow) return flow;
 
-  const fallback = await prisma.validation_flows.findFirst({
+  // fallback: any active flow
+  flow = await prisma.validation_flows.findFirst({
     where: { is_active: true },
     include: { validation_flow_steps: { orderBy: { step_order: "asc" } } },
   });
-  if (!fallback) throw new Error("Validation flow introuvable");
-  return fallback;
+  if (!flow) throw new Error("Validation flow introuvable");
+  return flow;
+}
+
+async function resolveHierarchyChain(tx, demandeOrg) {
+  const demandeurId = demandeOrg?.demandeur_id ? Number(demandeOrg.demandeur_id) : null;
+  if (!demandeurId) return { demandeur: null, responsable: null, directeur: null };
+
+  const demandeur = await tx.agents.findFirst({
+    where: { id: demandeurId, deleted_at: null },
+    select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true },
+  });
+  if (!demandeur) return { demandeur: null, responsable: null, directeur: null };
+
+  let responsable = null;
+  let directeur = null;
+
+  if (demandeur.service_id) {
+    if (!demandeur.manager_id) {
+      throw new Error("Responsable manquant: le demandeur n'a pas de manager.");
+    }
+    const manager = await tx.agents.findFirst({
+      where: { id: Number(demandeur.manager_id), deleted_at: null },
+      select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true },
+    });
+    if (!manager) throw new Error("Responsable manquant: manager introuvable.");
+
+    if (manager.departement_id) {
+      responsable = manager;
+      if (manager.manager_id) {
+        directeur = await tx.agents.findFirst({
+          where: { id: Number(manager.manager_id), deleted_at: null },
+          select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true },
+        });
+      }
+    } else if (manager.direction_id) {
+      // Pas de responsable: le manager est directement directeur
+      directeur = manager;
+    } else if (manager.service_id) {
+      throw new Error("Responsable invalide: manager au niveau service.");
+    }
+  } else if (demandeur.departement_id) {
+    responsable = demandeur;
+    if (demandeur.manager_id) {
+      directeur = await tx.agents.findFirst({
+        where: { id: Number(demandeur.manager_id), deleted_at: null },
+        select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true },
+      });
+    }
+  } else if (demandeur.direction_id) {
+    directeur = demandeur;
+  }
+
+  return { demandeur, responsable, directeur };
 }
 
 async function resolveValidatorForRole(tx, roleName, demandeOrg) {
   const role = String(roleName || "").trim().toUpperCase();
   const baseWhere = {
     deleted_at: null,
-    roles: { is: { name: role } },
+    OR: [
+      // rôle principal (agents.role_id -> roles.name)
+      { roles: { is: { name: role } } },
+      // rôle secondaire (users.user_roles)
+      { users: { user_roles: { some: { roles: { name: role } } } } },
+    ],
   };
 
-  if (role === "RESPONSABLE") {
-    const demandeurId = demandeOrg?.demandeur_id ? Number(demandeOrg.demandeur_id) : null;
-    if (demandeurId) {
-      const demandeur = await tx.agents.findFirst({
-        where: { id: demandeurId, deleted_at: null },
-        select: { manager_id: true },
-      });
-      if (demandeur?.manager_id) {
-        const manager = await tx.agents.findFirst({
-          where: { id: Number(demandeur.manager_id), deleted_at: null },
-        });
-        if (manager) return manager;
-      }
-    }
-  }
-
-  if (["RESPONSABLE", "DIRECTEUR", "ASSISTANTE_TECHNIQUE"].includes(role)) {
+  if (["DIRECTEUR", "ASSISTANTE_TECHNIQUE"].includes(role)) {
     if (!demandeOrg?.direction_id) return null;
     return tx.agents.findFirst({
       where: { ...baseWhere, direction_id: Number(demandeOrg.direction_id) },
@@ -387,11 +481,33 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
     orderBy: { step_order: "asc" },
   });
 
+  const hierarchy = await resolveHierarchyChain(tx, demande);
+
   const created = [];
+  let isFirst = true;
   for (const s of steps) {
-    const validator = await resolveValidatorForRole(tx, s.role_name, demande);
+    const role = String(s.role_name || "").trim().toUpperCase();
+    let validator = null;
+
+    if (role === "RESPONSABLE") {
+      validator = hierarchy.responsable || null;
+      if (!validator) {
+        continue; // pas de responsable, on saute l'etape
+      }
+    } else if (role === "DIRECTEUR") {
+      validator = hierarchy.directeur || (await resolveValidatorForRole(tx, role, demande));
+    } else {
+      validator = await resolveValidatorForRole(tx, role, demande);
+    }
+
     const validator_id = validator?.id || null;
 
+    if (!validator_id) {
+      if (s.required === false) continue;
+      throw new Error(`Aucun validateur trouve pour le role ${role}`);
+    }
+
+    // Ne pas dédupliquer: un même agent peut valider plusieurs rôles (ex: DIRECTEUR + DAF)
     const row = await tx.validation_steps.create({
       data: {
         uuid: uuidv4(),
@@ -399,7 +515,7 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
         level: s.step_order,
         role_name: s.role_name,
         validator_id,
-        status: s.step_order === 1 ? "en_attente" : "bloque",
+        status: isFirst ? "en_attente" : "bloque",
         validated_by_id: null,
         commentaire: null,
         signature_url: null,
@@ -408,10 +524,16 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
     });
 
     created.push(row);
+    if (isFirst) isFirst = false;
+  }
+
+  if (!created.length) {
+    throw new Error("Aucun validateur disponible pour cette demande");
   }
 
   return created;
 }
+
 exports.createDemande = async (user, payload) => {
   const agent = await getAgentFromUser(user);
   const flow = await resolveValidationFlowForAgent(agent);
@@ -957,6 +1079,34 @@ exports.update = async (user, idOrUuid, payload) => {
     return updatedDemande;
   });
 
+  try {
+    const actorUserId = getUserIdFromToken(user);
+    const ctx = await resolveStakeholderUserIds({
+      demandeId: updated.id,
+      demande,
+      excludeUserId: actorUserId,
+    });
+
+    if (ctx?.recipients?.length) {
+      const demandeUuid = ctx?.demande?.uuid || demande?.uuid || null;
+      const label = demandeUuid ? ` (${demandeUuid})` : "";
+      await Promise.allSettled(
+        ctx.recipients.map((uid) =>
+          notifications.createNotification({
+            user_id: uid,
+            type: "demande_updated",
+            demande_id: updated.id,
+            message: `La demande${label} a été modifiée.`,
+            meta: { demandeUuid, action: "updated" },
+            sendEmailNow: true,
+          })
+        )
+      );
+    }
+  } catch {
+    // ignore notification errors
+  }
+
   return updated;
 };
 exports.softDelete = async (user, idOrUuid) => {
@@ -977,6 +1127,34 @@ exports.softDelete = async (user, idOrUuid) => {
     where: { id: demande.id },
     data: { deleted_at: new Date(), updated_at: new Date() },
   });
+
+  try {
+    const actorUserId = getUserIdFromToken(user);
+    const ctx = await resolveStakeholderUserIds({
+      demandeId: demande.id,
+      demande,
+      excludeUserId: actorUserId,
+    });
+
+    if (ctx?.recipients?.length) {
+      const demandeUuid = ctx?.demande?.uuid || demande?.uuid || null;
+      const label = demandeUuid ? ` (${demandeUuid})` : "";
+      await Promise.allSettled(
+        ctx.recipients.map((uid) =>
+          notifications.createNotification({
+            user_id: uid,
+            type: "demande_cancelled",
+            demande_id: demande.id,
+            message: `La demande${label} a été annulée.`,
+            meta: { demandeUuid, action: "cancelled" },
+            sendEmailNow: true,
+          })
+        )
+      );
+    }
+  } catch {
+    // ignore notification errors
+  }
 
   return true;
 };
@@ -1000,6 +1178,34 @@ exports.closeDemande = async (user, idOrUuid) => {
     where: { id: demande.id },
     data: { statut: "cloture", updated_at: new Date() },
   });
+
+  try {
+    const actorUserId = getUserIdFromToken(user);
+    const ctx = await resolveStakeholderUserIds({
+      demandeId: demande.id,
+      demande,
+      excludeUserId: actorUserId,
+    });
+
+    if (ctx?.recipients?.length) {
+      const demandeUuid = ctx?.demande?.uuid || demande?.uuid || null;
+      const label = demandeUuid ? ` (${demandeUuid})` : "";
+      await Promise.allSettled(
+        ctx.recipients.map((uid) =>
+          notifications.createNotification({
+            user_id: uid,
+            type: "demande_closed",
+            demande_id: demande.id,
+            message: `La demande${label} a été clôturée.`,
+            meta: { demandeUuid, action: "closed" },
+            sendEmailNow: true,
+          })
+        )
+      );
+    }
+  } catch {
+    // ignore notification errors
+  }
 
   return updated;
 };
