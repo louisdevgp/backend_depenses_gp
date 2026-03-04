@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const multer = require("multer");
 
 const app = express();
 
@@ -19,6 +20,25 @@ app.use("/api", require("./routes"));
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Error handler (JSON only, including multer errors)
+app.use((err, _req, res, _next) => {
+  if (!err) return res.status(500).json({ success: false, message: "Erreur serveur" });
+
+  if (err instanceof multer.MulterError) {
+    const msg =
+      err.code === "LIMIT_FILE_SIZE"
+        ? "Fichier trop volumineux (20MB max)"
+        : err.message || "Erreur upload fichier";
+    return res.status(400).json({ success: false, message: msg });
+  }
+
+  if (err.message) {
+    return res.status(400).json({ success: false, message: err.message });
+  }
+
+  return res.status(500).json({ success: false, message: "Erreur serveur" });
+});
 
 module.exports = app;
 

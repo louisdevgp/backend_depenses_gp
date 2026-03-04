@@ -7,14 +7,23 @@ exports.listMyPendingValidations = async (req, res) => {
 
 exports.approveStep = async (req, res) => {
   const { stepId } = req.params;
-  const { commentaire, budget_prevu, budget_disponible, paiement_immediat, daf_critere4 } =
-    req.body || {};
+  const {
+    commentaire,
+    budget_prevu,
+    budget_disponible,
+    paiement_immediat,
+    daf_critere4,
+    conditions_paiement_mode,
+    conditions_paiement_custom,
+  } = req.body || {};
   // On ignore signature_data_url car on ne gère plus les signatures électroniques
   const result = await service.approveStep(stepId, req.user.userId, commentaire, null, {
     budget_prevu,
     budget_disponible,
     paiement_immediat,
     daf_critere4,
+    conditions_paiement_mode,
+    conditions_paiement_custom,
   });
   res.json({ success: true, message: "Étape validée", data: result });
 };

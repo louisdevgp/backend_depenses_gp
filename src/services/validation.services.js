@@ -2,6 +2,7 @@ const prisma = require("../config/prisma");
 const notifications = require("./notifications.services");
 const auditLogs = require("./auditLogs.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
+const { v4: uuidv4 } = require("uuid");
 
 function withStatusCode(err, statusCode) {
   err.statusCode = Number(statusCode);
@@ -35,6 +36,65 @@ function normalizeDafCritere4(value) {
   if (typeof value === "number") return value ? "Oui" : "Non";
   const fallback = String(value).trim();
   return fallback || null;
+}
+
+function normalizePaiementMode(value) {
+  if (!value) return null;
+  const v = String(value).replace(/\s/g, "");
+  if (["70/30", "50/50", "100/100"].includes(v)) return v;
+  return null;
+}
+
+function buildPaiementConditions({ total, mode }) {
+  const totalNum = Number(total) || 0;
+  const normalized = normalizePaiementMode(mode) || "100/100";
+
+  let parts = [100];
+  if (normalized === "70/30") parts = [70, 30];
+  if (normalized === "50/50") parts = [50, 50];
+
+  return parts.map((p, idx) => {
+    const montant_prevu = (totalNum * p) / 100;
+    return {
+      label: `Tranche ${idx + 1}`,
+      pourcentage: p,
+      montant_prevu,
+      condition_texte: null,
+    };
+  });
+}
+
+function buildCustomPaiementConditions({ total, tranches = [] }) {
+  const totalNum = Number(total) || 0;
+  const out = [];
+
+  for (const [idx, t] of tranches.entries()) {
+    const label = t?.label ? String(t.label) : `Tranche ${idx + 1}`;
+    const p = t?.pourcentage != null ? Number(t.pourcentage) : null;
+    const m = t?.montant_prevu != null ? Number(t.montant_prevu) : null;
+
+    if (Number.isFinite(p)) {
+      out.push({
+        label,
+        pourcentage: p,
+        montant_prevu: (totalNum * p) / 100,
+        condition_texte: t?.condition_texte ? String(t.condition_texte) : null,
+      });
+      continue;
+    }
+
+    if (Number.isFinite(m)) {
+      out.push({
+        label,
+        pourcentage: totalNum ? (m / totalNum) * 100 : null,
+        montant_prevu: m,
+        condition_texte: t?.condition_texte ? String(t.condition_texte) : null,
+      });
+      continue;
+    }
+  }
+
+  return out;
 }
 
 function getEnvAny(keys) {
@@ -299,23 +359,39 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
 
     // ✅ Contrôle DAF: champs obligatoires au moment de la validation DAF
     if (roleUpper === "DAF") {
-      const { budget_prevu, budget_disponible, paiement_immediat, daf_critere4 } = extra || {};
+      const {
+        budget_prevu,
+        budget_disponible,
+        paiement_immediat,
+        daf_critere4,
+        conditions_paiement_mode,
+        conditions_paiement_custom,
+      } = extra || {};
       if (!isBoolean(budget_prevu) || !isBoolean(budget_disponible) || !isBoolean(paiement_immediat)) {
         throw withStatusCode(
           new Error(
-            "Contrôle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat' (booléens)"
+            "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat' (booleens)"
           ),
           400
         );
       }
 
-      // Pour le 4e critère, on accepte maintenant une chaîne (moyen de paiement) ou un booléen (legacy)
+      // Pour le 4e critere, on accepte maintenant une chaine (moyen de paiement) ou un booleen (legacy)
       const dafCritere4Value = normalizeDafCritere4(daf_critere4);
       if (!dafCritere4Value) {
         throw withStatusCode(
-          new Error("Contrôle DAF incomplet: renseignez le moyen de paiement (critère 4)"),
+          new Error("Controle DAF incomplet: renseignez le moyen de paiement (critere 4)"),
           400
         );
+      }
+
+      if (paiement_immediat === false) {
+        if (!commentaireTrimmed) {
+          throw withStatusCode(new Error("Commentaire obligatoire si paiement non immediat"), 400);
+        }
+        if (conditions_paiement_custom === undefined && conditions_paiement_mode === undefined) {
+          throw withStatusCode(new Error("Definir les conditions de paiement (mode ou personnalise)"), 400);
+        }
       }
 
       await tx.demandes_paiement.update({
@@ -328,6 +404,60 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
           updated_at: new Date(),
         },
       });
+
+      if (paiement_immediat === false) {
+        const totalForConditions =
+          step?.demandes_paiement?.montant_net != null
+            ? step.demandes_paiement.montant_net
+            : step?.demandes_paiement?.montant;
+
+        const hasCustom = conditions_paiement_custom !== undefined;
+        const customTranches = Array.isArray(conditions_paiement_custom) ? conditions_paiement_custom : null;
+
+        let conditions = [];
+        if (hasCustom) {
+          conditions = buildCustomPaiementConditions({ total: totalForConditions, tranches: customTranches });
+        } else {
+          const paiementMode = normalizePaiementMode(conditions_paiement_mode);
+          if (!paiementMode) {
+            throw withStatusCode(
+              new Error("Condition de paiement invalide (attendu: 70/30, 50/50, 100/100)"),
+              400
+            );
+          }
+          conditions = buildPaiementConditions({ total: totalForConditions, mode: paiementMode });
+        }
+
+        const paidOrLinked = await tx.conditions_paiement.count({
+          where: { demande_id: Number(step.demande_id), source: "DAF", paiement_id: { not: null } },
+        });
+        if (paidOrLinked > 0) {
+          throw withStatusCode(new Error("Conditions DAF deja engagees"), 409);
+        }
+
+        await tx.conditions_paiement.deleteMany({
+          where: { demande_id: Number(step.demande_id), source: "DAF" },
+        });
+
+        if (conditions.length > 0) {
+          await tx.conditions_paiement.createMany({
+            data: conditions.map((c, idx) => ({
+              uuid: uuidv4(),
+              demande_id: Number(step.demande_id),
+              source: "DAF",
+              label: c.label || `Tranche ${idx + 1}`,
+              pourcentage: c.pourcentage,
+              montant_prevu: c.montant_prevu,
+              date_echeance: null,
+              condition_texte: c.condition_texte,
+              statut: "prevu",
+              paiement_id: null,
+              created_at: new Date(),
+              updated_at: new Date(),
+            })),
+          });
+        }
+      }
     }
 
     // Mise à jour de l'étape de validation sans signature

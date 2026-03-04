@@ -6,6 +6,7 @@ async function createConditionPaiement(data) {
     data: {
       uuid: data.uuid,
       demande_id: data.demande_id,
+      source: data.source ?? "DEMANDEUR",
       label: data.label,
       pourcentage: data.pourcentage ?? null,
       montant_prevu: data.montant_prevu ?? null,
@@ -22,6 +23,7 @@ async function listConditionsPaiement(filters = {}) {
   if (filters.demande_id) where.demande_id = Number(filters.demande_id);
   if (filters.paiement_id) where.paiement_id = Number(filters.paiement_id);
   if (filters.statut) where.statut = String(filters.statut);
+  if (filters.source) where.source = String(filters.source);
 
   return prisma.conditions_paiement.findMany({
     where,

@@ -753,6 +753,7 @@ exports.createDemande = async (user, payload) => {
         data: conditions.map((c, idx) => ({
           uuid: uuidv4(),
           demande_id: demande.id,
+          source: "DEMANDEUR",
           label: c.label || `Tranche ${idx + 1}`,
           pourcentage: c.pourcentage,
           montant_prevu: c.montant_prevu,
@@ -1130,6 +1131,7 @@ exports.update = async (user, idOrUuid, payload) => {
       await tx.conditions_paiement.deleteMany({
         where: {
           demande_id: demande.id,
+          source: "DEMANDEUR",
           paiement_id: null,
           statut: "prevu",
         },
@@ -1140,6 +1142,7 @@ exports.update = async (user, idOrUuid, payload) => {
           data: conditions.map((c, idx) => ({
             uuid: uuidv4(),
             demande_id: demande.id,
+            source: "DEMANDEUR",
             label: c.label || `Tranche ${idx + 1}`,
             pourcentage: c.pourcentage,
             montant_prevu: c.montant_prevu,
@@ -1162,7 +1165,7 @@ exports.update = async (user, idOrUuid, payload) => {
 
     if (shouldRecalcConditions) {
       const prevus = await tx.conditions_paiement.findMany({
-        where: { demande_id: demande.id, statut: "prevu", paiement_id: null },
+        where: { demande_id: demande.id, source: "DEMANDEUR", statut: "prevu", paiement_id: null },
       });
 
       for (const c of prevus) {

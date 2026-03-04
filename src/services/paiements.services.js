@@ -153,6 +153,14 @@ function deriveModeFromConditions(conds) {
   return null;
 }
 
+function normalizeConditionsSource(value) {
+  if (!value) return null;
+  const v = String(value).trim().toUpperCase();
+  if (v === "DAF") return "DAF";
+  if (v === "DEMANDEUR") return "DEMANDEUR";
+  return null;
+}
+
 async function findUserIdByAgentId(agentId) {
   if (!agentId) return null;
   const a = await prisma.agents.findUnique({
@@ -190,13 +198,16 @@ async function assertDemandePayable(demandeId) {
   return true;
 }
 
-async function ensureConditionsForDemande(tx, demandeId) {
+async function ensureConditionsForDemande(tx, demandeId, source) {
+  const src = normalizeConditionsSource(source) || "DEMANDEUR";
   const conds = await tx.conditions_paiement.findMany({
-    where: { demande_id: Number(demandeId) },
+    where: { demande_id: Number(demandeId), source: src },
     orderBy: { id: "asc" },
   });
 
   if (conds.length > 0) return conds;
+
+  if (src !== "DEMANDEUR") return [];
 
   // Compat: anciennes demandes sans échéancier -> créer 100/100
   const d = await tx.demandes_paiement.findUnique({
@@ -213,6 +224,7 @@ async function ensureConditionsForDemande(tx, demandeId) {
     data: {
       uuid: uuidv4(),
       demande_id: Number(demandeId),
+      source: "DEMANDEUR",
       label: "Tranche 1",
       pourcentage: 100,
       montant_prevu: round2(d.montant),
@@ -226,7 +238,7 @@ async function ensureConditionsForDemande(tx, demandeId) {
   });
 
   return tx.conditions_paiement.findMany({
-    where: { demande_id: Number(demandeId) },
+    where: { demande_id: Number(demandeId), source: "DEMANDEUR" },
     orderBy: { id: "asc" },
   });
 }
@@ -238,6 +250,7 @@ async function createPaiement(payload, comptableAgentId) {
     montant,
     date_paiement,
     moyen_paiement,
+    conditions_source,
     reference_piece,
     compte_debite,
     commentaire,
@@ -257,7 +270,26 @@ async function createPaiement(payload, comptableAgentId) {
       throw err;
     }
 
-    const conditions = await ensureConditionsForDemande(tx, demande.id);
+    const normalizedSource = normalizeConditionsSource(conditions_source) || "DEMANDEUR";
+    const existingPayments = await tx.paiements.findMany({
+      where: { demande_id: Number(demande_id) },
+      select: { id: true, conditions_source: true },
+      orderBy: { id: "asc" },
+    });
+    const lockedSource = existingPayments.find((p) => p.conditions_source)?.conditions_source || null;
+    if (lockedSource && normalizedSource && normalizeConditionsSource(lockedSource) !== normalizedSource) {
+      const err = new Error(`Source conditions invalide: paiement deja base sur ${lockedSource}`);
+      err.statusCode = 409;
+      throw err;
+    }
+    const effectiveSource = normalizeConditionsSource(lockedSource) || normalizedSource;
+
+    const conditions = await ensureConditionsForDemande(tx, demande.id, effectiveSource);
+    if (effectiveSource === "DAF" && conditions.length === 0) {
+      const err = new Error("Conditions DAF introuvables pour cette demande");
+      err.statusCode = 409;
+      throw err;
+    }
     const mode = deriveModeFromConditions(conditions) || "100/100";
 
     const unpaid = conditions.filter((c) => !c.paiement_id && String(c.statut || "").toLowerCase() !== "paye");
@@ -317,6 +349,7 @@ async function createPaiement(payload, comptableAgentId) {
         montant: montantNum,
         date_paiement: date_paiement ? new Date(date_paiement) : new Date(),
         moyen_paiement,
+        conditions_source: effectiveSource,
         reference_piece: reference_piece || null,
         compte_debite: compte_debite || null,
         commentaire: commentaire || null,
@@ -348,7 +381,7 @@ async function createPaiement(payload, comptableAgentId) {
 
     // Appliquer paiement -> conditions
     const unpaidAfterCreate = await tx.conditions_paiement.findMany({
-      where: { demande_id: Number(demande_id), paiement_id: null },
+      where: { demande_id: Number(demande_id), source: effectiveSource, paiement_id: null },
       orderBy: { id: "asc" },
     });
     const remainingAfterCreate = unpaidAfterCreate;
@@ -372,13 +405,13 @@ async function createPaiement(payload, comptableAgentId) {
     } else {
       // total: marque toutes les tranches restantes comme payées par ce paiement
       await tx.conditions_paiement.updateMany({
-        where: { demande_id: Number(demande_id), paiement_id: null },
+        where: { demande_id: Number(demande_id), source: effectiveSource, paiement_id: null },
         data: { paiement_id: paiement.id, statut: "paye", updated_at: new Date() },
       });
     }
 
     const stillUnpaid = await tx.conditions_paiement.count({
-      where: { demande_id: Number(demande_id), paiement_id: null },
+      where: { demande_id: Number(demande_id), source: effectiveSource, paiement_id: null },
     });
     const fullyPaid = stillUnpaid === 0;
 
@@ -398,7 +431,10 @@ async function createPaiement(payload, comptableAgentId) {
   try {
     const demandeurUser = result.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users;
     if (demandeurUser?.id) {
-      const stillUnpaid = await prisma.conditions_paiement.count({ where: { demande_id: Number(demande_id), paiement_id: null } });
+      const source = normalizeConditionsSource(result?.conditions_source) || "DEMANDEUR";
+      const stillUnpaid = await prisma.conditions_paiement.count({
+        where: { demande_id: Number(demande_id), source, paiement_id: null },
+      });
       const fullyPaid = stillUnpaid === 0;
       const nextStatut = fullyPaid ? "paye" : "en_attente_paiement";
 
@@ -679,7 +715,16 @@ async function deletePaiement(id, actorAgentId) {
 
     // 3) Recalcul statut demande
     const demandeId = Number(snapshot.demande_id);
-    const stillUnpaid = await tx.conditions_paiement.count({ where: { demande_id: demandeId, paiement_id: null } });
+    const remainingPayments = await tx.paiements.findMany({
+      where: { demande_id: demandeId },
+      select: { conditions_source: true },
+      orderBy: { id: "asc" },
+    });
+    const activeSource =
+      normalizeConditionsSource(remainingPayments.find((p) => p.conditions_source)?.conditions_source) || "DEMANDEUR";
+    const stillUnpaid = await tx.conditions_paiement.count({
+      where: { demande_id: demandeId, source: activeSource, paiement_id: null },
+    });
     const fullyPaid = stillUnpaid === 0;
     const hasAnyPaiement = await tx.paiements.count({ where: { demande_id: demandeId } });
 

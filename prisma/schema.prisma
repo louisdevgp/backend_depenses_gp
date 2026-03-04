@@ -137,6 +137,7 @@ model conditions_paiement {
   id                Int               @id @default(autoincrement()) @db.UnsignedInt
   uuid              String            @unique(map: "uk_cp_uuid") @db.Char(36)
   demande_id        Int               @db.UnsignedInt
+  source            String            @default("DEMANDEUR") @db.VarChar(20)
   label             String            @db.VarChar(100)
   pourcentage       Decimal?          @db.Decimal(5, 2)
   montant_prevu     Decimal?          @db.Decimal(18, 2)
@@ -150,6 +151,7 @@ model conditions_paiement {
   paiements         paiements?        @relation(fields: [paiement_id], references: [id], map: "fk_cp_paiement")
 
   @@index([demande_id], map: "idx_cp_demande")
+  @@index([demande_id, source], map: "idx_cp_demande_source")
   @@index([paiement_id], map: "idx_cp_paiement")
 }
 
@@ -382,6 +384,7 @@ model paiements {
   montant             Decimal               @db.Decimal(18, 2)
   date_paiement       DateTime              @db.DateTime(0)
   moyen_paiement      String                @db.VarChar(50)
+  conditions_source   String?               @db.VarChar(20)
   reference_piece     String?               @db.VarChar(100)
   compte_debite       String?               @db.VarChar(100)
   commentaire         String?               @db.Text
@@ -394,6 +397,7 @@ model paiements {
 
   @@index([comptable_id], map: "idx_paiement_comptable")
   @@index([demande_id], map: "idx_paiement_demande")
+  @@index([demande_id, conditions_source], map: "idx_paiement_demande_source")
   receptions receptions[]
 }
 
