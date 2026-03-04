@@ -14,5 +14,7 @@ router.get("/", ctrl.list);
 router.use(requirePermission([P.PERMISSIONS_MANAGE]));
 router.get("/roles/:roleId", ctrl.getRolePermissions);
 router.put("/roles/:roleId", ctrl.setRolePermissions);
+router.get("/users/:userId", ctrl.getUserPermissionOverrides);
+router.put("/users/:userId", ctrl.setUserPermissionOverrides);
 
 module.exports = router;

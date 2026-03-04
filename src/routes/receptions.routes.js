@@ -6,10 +6,10 @@ const P = require("../constants/permissions");
 
 // CRUD
 router.post("/", auth, requirePermission(P.RECEPTION_CREATE), c.create);
-router.get("/", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL]), c.list);
-router.get("/:idOrUuid/pdf", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL]), c.pdf);
-router.get("/uuid/:uuid", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL]), c.getByUuid);
-router.get("/:id", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL]), c.getById);
+router.get("/", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL, P.RECEPTION_LIST]), c.list);
+router.get("/:idOrUuid/pdf", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL, P.RECEPTION_LIST]), c.pdf);
+router.get("/uuid/:uuid", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL, P.RECEPTION_LIST]), c.getByUuid);
+router.get("/:id", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL, P.RECEPTION_LIST]), c.getById);
 router.put("/:id", auth, requirePermission(P.RECEPTION_UPDATE), c.update);
 router.delete("/:id", auth, requirePermission(P.RECEPTION_DELETE), c.remove);
 

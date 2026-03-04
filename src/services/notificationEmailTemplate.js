@@ -94,6 +94,8 @@ function subjectForType(type, meta) {
       return "GP Achats — Réception modifiée";
     case "reception_deleted":
       return "GP Achats — Réception supprimée";
+    case "reception_reminder":
+      return "GP Achats - Reception en attente";
     case "reception_visa_pending":
       return "GP Achats — Visa DAF requis";
     case "reception_visa_directeur":

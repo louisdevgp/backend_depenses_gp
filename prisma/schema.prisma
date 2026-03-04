@@ -467,6 +467,7 @@ model permissions {
   deleted_at DateTime? @db.DateTime(0)
 
   role_permissions role_permissions[]
+  user_permissions user_permissions[]
 
   @@index([is_active], map: "idx_permissions_active")
   @@index([deleted_at], map: "idx_permissions_deleted")
@@ -517,6 +518,24 @@ model user_roles {
   @@index([role_id], map: "idx_ur_role")
 }
 
+model user_permissions {
+  id            Int         @id @default(autoincrement()) @db.UnsignedInt
+  uuid          String      @unique(map: "uk_user_permissions_uuid") @db.Char(36)
+  user_id       Int         @db.UnsignedInt
+  permission_id Int         @db.UnsignedInt
+  is_allowed    Boolean     @default(true)
+  created_at    DateTime    @default(now()) @db.DateTime(0)
+  deleted_at    DateTime?   @db.DateTime(0)
+
+  users       users       @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "fk_up_user")
+  permissions permissions @relation(fields: [permission_id], references: [id], map: "fk_up_permission")
+
+  @@unique([user_id, permission_id], map: "uk_user_permission_pair")
+  @@index([user_id], map: "idx_up_user")
+  @@index([permission_id], map: "idx_up_permission")
+  @@index([deleted_at], map: "idx_up_deleted")
+}
+
 model password_reset_tokens {
   id            Int      @id @default(autoincrement()) @db.UnsignedInt
   uuid          String   @unique(map: "uk_prt_uuid") @db.Char(36)
@@ -550,6 +569,7 @@ model users {
   audit_logs        audit_logs[]
   notifications     notifications[]
   user_roles        user_roles[]
+  user_permissions  user_permissions[]
   password_reset_tokens password_reset_tokens[]
 
   @@index([is_active], map: "idx_users_active")

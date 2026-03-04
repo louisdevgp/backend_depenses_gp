@@ -114,19 +114,50 @@ async function me(userId) {
   // ✅ permissions effectives (DB-first, fallback mapping)
   let permissions = [];
   try {
-    const rows = await prisma.role_permissions.findMany({
-      where: {
-        deleted_at: null,
-        roles: {
-          deleted_at: null,
-          is_active: true,
-          name: { in: roleBreakdown.roles },
-        },
-        permissions: { deleted_at: null, is_active: true },
-      },
-      select: { permissions: { select: { code: true } } },
-    });
-    permissions = Array.from(new Set(rows.map((r) => r.permissions.code).filter(Boolean)));
+    const roleNames = (roleBreakdown.roles || []).map(normalizeRoleName).filter(Boolean);
+    if (!roleNames.length) {
+      permissions = [];
+    } else {
+      const roleRows = await prisma.roles.findMany({
+        where: { deleted_at: null, is_active: true, name: { in: roleNames } },
+        select: { id: true },
+      });
+      const roleIds = roleRows.map((r) => r.id).filter(Boolean);
+      if (!roleIds.length) {
+        permissions = [];
+      } else {
+        const rpRows = await prisma.role_permissions.findMany({
+          where: { deleted_at: null, role_id: { in: roleIds } },
+          select: { permission_id: true },
+        });
+        const permIds = Array.from(new Set(rpRows.map((r) => r.permission_id).filter(Boolean)));
+        if (!permIds.length) {
+          permissions = [];
+        } else {
+          const permRows = await prisma.permissions.findMany({
+            where: { id: { in: permIds }, deleted_at: null, is_active: true },
+            select: { code: true },
+          });
+          permissions = Array.from(new Set(permRows.map((p) => p.code).filter(Boolean)));
+        }
+      }
+    }
+
+    if (permissions.length === 0 && roleBreakdown.roles?.length) {
+      const [permCount, rolePermCount] = await prisma.$transaction([
+        prisma.permissions.count({ where: { deleted_at: null, is_active: true } }),
+        prisma.role_permissions.count({ where: { deleted_at: null } }),
+      ]);
+
+      if (permCount === 0 || rolePermCount === 0) {
+        const out = new Set();
+        for (const [code, allowedRoles] of Object.entries(permissionMap || {})) {
+          const allowed = (allowedRoles || []).map(normalizeRoleName).filter(Boolean);
+          if (allowed.some((r) => roleBreakdown.roles.includes(r))) out.add(String(code));
+        }
+        permissions = Array.from(out);
+      }
+    }
   } catch (e) {
     if (!isMissingPermissionsTables(e)) throw e;
 
@@ -136,6 +167,41 @@ async function me(userId) {
       if (allowed.some((r) => roleBreakdown.roles.includes(r))) out.add(String(code));
     }
     permissions = Array.from(out);
+  }
+
+  // ✅ overrides utilisateur (allow/deny)
+  try {
+    const rows = await prisma.user_permissions.findMany({
+      where: { user_id: Number(user.id), deleted_at: null },
+      select: { permission_id: true, is_allowed: true },
+    });
+    if (rows.length) {
+      const permIds = Array.from(new Set(rows.map((r) => r.permission_id).filter(Boolean)));
+      if (permIds.length) {
+        const permRows = await prisma.permissions.findMany({
+          where: { id: { in: permIds }, deleted_at: null, is_active: true },
+          select: { id: true, code: true },
+        });
+        const idToCode = new Map(permRows.map((p) => [p.id, p.code]));
+        const allow = new Set();
+        const deny = new Set();
+        for (const row of rows) {
+          const code = idToCode.get(row.permission_id);
+          if (!code) continue;
+          if (row.is_allowed) allow.add(code);
+          else deny.add(code);
+        }
+        const set = new Set(permissions);
+        allow.forEach((c) => set.add(c));
+        deny.forEach((c) => set.delete(c));
+        permissions = Array.from(set);
+      }
+    }
+  } catch (e) {
+    const msg = String(e?.message || "").toLowerCase();
+    const missingUserPerms =
+      msg.includes("user_permissions") && (msg.includes("does not exist") || msg.includes("unknown table"));
+    if (!missingUserPerms && !isMissingPermissionsTables(e)) throw e;
   }
 
   return {

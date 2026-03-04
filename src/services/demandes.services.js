@@ -46,31 +46,44 @@ async function getAgentFromUser(user) {
   return agent;
 }
 
-async function assertCanEditDemande({ user, demande, action = "Modification" }) {
+async function assertCanEditDemande({ user, demande, action = "Modification", allowDirectorStage = false }) {
   const actorUserId = getUserIdFromToken(user);
   if (!actorUserId) throw withStatusCode(new Error("Unauthorized"), 401);
 
   const agent = await getAgentFromUser(user);
   const isAdmin = isAdminUser({ tokenRoles: user?.roles, agentRoleName: agent?.roles?.name });
-  if (isAdmin) return { agent };
+  if (isAdmin) return { agent, isAdmin: true, isOwner: false, canEditAsDirector: false };
 
   const demandeurUserId = await getDemandeurUserId(demande.id);
   if (demandeurUserId != null) {
     const isOwnerByUserId = Number(demandeurUserId) === Number(actorUserId);
     const isOwnerByAgentId = Number(demande.demandeur_id) === Number(agent.id);
     const isOwnerByUserIdFallback = Number(demande.demandeur_id) === Number(actorUserId);
-    if (!isOwnerByUserId && !isOwnerByAgentId && !isOwnerByUserIdFallback) {
-      throw withStatusCode(new Error(`${action} non autorisee`), 403);
+    if (isOwnerByUserId || isOwnerByAgentId || isOwnerByUserIdFallback) {
+      return { agent, isAdmin: false, isOwner: true, canEditAsDirector: false };
     }
-    return { agent };
+
+    if (allowDirectorStage && action === "Modification") {
+      const canEditAsDirector = await canEditAtDirectorStage({ user, demande, agent });
+      if (canEditAsDirector) return { agent, isAdmin: false, isOwner: false, canEditAsDirector: true };
+    }
+
+    throw withStatusCode(new Error(`${action} non autorisee`), 403);
   }
 
   const demandeurId = Number(demande.demandeur_id);
   const isOwnerByAgentId = Number.isFinite(demandeurId) && demandeurId === Number(agent.id);
   const isOwnerByUserId = Number.isFinite(demandeurId) && demandeurId === Number(actorUserId);
-  if (!isOwnerByAgentId && !isOwnerByUserId) throw withStatusCode(new Error(`${action} non autorisee`), 403);
+  if (isOwnerByAgentId || isOwnerByUserId) {
+    return { agent, isAdmin: false, isOwner: true, canEditAsDirector: false };
+  }
 
-  return { agent };
+  if (allowDirectorStage && action === "Modification") {
+    const canEditAsDirector = await canEditAtDirectorStage({ user, demande, agent });
+    if (canEditAsDirector) return { agent, isAdmin: false, isOwner: false, canEditAsDirector: true };
+  }
+
+  throw withStatusCode(new Error(`${action} non autorisee`), 403);
 }
 
 function isNumericId(v) {
@@ -79,6 +92,75 @@ function isNumericId(v) {
 
 function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
+}
+
+function candidateScopesForDemandeOrg(org) {
+  const scopes = ["GLOBAL"];
+  if (!org) return scopes;
+  if (org.direction_id) scopes.push(`DIRECTION:${Number(org.direction_id)}`);
+  if (org.departement_id) scopes.push(`DEPARTEMENT:${Number(org.departement_id)}`);
+  if (org.service_id) scopes.push(`SERVICE:${Number(org.service_id)}`);
+  return scopes;
+}
+
+async function canEditAtDirectorStage({ user, demande, agent }) {
+  if (!demande?.id || !agent?.id) return false;
+
+  const pending = await prisma.validation_steps.findFirst({
+    where: { demande_id: Number(demande.id), status: "en_attente" },
+    orderBy: { level: "asc" },
+    select: { role_name: true, validator_id: true },
+  });
+
+  if (!pending) return false;
+  if (normalizeRoleName(pending.role_name) !== "DIRECTEUR") return false;
+
+  const agentId = Number(agent.id);
+  if (pending.validator_id && Number(pending.validator_id) === agentId) return true;
+
+  const demandeOrg = {
+    direction_id: demande.direction_id ?? null,
+    departement_id: demande.departement_id ?? null,
+    service_id: demande.service_id ?? null,
+  };
+  const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
+  const now = new Date();
+
+  if (pending.validator_id) {
+    const delegation = await prisma.delegations.findFirst({
+      where: {
+        principal_id: Number(pending.validator_id),
+        delegate_id: agentId,
+        role_name: "DIRECTEUR",
+        is_active: true,
+        start_at: { lte: now },
+        end_at: { gte: now },
+        OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+      },
+      select: { id: true },
+    });
+    if (delegation) return true;
+  }
+
+  const roles = userEffectiveRoles(user, agent);
+  const isDirector = roles.includes("DIRECTEUR");
+  if (isDirector && agent.direction_id && demandeOrg.direction_id) {
+    if (Number(agent.direction_id) === Number(demandeOrg.direction_id)) return true;
+  }
+
+  const delegationAny = await prisma.delegations.findFirst({
+    where: {
+      delegate_id: agentId,
+      role_name: "DIRECTEUR",
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    },
+    select: { id: true },
+  });
+
+  return !!delegationAny;
 }
 
 function userEffectiveRoles(user, agent) {
@@ -378,9 +460,15 @@ function flowCodeForHierarchy(level) {
   return "FLOW_DEMANDEUR_LAMBDA";
 }
 
-async function resolveValidationFlowForAgent(agent) {
+function flowCodeForAgent(agent) {
+  const role = normalizeRoleName(agent?.roles?.name);
+  if (role === "ASSISTANTE_TECHNIQUE") return "FLOW_ASSISTANTE_TECHNIQUE";
   const level = resolveHierarchyLevel(agent);
-  const code = flowCodeForHierarchy(level);
+  return flowCodeForHierarchy(level);
+}
+
+async function resolveValidationFlowForAgent(agent) {
+  const code = flowCodeForAgent(agent);
 
   let flow = await prisma.validation_flows.findFirst({
     where: { code, is_active: true },
@@ -403,7 +491,7 @@ async function resolveHierarchyChain(tx, demandeOrg) {
 
   const demandeur = await tx.agents.findFirst({
     where: { id: demandeurId, deleted_at: null },
-    select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true },
+    select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true, roles: { select: { name: true } } },
   });
   if (!demandeur) return { demandeur: null, responsable: null, directeur: null };
 
@@ -443,7 +531,10 @@ async function resolveHierarchyChain(tx, demandeOrg) {
       });
     }
   } else if (demandeur.direction_id) {
-    directeur = demandeur;
+    const demandeurRole = normalizeRoleName(demandeur?.roles?.name);
+    if (demandeurRole === "DIRECTEUR") {
+      directeur = demandeur;
+    }
   }
 
   return { demandeur, responsable, directeur };
@@ -821,7 +912,12 @@ exports.getOne = async (user, idOrUuid) => {
 exports.update = async (user, idOrUuid, payload) => {
   const demande = await exports.getOne(user, idOrUuid);
 
-  await assertCanEditDemande({ user, demande, action: "Modification" });
+  const { canEditAsDirector = false } = await assertCanEditDemande({
+    user,
+    demande,
+    action: "Modification",
+    allowDirectorStage: true,
+  });
 
   const anyValidated = await prisma.validation_steps.count({
     where: { demande_id: demande.id, status: { in: ["valide", "rejete", "rejetee", "rejete"] } },
@@ -830,8 +926,12 @@ exports.update = async (user, idOrUuid, payload) => {
   const statut = String(demande.statut || "").toLowerCase();
   const isEditableStage = statut === "a_modifier";
 
-  if (!isEditableStage) throw withStatusCode(new Error("Demande verrouillee (soumise)"), 409);
-  if (statut !== "a_modifier" && anyValidated > 0) throw withStatusCode(new Error("Demande verrouillee (engagee)"), 409);
+  if (!isEditableStage && !canEditAsDirector) {
+    throw withStatusCode(new Error("Demande verrouillee (soumise)"), 409);
+  }
+  if (statut !== "a_modifier" && anyValidated > 0 && !canEditAsDirector) {
+    throw withStatusCode(new Error("Demande verrouillee (engagee)"), 409);
+  }
 
   const items = Array.isArray(payload.items) ? payload.items : [];
   let itemsSummary = { totalItems: 0, hasPricedItems: false };

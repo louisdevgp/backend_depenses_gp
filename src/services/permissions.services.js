@@ -78,12 +78,19 @@ exports.getRolePermissionCodes = async (roleId) => {
     where: {
       role_id: id,
       deleted_at: null,
-      permissions: { deleted_at: null, is_active: true },
     },
-    select: { permissions: { select: { code: true } } },
+    select: { permission_id: true },
   });
 
-  return rows.map((r) => r.permissions.code);
+  const permIds = Array.from(new Set(rows.map((r) => r.permission_id).filter(Boolean)));
+  if (!permIds.length) return [];
+
+  const permRows = await prisma.permissions.findMany({
+    where: { id: { in: permIds }, deleted_at: null, is_active: true },
+    select: { code: true },
+  });
+
+  return permRows.map((p) => p.code).filter(Boolean);
 };
 
 exports.setRolePermissions = async (roleId, permissionCodes) => {
@@ -160,5 +167,152 @@ exports.setRolePermissions = async (roleId, permissionCodes) => {
       role_id: id,
       permissionCodes: perms.map((p) => p.code),
     };
+  });
+};
+
+function normalizeOverrideCodes(input) {
+  const allowCodes = normalizeCodes(input?.allowCodes ?? input?.allow ?? []);
+  const denyCodes = normalizeCodes(input?.denyCodes ?? input?.deny ?? []);
+  const overlap = allowCodes.filter((c) => denyCodes.includes(c));
+  if (overlap.length) {
+    throw new Error(`PERMISSION_CONFLICT: ${overlap.join(",")}`);
+  }
+  return { allowCodes, denyCodes };
+}
+
+exports.getUserPermissionOverrides = async (userId) => {
+  const id = toIntId(userId);
+
+  const user = await prisma.users.findFirst({
+    where: { id, deleted_at: null },
+    select: { id: true },
+  });
+  if (!user) throw new Error("USER_NOT_FOUND");
+
+  const rows = await prisma.user_permissions.findMany({
+    where: { user_id: id, deleted_at: null },
+    select: { permission_id: true, is_allowed: true },
+  });
+
+  if (!rows.length) {
+    return { user_id: id, allowCodes: [], denyCodes: [] };
+  }
+
+  const permIds = Array.from(new Set(rows.map((r) => r.permission_id).filter(Boolean)));
+  if (!permIds.length) {
+    return { user_id: id, allowCodes: [], denyCodes: [] };
+  }
+
+  const permRows = await prisma.permissions.findMany({
+    where: { id: { in: permIds }, deleted_at: null, is_active: true },
+    select: { id: true, code: true },
+  });
+  const idToCode = new Map(permRows.map((p) => [p.id, p.code]));
+
+  const allowCodes = [];
+  const denyCodes = [];
+  for (const row of rows) {
+    const code = idToCode.get(row.permission_id);
+    if (!code) continue;
+    if (row.is_allowed) allowCodes.push(code);
+    else denyCodes.push(code);
+  }
+
+  return { user_id: id, allowCodes, denyCodes };
+};
+
+exports.setUserPermissionOverrides = async (userId, payload = {}) => {
+  const id = toIntId(userId);
+  const { allowCodes, denyCodes } = normalizeOverrideCodes(payload);
+
+  const user = await prisma.users.findFirst({
+    where: { id, deleted_at: null },
+    select: { id: true },
+  });
+  if (!user) throw new Error("USER_NOT_FOUND");
+
+  const allCodes = [...allowCodes, ...denyCodes];
+  const perms = allCodes.length
+    ? await prisma.permissions.findMany({
+        where: { code: { in: allCodes }, deleted_at: null, is_active: true },
+        select: { id: true, code: true },
+      })
+    : [];
+
+  if (allCodes.length && perms.length !== allCodes.length) {
+    const found = new Set(perms.map((p) => p.code));
+    const missing = allCodes.filter((c) => !found.has(c));
+    throw new Error(`UNKNOWN_PERMISSION: ${missing.join(",")}`);
+  }
+
+  const codeToId = new Map(perms.map((p) => [p.code, p.id]));
+  const allowIds = allowCodes.map((c) => codeToId.get(c)).filter(Boolean);
+  const denyIds = denyCodes.map((c) => codeToId.get(c)).filter(Boolean);
+  const allIds = Array.from(new Set([...allowIds, ...denyIds]));
+
+  return prisma.$transaction(async (tx) => {
+    if (allIds.length) {
+      await tx.user_permissions.updateMany({
+        where: { user_id: id, deleted_at: null, permission_id: { notIn: allIds } },
+        data: { deleted_at: new Date() },
+      });
+    } else {
+      await tx.user_permissions.updateMany({
+        where: { user_id: id, deleted_at: null },
+        data: { deleted_at: new Date() },
+      });
+    }
+
+    if (allowIds.length) {
+      await tx.user_permissions.updateMany({
+        where: { user_id: id, permission_id: { in: allowIds } },
+        data: { is_allowed: true, deleted_at: null },
+      });
+    }
+
+    if (denyIds.length) {
+      await tx.user_permissions.updateMany({
+        where: { user_id: id, permission_id: { in: denyIds } },
+        data: { is_allowed: false, deleted_at: null },
+      });
+    }
+
+    const existing = allIds.length
+      ? await tx.user_permissions.findMany({
+          where: { user_id: id, permission_id: { in: allIds }, deleted_at: null },
+          select: { permission_id: true },
+        })
+      : [];
+    const existingSet = new Set(existing.map((e) => e.permission_id));
+
+    const toCreate = [];
+    for (const pid of allowIds) {
+      if (!existingSet.has(pid)) {
+        toCreate.push({
+          uuid: uuidv4(),
+          user_id: id,
+          permission_id: pid,
+          is_allowed: true,
+          deleted_at: null,
+        });
+      }
+    }
+    for (const pid of denyIds) {
+      if (!existingSet.has(pid)) {
+        toCreate.push({
+          uuid: uuidv4(),
+          user_id: id,
+          permission_id: pid,
+          is_allowed: false,
+          deleted_at: null,
+        });
+      }
+    }
+
+    if (toCreate.length) {
+      await tx.user_permissions.createMany({ data: toCreate });
+    }
+
+    return { user_id: id, allowCodes, denyCodes };
   });
 };

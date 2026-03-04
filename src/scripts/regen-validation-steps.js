@@ -21,9 +21,15 @@ function flowCodeForHierarchy(level) {
   return 'FLOW_DEMANDEUR_LAMBDA';
 }
 
-async function resolveValidationFlowForAgent(tx, agent) {
+function flowCodeForAgent(agent) {
+  const role = String(agent?.roles?.name || '').trim().toUpperCase();
+  if (role === 'ASSISTANTE_TECHNIQUE') return 'FLOW_ASSISTANTE_TECHNIQUE';
   const level = resolveHierarchyLevel(agent);
-  const code = flowCodeForHierarchy(level);
+  return flowCodeForHierarchy(level);
+}
+
+async function resolveValidationFlowForAgent(tx, agent) {
+  const code = flowCodeForAgent(agent);
 
   let flow = await tx.validation_flows.findFirst({
     where: { code, is_active: true },
@@ -45,7 +51,14 @@ async function resolveHierarchyChain(tx, demande) {
 
   const demandeur = await tx.agents.findFirst({
     where: { id: demandeurId, deleted_at: null },
-    select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true },
+    select: {
+      id: true,
+      service_id: true,
+      departement_id: true,
+      direction_id: true,
+      manager_id: true,
+      roles: { select: { name: true } },
+    },
   });
   if (!demandeur) return { demandeur: null, responsable: null, directeur: null };
 
@@ -84,7 +97,8 @@ async function resolveHierarchyChain(tx, demande) {
       });
     }
   } else if (demandeur.direction_id) {
-    directeur = demandeur;
+    const demandeurRole = String(demandeur?.roles?.name || '').trim().toUpperCase();
+    if (demandeurRole === 'DIRECTEUR') directeur = demandeur;
   }
 
   return { demandeur, responsable, directeur };
@@ -194,7 +208,14 @@ function isEngaged(steps) {
       await prisma.$transaction(async (tx) => {
         const demandeur = await tx.agents.findFirst({
           where: { id: Number(d.demandeur_id), deleted_at: null },
-          select: { id: true, service_id: true, departement_id: true, direction_id: true, manager_id: true },
+          select: {
+            id: true,
+            service_id: true,
+            departement_id: true,
+            direction_id: true,
+            manager_id: true,
+            roles: { select: { name: true } },
+          },
         });
         if (!demandeur) throw new Error('Demandeur introuvable');
 

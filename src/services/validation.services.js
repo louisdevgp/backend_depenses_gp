@@ -1057,6 +1057,32 @@ async function cancelStep(stepId, userId, payload = {}) {
     if (!step) throw withStatusCode(new Error("Etape introuvable"), 404);
     if (step.status !== "valide") throw withStatusCode(new Error("Etape non annulable"), 409);
 
+    const demandeStatut = String(step?.demandes_paiement?.statut || "").toLowerCase();
+    const paidStatuts = new Set(["paye", "payee", "receptionnee", "cloture", "cloturee"]);
+    if (paidStatuts.has(demandeStatut)) {
+      throw withStatusCode(new Error("Annulation impossible: demande deja payee"), 409);
+    }
+
+    const paiementCount = await tx.paiements.count({
+      where: { demande_id: Number(step.demande_id) },
+    });
+    if (paiementCount > 0) {
+      throw withStatusCode(new Error("Annulation impossible: demande deja payee"), 409);
+    }
+
+    const paidConditionCount = await tx.conditions_paiement.count({
+      where: {
+        demande_id: Number(step.demande_id),
+        OR: [
+          { paiement_id: { not: null } },
+          { statut: { in: ["paye", "payee", "regle", "reglee"] } },
+        ],
+      },
+    });
+    if (paidConditionCount > 0) {
+      throw withStatusCode(new Error("Annulation impossible: demande deja payee"), 409);
+    }
+
     const laterValidated = await tx.validation_steps.count({
       where: {
         demande_id: Number(step.demande_id),

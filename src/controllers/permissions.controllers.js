@@ -29,3 +29,23 @@ exports.setRolePermissions = async (req, res) => {
     res.status(status).json({ success: false, message: e.message });
   }
 };
+
+exports.getUserPermissionOverrides = async (req, res) => {
+  try {
+    const data = await permissionsService.getUserPermissionOverrides(req.params.userId);
+    res.json({ success: true, data });
+  } catch (e) {
+    const status = String(e.message || "").includes("USER_NOT_FOUND") ? 404 : 400;
+    res.status(status).json({ success: false, message: e.message });
+  }
+};
+
+exports.setUserPermissionOverrides = async (req, res) => {
+  try {
+    const data = await permissionsService.setUserPermissionOverrides(req.params.userId, req.body || {});
+    res.json({ success: true, data });
+  } catch (e) {
+    const status = String(e.message || "").includes("USER_NOT_FOUND") ? 404 : 400;
+    res.status(status).json({ success: false, message: e.message });
+  }
+};

@@ -7,6 +7,33 @@ function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
 }
 
+function normalizePermissionCode(code) {
+  return String(code || "").trim().toUpperCase();
+}
+
+async function ensureAuthRoles(user) {
+  const existing = Array.isArray(user?.roles) ? user.roles.map(normalizeRoleName).filter(Boolean) : [];
+  if (existing.length) return existing;
+  const userId = user?.userId;
+  if (!userId) return [];
+
+  const [agent, userRoles] = await Promise.all([
+    prisma.agents.findFirst({
+      where: { user_id: Number(userId), deleted_at: null },
+      select: { roles: { select: { name: true } } },
+    }),
+    prisma.user_roles.findMany({
+      where: { user_id: Number(userId) },
+      select: { roles: { select: { name: true } } },
+    }),
+  ]);
+
+  const fromAgent = normalizeRoleName(agent?.roles?.name);
+  const fromUserRoles = (userRoles || []).map((ur) => normalizeRoleName(ur?.roles?.name)).filter(Boolean);
+  const merged = Array.from(new Set([fromAgent, ...fromUserRoles].filter(Boolean)));
+  if (user) user.roles = merged;
+  return merged;
+}
 function normalizeReceptionPhase(value) {
   if (value == null) return null;
   const v = String(value).trim().toUpperCase();
@@ -55,13 +82,13 @@ function agentRoleSet(agent) {
   return out;
 }
 
-async function canActAsDirectorForDemande(tx, agentId, demandeOrg) {
+async function canActAsDirectorForDemande(tx, agentId, demandeOrg, { allowAdmin = true } = {}) {
   const client = tx || prisma;
   const agent = await getAgentById(client, agentId);
   if (!agent || agent.deleted_at) return false;
 
   const roles = agentRoleSet(agent);
-  if (roles.has("ADMIN")) return true;
+  if (allowAdmin && roles.has("ADMIN")) return true;
 
   if (roles.has("DIRECTEUR")) {
     if (!agent.direction_id || !demandeOrg?.direction_id) return false;
@@ -116,7 +143,7 @@ async function canActAsResponsableForDemande(tx, agentId, demandeOrg) {
 }
 
 const GLOBAL_READ_ROLES = new Set(["ADMIN", "DAF"]);
-const DIRECTION_READ_ROLES = new Set(["DIRECTEUR", "RESPONSABLE"]);
+const DIRECTION_READ_ROLES = new Set(["DIRECTEUR", "RESPONSABLE", "ASSISTANTE_TECHNIQUE"]);
 
 async function getAgentFromAuthUser(user) {
   const userId = user?.userId;
@@ -128,7 +155,11 @@ async function getAgentFromAuthUser(user) {
 }
 
 async function receptionScopeWhereForUser(user) {
-  const roles = new Set((user?.roles || []).map(normalizeRoleName));
+  const roles = new Set(await ensureAuthRoles(user));
+  const permSet = new Set((user?.permissions || []).map(normalizePermissionCode));
+  const hasListAll = permSet.has("RECEPTION_LIST_ALL");
+  const hasListSelf = permSet.has("RECEPTION_LIST_SELF") || permSet.has("RECEPTION_LIST");
+  if (hasListAll) return null;
   if (Array.from(roles).some((r) => GLOBAL_READ_ROLES.has(r))) return null;
 
   const agent = await getAgentFromAuthUser(user);
@@ -148,6 +179,13 @@ async function receptionScopeWhereForUser(user) {
   }
 
   if (roles.has("DEMANDEUR")) {
+    return { demandes_paiement: { is: { demandeur_id: Number(agent.id) } } };
+  }
+
+  if (hasListSelf) {
+    if (agent.direction_id) {
+      return { demandes_paiement: { is: { direction_id: Number(agent.direction_id) } } };
+    }
     return { demandes_paiement: { is: { demandeur_id: Number(agent.id) } } };
   }
 
@@ -344,7 +382,11 @@ async function createReception(payload, userAgentId) {
       throw err;
     }
 
-    const autoVisaDirecteur = canDirector && (conforme != null ? Boolean(conforme) : true);
+    const demandeurAgentId = demande?.demandeur_id ? Number(demande.demandeur_id) : null;
+    const demandeurCanDirector = demandeurAgentId
+      ? await canActAsDirectorForDemande(tx, demandeurAgentId, demandeOrg, { allowAdmin: false })
+      : false;
+    const autoVisaDirecteur = demandeurCanDirector && (conforme != null ? Boolean(conforme) : false);
 
     const reception = await tx.receptions.create({
       data: {
@@ -353,9 +395,9 @@ async function createReception(payload, userAgentId) {
         paiement_id: phase === "APRES_PAIEMENT" && paiement_id ? Number(paiement_id) : null,
         phase,
         date_reception: date_reception ? new Date(date_reception) : new Date(),
-        conforme: conforme != null ? Boolean(conforme) : true,
+        conforme: conforme != null ? Boolean(conforme) : false,
         recu_par_id: Number(userAgentId),
-        visa_directeur_id: autoVisaDirecteur ? Number(userAgentId) : null,
+        visa_directeur_id: autoVisaDirecteur ? Number(demandeurAgentId) : null,
         created_at: new Date(),
         description: description ? String(description) : "",
         fournisseur: "",

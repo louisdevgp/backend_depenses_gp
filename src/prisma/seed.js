@@ -44,6 +44,11 @@ async function main() {
       steps: ["DIRECTEUR", "DAF", "DGA", "DG"],
     },
     {
+      code: "FLOW_ASSISTANTE_TECHNIQUE",
+      label: "Assistante technique : DIRECTEUR > DAF > DGA > DG",
+      steps: ["DIRECTEUR", "DAF", "DGA", "DG"],
+    },
+    {
       code: "FLOW_DIRECTEUR",
       label: "Directeur : DAF > DGA > DG",
       steps: ["DAF", "DGA", "DG"],
