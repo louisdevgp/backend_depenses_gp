@@ -1,12 +1,11 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
-const requireRole = require("../middlewares/requireRole.middleware");
+const requirePermission = require("../middlewares/requirePermission.middleware");
+const P = require("../constants/permissions");
 const ctrl = require("../controllers/delegations.controllers");
 
-const ALLOW_DELEGATIONS = ["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "ADMIN"];
-
 router.use(auth);
-router.use(requireRole(ALLOW_DELEGATIONS));
+router.use(requirePermission([P.DELEGATIONS_MANAGE]));
 
 // helper: liste d'agents pour choix (utilisé par l'UI délégations)
 router.get("/agents", ctrl.listAgentsForDelegation);

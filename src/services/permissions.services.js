@@ -1,6 +1,12 @@
 const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const permissionMeta = require("../config/permissions.meta");
+const {
+  normalizePermissionCode,
+  normalizeScopeType,
+  normalizeScopeId,
+  scopeKey,
+} = require("../utils/permissionScopes");
 
 const VALID_APPLIES_TO = new Set(["menu", "action"]);
 
@@ -53,9 +59,29 @@ function normalizeCodes(codes) {
       arr
         .map((c) => String(c || "").trim())
         .filter(Boolean)
-        .map((c) => c.toUpperCase())
+        .map((c) => normalizePermissionCode(c))
     )
   );
+}
+
+function normalizeScopePayload(scopes) {
+  const out = {};
+  if (!scopes || typeof scopes !== "object") return out;
+
+  for (const [rawCode, rawList] of Object.entries(scopes)) {
+    const code = normalizePermissionCode(rawCode);
+    if (!code) continue;
+    const list = Array.isArray(rawList) ? rawList : [];
+    const normalized = [];
+    for (const item of list) {
+      const type = normalizeScopeType(item?.type || item?.scope_type);
+      if (!type) continue;
+      const id = normalizeScopeId(item?.id ?? item?.scope_id);
+      normalized.push({ type, id });
+    }
+    out[code] = normalized;
+  }
+  return out;
 }
 
 exports.listPermissions = async () => {
@@ -211,19 +237,44 @@ exports.getUserPermissionOverrides = async (userId) => {
 
   const allowCodes = [];
   const denyCodes = [];
+  const allowIds = new Set();
   for (const row of rows) {
     const code = idToCode.get(row.permission_id);
     if (!code) continue;
-    if (row.is_allowed) allowCodes.push(code);
-    else denyCodes.push(code);
+    if (row.is_allowed) {
+      allowCodes.push(code);
+      allowIds.add(row.permission_id);
+    } else {
+      denyCodes.push(code);
+    }
   }
 
-  return { user_id: id, allowCodes, denyCodes };
+  const scopes = {};
+  if (allowIds.size) {
+    const scopeRows = await prisma.user_permission_scopes.findMany({
+      where: { user_id: id, permission_id: { in: Array.from(allowIds) }, deleted_at: null },
+      select: { permission_id: true, scope_type: true, scope_id: true },
+    });
+    const codeToScopes = new Map();
+    for (const row of scopeRows) {
+      const code = idToCode.get(row.permission_id);
+      if (!code) continue;
+      const list = codeToScopes.get(code) || [];
+      list.push({ type: row.scope_type, id: row.scope_id });
+      codeToScopes.set(code, list);
+    }
+    for (const code of allowCodes) {
+      scopes[code] = codeToScopes.get(code) || [{ type: "GLOBAL", id: null }];
+    }
+  }
+
+  return { user_id: id, allowCodes, denyCodes, scopes };
 };
 
 exports.setUserPermissionOverrides = async (userId, payload = {}) => {
   const id = toIntId(userId);
   const { allowCodes, denyCodes } = normalizeOverrideCodes(payload);
+  const scopePayload = normalizeScopePayload(payload?.scopes);
 
   const user = await prisma.users.findFirst({
     where: { id, deleted_at: null },
@@ -313,6 +364,70 @@ exports.setUserPermissionOverrides = async (userId, payload = {}) => {
       await tx.user_permissions.createMany({ data: toCreate });
     }
 
-    return { user_id: id, allowCodes, denyCodes };
+    // --- scopes (allowed permissions only) ---
+    const allowedIdToCode = new Map(perms.map((p) => [p.id, p.code]));
+    const desiredScopes = [];
+    for (const pid of allowIds) {
+      const code = allowedIdToCode.get(pid);
+      if (!code) continue;
+      const desired = scopePayload[code];
+      const scopes = Array.isArray(desired) && desired.length ? desired : [{ type: "GLOBAL", id: null }];
+      for (const s of scopes) {
+        desiredScopes.push({
+          permission_id: pid,
+          scope_type: normalizeScopeType(s.type) || "GLOBAL",
+          scope_id: normalizeScopeId(s.id),
+        });
+      }
+    }
+
+    const existingScopes = await tx.user_permission_scopes.findMany({
+      where: { user_id: id },
+      select: { id: true, permission_id: true, scope_type: true, scope_id: true, deleted_at: true },
+    });
+
+    const desiredKeySet = new Set(desiredScopes.map((s) => `${s.permission_id}:${scopeKey(s)}`));
+    const existingKeySet = new Set(existingScopes.map((s) => `${s.permission_id}:${scopeKey(s)}`));
+
+    // Soft-delete scopes not desired
+    const toDeleteIds = existingScopes
+      .filter((s) => !desiredKeySet.has(`${s.permission_id}:${scopeKey(s)}`) && s.deleted_at == null)
+      .map((s) => s.id);
+    if (toDeleteIds.length) {
+      await tx.user_permission_scopes.updateMany({
+        where: { id: { in: toDeleteIds } },
+        data: { deleted_at: new Date() },
+      });
+    }
+
+    // Restore scopes that exist but were deleted
+    const toRestoreIds = existingScopes
+      .filter((s) => desiredKeySet.has(`${s.permission_id}:${scopeKey(s)}`) && s.deleted_at != null)
+      .map((s) => s.id);
+    if (toRestoreIds.length) {
+      await tx.user_permission_scopes.updateMany({
+        where: { id: { in: toRestoreIds } },
+        data: { deleted_at: null },
+      });
+    }
+
+    // Create missing scopes
+    const toCreateScopes = desiredScopes.filter(
+      (s) => !existingKeySet.has(`${s.permission_id}:${scopeKey(s)}`)
+    );
+    if (toCreateScopes.length) {
+      await tx.user_permission_scopes.createMany({
+        data: toCreateScopes.map((s) => ({
+          uuid: uuidv4(),
+          user_id: id,
+          permission_id: s.permission_id,
+          scope_type: s.scope_type,
+          scope_id: s.scope_id,
+          deleted_at: null,
+        })),
+      });
+    }
+
+    return { user_id: id, allowCodes, denyCodes, scopes: scopePayload };
   });
 };

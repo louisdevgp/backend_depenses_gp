@@ -10,6 +10,7 @@
     "seed:permissions": "node src/prisma/seed-permissions.js",
     "seed:profiles": "node src/prisma/seed-profiles.js",
     "reset:testdata": "node src/prisma/reset-test-data.js",
+    "migrate:user-permissions": "node src/scripts/migrate-user-permissions.js",
     "sync:primary-roles": "node src/scripts/sync-primary-roles.js",
     "mail:check": "node src/scripts/mail-check.js",
     "pdf:smoke": "node src/scripts/pdf-smoke.js",
@@ -38,6 +39,7 @@
     "nodemailer": "^7.0.12",
     "pdfkit": "^0.16.0",
     "puppeteer": "^24.35.0",
+    "socket.io": "^4.8.1",
     "qrcode": "^1.5.4",
     "uuid": "^13.0.0",
     "zod": "^4.2.1"

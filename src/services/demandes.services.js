@@ -2,6 +2,11 @@
 const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
+const {
+  normalizePermissionCode,
+  getScopesForPermissionFromUser,
+  buildOrgScopeWhere,
+} = require("../utils/permissionScopes");
 
 function withStatusCode(err, statusCode) {
   err.statusCode = statusCode;
@@ -94,6 +99,13 @@ function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
 }
 
+function normalizeValidationStopRole(value) {
+  if (!value) return null;
+  const v = String(value).trim().toUpperCase();
+  if (["DAF", "DGA", "DG"].includes(v)) return v;
+  return null;
+}
+
 function candidateScopesForDemandeOrg(org) {
   const scopes = ["GLOBAL"];
   if (!org) return scopes;
@@ -113,7 +125,9 @@ async function canEditAtDirectorStage({ user, demande, agent }) {
   });
 
   if (!pending) return false;
-  if (normalizeRoleName(pending.role_name) !== "DIRECTEUR") return false;
+  const pendingRole = normalizeRoleName(pending.role_name);
+  if (!pendingRole) return false;
+  if (!["DIRECTEUR", "DAF", "DGA", "DG"].includes(pendingRole)) return false;
 
   const agentId = Number(agent.id);
   if (pending.validator_id && Number(pending.validator_id) === agentId) return true;
@@ -131,7 +145,7 @@ async function canEditAtDirectorStage({ user, demande, agent }) {
       where: {
         principal_id: Number(pending.validator_id),
         delegate_id: agentId,
-        role_name: "DIRECTEUR",
+        role_name: pendingRole,
         is_active: true,
         start_at: { lte: now },
         end_at: { gte: now },
@@ -144,14 +158,14 @@ async function canEditAtDirectorStage({ user, demande, agent }) {
 
   const roles = userEffectiveRoles(user, agent);
   const isDirector = roles.includes("DIRECTEUR");
-  if (isDirector && agent.direction_id && demandeOrg.direction_id) {
+  if (pendingRole === "DIRECTEUR" && isDirector && agent.direction_id && demandeOrg.direction_id) {
     if (Number(agent.direction_id) === Number(demandeOrg.direction_id)) return true;
   }
 
   const delegationAny = await prisma.delegations.findFirst({
     where: {
       delegate_id: agentId,
-      role_name: "DIRECTEUR",
+      role_name: pendingRole,
       is_active: true,
       start_at: { lte: now },
       end_at: { gte: now },
@@ -170,28 +184,46 @@ function userEffectiveRoles(user, agent) {
   return Array.from(out);
 }
 
-function hasAnyRole(roles, needles) {
-  const set = new Set((roles || []).map(normalizeRoleName));
-  for (const n of needles) {
-    if (set.has(normalizeRoleName(n))) return true;
-  }
-  return false;
+function hasAnyRole(roles = [], list = []) {
+  const roleSet = new Set((roles || []).map(normalizeRoleName).filter(Boolean));
+  return (list || []).some((r) => roleSet.has(normalizeRoleName(r)));
 }
 
-function applyListScopeForUser({ where, roles, agent }) {
-  if (hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"])) return where;
+function hasPermission(user, code) {
+  const perm = normalizePermissionCode(code);
+  if (!perm) return false;
+  const list = Array.isArray(user?.permissions) ? user.permissions : [];
+  return list.map(normalizePermissionCode).includes(perm);
+}
 
-  if (hasAnyRole(roles, ["RESPONSABLE", "DIRECTEUR"])) {
-    const dirId = agent?.direction_id ? Number(agent.direction_id) : null;
-    if (!dirId) return { ...where, id: -1 };
-    return { ...where, direction_id: dirId };
+function buildDemandeAccessWhere({ user, agent }) {
+  const filters = [];
+
+  const listScopes = [];
+  if (hasPermission(user, "DEMANDE_LIST")) {
+    listScopes.push(...getScopesForPermissionFromUser(user, "DEMANDE_LIST"));
+  }
+  if (hasPermission(user, "DEMANDE_LIST_ALL")) {
+    listScopes.push(...getScopesForPermissionFromUser(user, "DEMANDE_LIST_ALL"));
   }
 
-  if (hasAnyRole(roles, ["DEMANDEUR"])) {
-    return { ...where, demandeur_id: Number(agent.id) };
+  if (listScopes.length) {
+    const scopeWhere = buildOrgScopeWhere(listScopes);
+    if (scopeWhere === null) {
+      return null; // global access
+    }
+    if (scopeWhere) {
+      filters.push(scopeWhere);
+    }
   }
 
-  return where;
+  if (hasPermission(user, "DEMANDE_LIST_SELF") && agent?.id) {
+    filters.push({ demandeur_id: Number(agent.id) });
+  }
+
+  if (!filters.length) return { id: -1 };
+  if (filters.length === 1) return filters[0];
+  return { OR: filters };
 }
 
 async function resolveStakeholderUserIds({ demandeId, demande = null, excludeUserId = null }) {
@@ -239,7 +271,7 @@ async function resolveStakeholderUserIds({ demandeId, demande = null, excludeUse
 
   return { demande: demandeRow, demandeurUserId, recipients };
 }
-function assertCanReadDemande({ demande, roles, agent }) {
+function assertCanReadDemande({ demande, user, agent }) {
   if (!demande) {
     const err = new Error("Demande introuvable");
     err.statusCode = 404;
@@ -253,35 +285,46 @@ function assertCanReadDemande({ demande, roles, agent }) {
     agentUserId != null && demandeurUserId != null && Number(demandeurUserId) === Number(agentUserId);
   const isOwnerByUserIdFallback =
     agentUserId != null && Number(demande.demandeur_id) === Number(agentUserId);
+
   if (isOwnerByAgentId || isOwnerByUserId || isOwnerByUserIdFallback) return true;
 
-  if (hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"])) return true;
-
-  if (hasAnyRole(roles, ["RESPONSABLE", "DIRECTEUR"])) {
-    const dirId = agent?.direction_id ? Number(agent.direction_id) : null;
-    if (!dirId || Number(demande.direction_id) !== dirId) {
-      const err = new Error("Acces refuse: demande hors de votre direction");
-      err.statusCode = 403;
-      throw err;
-    }
-    return true;
+  const accessWhere = buildDemandeAccessWhere({ user, agent });
+  if (accessWhere == null) return true;
+  if (accessWhere?.id === -1) {
+    const err = new Error("Acces refuse");
+    err.statusCode = 403;
+    throw err;
   }
 
-  if (hasAnyRole(roles, ["DEMANDEUR"])) {
-    const agentUserId = agent?.user_id ?? agent?.users?.id;
-    const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
-    const isOwnerByAgentId = Number(demande.demandeur_id) === Number(agent.id);
-    const isOwnerByUserId =
-      agentUserId != null && demandeurUserId != null && Number(demandeurUserId) === Number(agentUserId);
-    if (!isOwnerByAgentId && !isOwnerByUserId) {
-      const err = new Error("Acces refuse");
-      err.statusCode = 403;
-      throw err;
+  // Apply accessWhere to this demande
+  const matches = (() => {
+    if (accessWhere?.direction_id?.in) {
+      return accessWhere.direction_id.in.includes(Number(demande.direction_id));
     }
-    return true;
-  }
+    if (accessWhere?.departement_id?.in) {
+      return accessWhere.departement_id.in.includes(Number(demande.departement_id));
+    }
+    if (accessWhere?.service_id?.in) {
+      return accessWhere.service_id.in.includes(Number(demande.service_id));
+    }
+    if (accessWhere?.OR && Array.isArray(accessWhere.OR)) {
+      return accessWhere.OR.some((cond) => {
+        if (cond?.demandeur_id != null) return Number(cond.demandeur_id) === Number(demande.demandeur_id);
+        if (cond?.direction_id?.in) return cond.direction_id.in.includes(Number(demande.direction_id));
+        if (cond?.departement_id?.in) return cond.departement_id.in.includes(Number(demande.departement_id));
+        if (cond?.service_id?.in) return cond.service_id.in.includes(Number(demande.service_id));
+        return false;
+      });
+    }
+    if (accessWhere?.demandeur_id != null) return Number(accessWhere.demandeur_id) === Number(demande.demandeur_id);
+    return false;
+  })();
 
-  return true;
+  if (matches) return true;
+
+  const err = new Error("Acces refuse");
+  err.statusCode = 403;
+  throw err;
 }
 
 exports.assertCanReadDemandeByIdOrUuid = async (user, idOrUuid) => {
@@ -293,8 +336,7 @@ exports.assertCanReadDemandeByIdOrUuid = async (user, idOrUuid) => {
   });
 
   const agent = await getAgentFromUser(user);
-  const roles = userEffectiveRoles(user, agent);
-  assertCanReadDemande({ demande, roles, agent });
+  assertCanReadDemande({ demande, user, agent });
   return true;
 };
 
@@ -307,8 +349,7 @@ exports.getDemandeHeader = async (user, idOrUuid) => {
   });
 
   const agent = await getAgentFromUser(user);
-  const roles = userEffectiveRoles(user, agent);
-  assertCanReadDemande({ demande, roles, agent });
+  assertCanReadDemande({ demande, user, agent });
 
   return demande;
 };
@@ -442,6 +483,38 @@ function buildCustomPaiementConditions({ total, tranches = [] }) {
   return out;
 }
 
+function computeTranchesPourcentageSum(total, tranches = []) {
+  const totalNum = Number(total);
+  let sum = 0;
+  let hasAny = false;
+
+  for (const t of tranches) {
+    const p = t?.pourcentage != null ? Number(t.pourcentage) : null;
+    if (Number.isFinite(p)) {
+      sum += p;
+      hasAny = true;
+      continue;
+    }
+    const m = t?.montant_prevu != null ? Number(t.montant_prevu) : null;
+    if (Number.isFinite(m) && Number.isFinite(totalNum) && totalNum > 0) {
+      sum += (m / totalNum) * 100;
+      hasAny = true;
+    }
+  }
+
+  return { sum, hasAny };
+}
+
+function assertTranchesSumTo100(total, tranches, label = "Conditions de paiement") {
+  const { sum, hasAny } = computeTranchesPourcentageSum(total, tranches);
+  if (!hasAny) {
+    throw withStatusCode(new Error(`${label}: au moins une tranche est requise`), 400);
+  }
+  if (Math.abs(sum - 100) > 0.01) {
+    throw withStatusCode(new Error(`${label}: la somme des pourcentages doit etre 100%`), 400);
+  }
+}
+
 function toStageStatus(roleName) {
   return `validation_${String(roleName).toLowerCase()}`;
 }
@@ -571,12 +644,20 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
     where: { flow_id: Number(flow.id) },
     orderBy: { step_order: "asc" },
   });
+  const stopRole = normalizeValidationStopRole(demande?.validation_stop_role);
+  const filteredSteps =
+    stopRole && steps.length
+      ? (() => {
+          const idx = steps.findIndex((s) => normalizeRoleName(s.role_name) === stopRole);
+          return idx >= 0 ? steps.slice(0, idx + 1) : steps;
+        })()
+      : steps;
 
   const hierarchy = await resolveHierarchyChain(tx, demande);
 
   const created = [];
   let isFirst = true;
-  for (const s of steps) {
+  for (const s of filteredSteps) {
     const role = String(s.role_name || "").trim().toUpperCase();
     let validator = null;
 
@@ -628,7 +709,6 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
 exports.createDemande = async (user, payload) => {
   const agent = await getAgentFromUser(user);
   const flow = await resolveValidationFlowForAgent(agent);
-
   if (!payload.motif) throw new Error("motif requis");
   if (!payload.beneficiaire) throw new Error("beneficiaire requis");
 
@@ -652,7 +732,15 @@ exports.createDemande = async (user, payload) => {
     throw withStatusCode(new Error("Fournir soit conditions_paiement_mode, soit conditions_paiement_custom"), 400);
   }
 
+  const hasCustomRaw = payload.conditions_paiement_custom !== undefined;
+  if (hasCustomRaw && !Array.isArray(payload.conditions_paiement_custom)) {
+    throw withStatusCode(new Error("conditions_paiement_custom invalide"), 400);
+  }
   const customTranches = Array.isArray(payload.conditions_paiement_custom) ? payload.conditions_paiement_custom : null;
+  if (customTranches) {
+    const totalForValidation = remiseCalc.montant_net != null ? remiseCalc.montant_net : montantAPayer;
+    assertTranchesSumTo100(totalForValidation, customTranches);
+  }
 
   for (const it of items) {
     const designation = String(it?.designation ?? "").trim();
@@ -807,8 +895,8 @@ exports.listDemandes = async (user, query) => {
 
   const agent = await getAgentFromUser(user);
   const roles = userEffectiveRoles(user, agent);
-
-  const where = applyListScopeForUser({ where: whereBase, roles, agent });
+  const accessWhere = buildDemandeAccessWhere({ user, agent });
+  const where = accessWhere ? { AND: [whereBase, accessWhere] } : whereBase;
 
   if (query.statut) {
     const raw = Array.isArray(query.statut) ? query.statut : String(query.statut).split(",");
@@ -906,7 +994,7 @@ exports.getOne = async (user, idOrUuid) => {
 
   const agent = await getAgentFromUser(user);
   const roles = userEffectiveRoles(user, agent);
-  assertCanReadDemande({ demande, roles, agent });
+  assertCanReadDemande({ demande, user, agent });
 
   return demande;
 };
@@ -1049,25 +1137,42 @@ exports.update = async (user, idOrUuid, payload) => {
         const retourLevel = Number(retourStep.level);
 
         if (retourLevel > 1) {
+          const retourRole = normalizeRoleName(retourStep.role_name);
+          const shouldReturnToDirector = ["DAF", "DGA", "DG"].includes(retourRole);
+          const directeurStep = shouldReturnToDirector
+            ? await tx.validation_steps.findFirst({
+                where: { demande_id: demande.id, role_name: "DIRECTEUR" },
+              })
+            : null;
+
           const prev = await tx.validation_steps.findFirst({
             where: { demande_id: demande.id, level: retourLevel - 1 },
           });
 
-          if (prev) {
+          const target = directeurStep || prev;
+
+          if (target) {
             await tx.validation_steps.update({
               where: { id: retourStep.id },
               data: { status: "bloque", updated_at: new Date() },
             });
 
             await tx.validation_steps.update({
-              where: { id: prev.id },
-              data: { status: "en_attente", updated_at: new Date() },
+              where: { id: target.id },
+              data: {
+                status: "en_attente",
+                validated_by_id: null,
+                validated_at: null,
+                signature_url: null,
+                commentaire: null,
+                updated_at: new Date(),
+              },
             });
 
-            if (prev.role_name) {
+            if (target.role_name) {
               await tx.demandes_paiement.update({
                 where: { id: demande.id },
-                data: { statut: toStageStatus(prev.role_name), updated_at: new Date() },
+                data: { statut: toStageStatus(target.role_name), updated_at: new Date() },
               });
             }
           }
@@ -1112,10 +1217,18 @@ exports.update = async (user, idOrUuid, payload) => {
       if (paidOrLinked > 0) throw withStatusCode(new Error("Conditions de paiement deja engagees"), 409);
 
       const hasCustom = payload.conditions_paiement_custom !== undefined;
+      if (hasCustom && !Array.isArray(payload.conditions_paiement_custom)) {
+        throw withStatusCode(new Error("conditions_paiement_custom invalide"), 400);
+      }
       const customTranches = Array.isArray(payload.conditions_paiement_custom) ? payload.conditions_paiement_custom : null;
 
       let conditions = [];
       if (hasCustom) {
+        if (customTranches) {
+          assertTranchesSumTo100(totalForConditions, customTranches);
+        } else {
+          throw withStatusCode(new Error("conditions_paiement_custom invalide"), 400);
+        }
         conditions = buildCustomPaiementConditions({ total: totalForConditions, tranches: customTranches });
       } else {
         const paiementMode = normalizePaiementMode(payload.conditions_paiement_mode);

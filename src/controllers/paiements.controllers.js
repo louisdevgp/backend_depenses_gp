@@ -27,16 +27,16 @@ exports.create = async (req, res) => {
 
 exports.list = async (req, res) => {
   try {
-    const data = await paiementsService.listPaiements(req.query);
+    const data = await paiementsService.listPaiements(req.query, req.user);
     return res.json({ success: true, data });
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
   }
 };
 
 exports.getById = async (req, res) => {
   try {
-    const data = await paiementsService.getPaiementById(req.params.id);
+    const data = await paiementsService.getPaiementById(req.params.id, req.user);
     return res.json({ success: true, data });
   } catch (e) {
     return res.status(e.statusCode || 500).json({ success: false, message: e.message });
@@ -45,7 +45,7 @@ exports.getById = async (req, res) => {
 
 exports.getByUuid = async (req, res) => {
   try {
-    const data = await paiementsService.getPaiementByUuid(req.params.uuid);
+    const data = await paiementsService.getPaiementByUuid(req.params.uuid, req.user);
     return res.json({ success: true, data });
   } catch (e) {
     return res.status(e.statusCode || 500).json({ success: false, message: e.message });
@@ -54,10 +54,10 @@ exports.getByUuid = async (req, res) => {
 
 exports.listByDemande = async (req, res) => {
   try {
-    const data = await paiementsService.listByDemande(req.params.demandeId);
+    const data = await paiementsService.listByDemande(req.params.demandeId, req.user);
     return res.json({ success: true, data });
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
   }
 };
 

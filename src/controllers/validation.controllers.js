@@ -15,6 +15,8 @@ exports.approveStep = async (req, res) => {
     daf_critere4,
     conditions_paiement_mode,
     conditions_paiement_custom,
+    conditions_paiement_use_demandeur,
+    validation_stop_role,
   } = req.body || {};
   // On ignore signature_data_url car on ne gère plus les signatures électroniques
   const result = await service.approveStep(stepId, req.user.userId, commentaire, null, {
@@ -24,6 +26,8 @@ exports.approveStep = async (req, res) => {
     daf_critere4,
     conditions_paiement_mode,
     conditions_paiement_custom,
+    conditions_paiement_use_demandeur,
+    validation_stop_role,
   });
   res.json({ success: true, message: "Étape validée", data: result });
 };

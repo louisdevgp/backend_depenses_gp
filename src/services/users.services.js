@@ -3,6 +3,10 @@ const prisma = new PrismaClient();
 const { v4: uuidv4 } = require("uuid");
 const { hashPassword } = require("../utils/password");
 const permissionMap = require("../config/permissions");
+const {
+  getUserPermissionProfile,
+  normalizePermissionCode,
+} = require("../utils/permissionScopes");
 
 const ROLE_IMPLICATIONS = {
   DG: ["DIRECTEUR"],
@@ -40,8 +44,8 @@ function isMissingPermissionsTables(err) {
   const code = String(err?.code || "");
   const msg = String(err?.message || "").toLowerCase();
   if (code === "P2021") return true;
-  if (msg.includes("does not exist") && (msg.includes("permissions") || msg.includes("role_permissions"))) return true;
-  if (msg.includes("unknown table") && (msg.includes("permissions") || msg.includes("role_permissions"))) return true;
+  if (msg.includes("does not exist") && (msg.includes("permissions") || msg.includes("user_permissions") || msg.includes("user_permission_scopes"))) return true;
+  if (msg.includes("unknown table") && (msg.includes("permissions") || msg.includes("user_permissions") || msg.includes("user_permission_scopes"))) return true;
   return false;
 }
 
@@ -111,97 +115,24 @@ async function me(userId) {
     delegatedRoles,
   });
 
-  // ✅ permissions effectives (DB-first, fallback mapping)
+  // ✅ permissions effectives (user-based)
   let permissions = [];
+  let permissionScopes = {};
   try {
-    const roleNames = (roleBreakdown.roles || []).map(normalizeRoleName).filter(Boolean);
-    if (!roleNames.length) {
-      permissions = [];
-    } else {
-      const roleRows = await prisma.roles.findMany({
-        where: { deleted_at: null, is_active: true, name: { in: roleNames } },
-        select: { id: true },
-      });
-      const roleIds = roleRows.map((r) => r.id).filter(Boolean);
-      if (!roleIds.length) {
-        permissions = [];
-      } else {
-        const rpRows = await prisma.role_permissions.findMany({
-          where: { deleted_at: null, role_id: { in: roleIds } },
-          select: { permission_id: true },
-        });
-        const permIds = Array.from(new Set(rpRows.map((r) => r.permission_id).filter(Boolean)));
-        if (!permIds.length) {
-          permissions = [];
-        } else {
-          const permRows = await prisma.permissions.findMany({
-            where: { id: { in: permIds }, deleted_at: null, is_active: true },
-            select: { code: true },
-          });
-          permissions = Array.from(new Set(permRows.map((p) => p.code).filter(Boolean)));
-        }
-      }
-    }
-
-    if (permissions.length === 0 && roleBreakdown.roles?.length) {
-      const [permCount, rolePermCount] = await prisma.$transaction([
-        prisma.permissions.count({ where: { deleted_at: null, is_active: true } }),
-        prisma.role_permissions.count({ where: { deleted_at: null } }),
-      ]);
-
-      if (permCount === 0 || rolePermCount === 0) {
-        const out = new Set();
-        for (const [code, allowedRoles] of Object.entries(permissionMap || {})) {
-          const allowed = (allowedRoles || []).map(normalizeRoleName).filter(Boolean);
-          if (allowed.some((r) => roleBreakdown.roles.includes(r))) out.add(String(code));
-        }
-        permissions = Array.from(out);
-      }
-    }
+    const profile = await getUserPermissionProfile({ prisma, userId: user.id });
+    permissions = (profile.allowedCodes || []).map(normalizePermissionCode);
+    permissionScopes = profile.scopesByCode || {};
   } catch (e) {
     if (!isMissingPermissionsTables(e)) throw e;
 
+    // Fallback: legacy role mapping if tables are missing (dev)
     const out = new Set();
     for (const [code, allowedRoles] of Object.entries(permissionMap || {})) {
       const allowed = (allowedRoles || []).map(normalizeRoleName).filter(Boolean);
       if (allowed.some((r) => roleBreakdown.roles.includes(r))) out.add(String(code));
     }
     permissions = Array.from(out);
-  }
-
-  // ✅ overrides utilisateur (allow/deny)
-  try {
-    const rows = await prisma.user_permissions.findMany({
-      where: { user_id: Number(user.id), deleted_at: null },
-      select: { permission_id: true, is_allowed: true },
-    });
-    if (rows.length) {
-      const permIds = Array.from(new Set(rows.map((r) => r.permission_id).filter(Boolean)));
-      if (permIds.length) {
-        const permRows = await prisma.permissions.findMany({
-          where: { id: { in: permIds }, deleted_at: null, is_active: true },
-          select: { id: true, code: true },
-        });
-        const idToCode = new Map(permRows.map((p) => [p.id, p.code]));
-        const allow = new Set();
-        const deny = new Set();
-        for (const row of rows) {
-          const code = idToCode.get(row.permission_id);
-          if (!code) continue;
-          if (row.is_allowed) allow.add(code);
-          else deny.add(code);
-        }
-        const set = new Set(permissions);
-        allow.forEach((c) => set.add(c));
-        deny.forEach((c) => set.delete(c));
-        permissions = Array.from(set);
-      }
-    }
-  } catch (e) {
-    const msg = String(e?.message || "").toLowerCase();
-    const missingUserPerms =
-      msg.includes("user_permissions") && (msg.includes("does not exist") || msg.includes("unknown table"));
-    if (!missingUserPerms && !isMissingPermissionsTables(e)) throw e;
+    permissionScopes = {};
   }
 
   return {
@@ -216,6 +147,7 @@ async function me(userId) {
     secondaryRoles: roleBreakdown.secondaryRoles,
     delegatedRoles,
     permissions,
+    permissionScopes,
     agent: agentRecord ? { ...agentRecord, delegations: delegated } : null,
   };
 }

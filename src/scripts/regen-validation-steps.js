@@ -28,6 +28,13 @@ function flowCodeForAgent(agent) {
   return flowCodeForHierarchy(level);
 }
 
+function normalizeValidationStopRole(value) {
+  if (!value) return null;
+  const v = String(value).trim().toUpperCase();
+  if (["DAF", "DGA", "DG"].includes(v)) return v;
+  return null;
+}
+
 async function resolveValidationFlowForAgent(tx, agent) {
   const code = flowCodeForAgent(agent);
 
@@ -133,13 +140,21 @@ async function buildValidationSteps(tx, flow, demande) {
     where: { flow_id: Number(flow.id) },
     orderBy: { step_order: 'asc' },
   });
+  const stopRole = normalizeValidationStopRole(demande?.validation_stop_role);
+  const filteredSteps =
+    stopRole && steps.length
+      ? (() => {
+          const idx = steps.findIndex((s) => String(s.role_name || '').trim().toUpperCase() === stopRole);
+          return idx >= 0 ? steps.slice(0, idx + 1) : steps;
+        })()
+      : steps;
 
   const hierarchy = await resolveHierarchyChain(tx, demande);
 
   const created = [];
   let isFirst = true;
 
-  for (const s of steps) {
+  for (const s of filteredSteps) {
     const role = String(s.role_name || '').trim().toUpperCase();
     let validator = null;
 

@@ -31,6 +31,7 @@ module.exports = {
 
   // Validations
   [P.VALIDATION_LIST_PENDING]: { module: "Validations", appliesTo: ["menu", "action"] },
+  [P.DELEGATIONS_MANAGE]: { module: "Validations", appliesTo: ["menu", "action"] },
   [P.VALIDATION_APPROVE]: { module: "Validations", appliesTo: ["action"] },
   [P.VALIDATION_REJECT]: { module: "Validations", appliesTo: ["action"] },
   [P.VALIDATION_RETURN_FOR_MODIFICATION]: { module: "Validations", appliesTo: ["action"] },
