@@ -1,6 +1,7 @@
 const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const { sendNotificationEmail } = require("./mailer.services");
+const realtime = require("../realtime");
 
 function isNumericId(v) {
   return /^[0-9]+$/.test(String(v));
@@ -109,6 +110,34 @@ async function createNotification(
     },
   });
 
+  try {
+    realtime.emitToUser(user_id, "notification:new", { notification: created });
+    const typeLower = String(type || "").toLowerCase();
+    if (typeLower === "validation_pending") {
+      await realtime.emitPendingStatus(user_id);
+    }
+    if (
+      ["paiement_pending", "paiement_effectue", "paiement_updated", "paiement_deleted"].includes(typeLower)
+    ) {
+      await realtime.emitPaiementPendingStatus(user_id);
+    }
+    if (
+      [
+        "reception_creee",
+        "reception_updated",
+        "reception_deleted",
+        "reception_reminder",
+        "reception_visa_pending",
+        "reception_visa_directeur",
+        "reception_visa_daf",
+      ].includes(typeLower)
+    ) {
+      await realtime.emitReceptionPendingStatus(user_id);
+    }
+  } catch {
+    // ignore realtime errors
+  }
+
   // Best practice: do not send email inside a DB transaction callback.
   // If called with `tx`, we only persist the notification and mark it as queued.
   if (sendEmailNow && tx) {
@@ -186,10 +215,18 @@ async function markAsRead(userId, notifId) {
   });
   if (!n) throw new Error("Notification introuvable");
 
-  return prisma.notifications.update({
+  const updated = await prisma.notifications.update({
     where: { id: n.id },
     data: { read_at: new Date() },
   });
+
+  try {
+    realtime.emitToUser(userId, "notification:read", { id: updated.id, read_at: updated.read_at });
+  } catch {
+    // ignore realtime errors
+  }
+
+  return updated;
 }
 
 module.exports = {

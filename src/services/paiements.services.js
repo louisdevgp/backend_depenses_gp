@@ -5,7 +5,13 @@ const { sendMail } = require("../config/mailer");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const realtime = require("../realtime");
 const { resolveUploadsPathFromUrl } = require("./signatures.services");
+const {
+  normalizePermissionCode,
+  getScopesForPermissionFromUser,
+  buildOrgScopeWhere,
+} = require("../utils/permissionScopes");
 
 function getEnvAny(keys) {
   for (const k of keys) {
@@ -159,6 +165,46 @@ function normalizeConditionsSource(value) {
   if (v === "DAF") return "DAF";
   if (v === "DEMANDEUR") return "DEMANDEUR";
   return null;
+}
+
+function hasPermission(user, code) {
+  const perm = normalizePermissionCode(code);
+  if (!perm) return false;
+  const list = Array.isArray(user?.permissions) ? user.permissions : [];
+  return list.map(normalizePermissionCode).includes(perm);
+}
+
+function paiementScopeWhereForUser(user, permissionCodes = []) {
+  if (!user) {
+    const err = new Error("Accès interdit");
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const codes = Array.isArray(permissionCodes) && permissionCodes.length ? permissionCodes : ["PAIEMENT_LIST"];
+  const scopes = [];
+  for (const code of codes) {
+    if (hasPermission(user, code)) {
+      scopes.push(...getScopesForPermissionFromUser(user, code));
+    }
+  }
+
+  if (!scopes.length) {
+    const err = new Error("Accès interdit");
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const scopeWhere = buildOrgScopeWhere(scopes, {
+    wrap: (base) => ({ demandes_paiement: { is: base } }),
+  });
+
+  if (scopeWhere === null) return null;
+  if (scopeWhere && scopeWhere.id !== -1) return scopeWhere;
+
+  const err = new Error("Accès interdit");
+  err.statusCode = 403;
+  throw err;
 }
 
 async function findUserIdByAgentId(agentId) {
@@ -453,6 +499,15 @@ async function createPaiement(payload, comptableAgentId) {
     // ignore email errors
   }
 
+  try {
+    const actorUserId = await findUserIdByAgentId(comptableAgentId);
+    if (actorUserId) {
+      await realtime.emitPaiementPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
+  }
+
   // ✅ Email récap paiement + pièces jointes: documents de la demande
   try {
     const demande = await prisma.demandes_paiement.findUnique({
@@ -575,36 +630,31 @@ async function createPaiement(payload, comptableAgentId) {
   return result;
 }
 
-async function listPaiements({ demande_id, from, to, moyen_paiement }) {
+async function listPaiements({ demande_id, from, to, moyen_paiement }, authUser = null) {
+  const filters = {
+    ...(demande_id ? { demande_id: Number(demande_id) } : {}),
+    ...(moyen_paiement ? { moyen_paiement } : {}),
+    ...(from || to
+      ? { date_paiement: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
+      : {}),
+  };
+
+  const scopeWhere = paiementScopeWhereForUser(authUser, ["PAIEMENT_LIST"]);
+  const where = scopeWhere ? { AND: [filters, scopeWhere] } : filters;
+
   return prisma.paiements.findMany({
-    where: {
-      ...(demande_id ? { demande_id: Number(demande_id) } : {}),
-      ...(moyen_paiement ? { moyen_paiement } : {}),
-      ...(from || to
-        ? { date_paiement: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(to) } : {}) } }
-        : {}),
-    },
+    where,
     orderBy: { id: "desc" },
     include: { documents: true },
   });
 }
 
-async function getPaiementById(id) {
-  const paiement = await prisma.paiements.findUnique({
-    where: { id: Number(id) },
-    include: { documents: true, demandes_paiement: true },
-  });
-  if (!paiement) {
-    const err = new Error("Paiement introuvable");
-    err.statusCode = 404;
-    throw err;
-  }
-  return paiement;
-}
+async function getPaiementById(id, authUser = null) {
+  const scopeWhere = paiementScopeWhereForUser(authUser, ["PAIEMENT_GET", "PAIEMENT_LIST"]);
+  const where = scopeWhere ? { AND: [{ id: Number(id) }, scopeWhere] } : { id: Number(id) };
 
-async function getPaiementByUuid(uuid) {
   const paiement = await prisma.paiements.findFirst({
-    where: { uuid },
+    where,
     include: { documents: true, demandes_paiement: true },
   });
   if (!paiement) {
@@ -615,9 +665,30 @@ async function getPaiementByUuid(uuid) {
   return paiement;
 }
 
-async function listByDemande(demandeId) {
+async function getPaiementByUuid(uuid, authUser = null) {
+  const scopeWhere = paiementScopeWhereForUser(authUser, ["PAIEMENT_GET", "PAIEMENT_LIST"]);
+  const where = scopeWhere ? { AND: [{ uuid: String(uuid) }, scopeWhere] } : { uuid: String(uuid) };
+
+  const paiement = await prisma.paiements.findFirst({
+    where,
+    include: { documents: true, demandes_paiement: true },
+  });
+  if (!paiement) {
+    const err = new Error("Paiement introuvable");
+    err.statusCode = 404;
+    throw err;
+  }
+  return paiement;
+}
+
+async function listByDemande(demandeId, authUser = null) {
+  const scopeWhere = paiementScopeWhereForUser(authUser, ["PAIEMENT_LIST", "PAIEMENT_GET"]);
+  const where = scopeWhere
+    ? { AND: [{ demande_id: Number(demandeId) }, scopeWhere] }
+    : { demande_id: Number(demandeId) };
+
   return prisma.paiements.findMany({
-    where: { demande_id: Number(demandeId) },
+    where,
     orderBy: { id: "desc" },
     include: { documents: true },
   });
@@ -681,6 +752,15 @@ async function updatePaiement(id, payload, actorAgentId) {
     }
   } catch {
     // ignore email errors
+  }
+
+  try {
+    const actorUserId = await findUserIdByAgentId(actorAgentId);
+    if (actorUserId) {
+      await realtime.emitPaiementPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
   }
 
   return updated;
@@ -754,6 +834,15 @@ async function deletePaiement(id, actorAgentId) {
     }
   } catch {
     // ignore email errors
+  }
+
+  try {
+    const actorUserId = await findUserIdByAgentId(actorAgentId);
+    if (actorUserId) {
+      await realtime.emitPaiementPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
   }
 
   return true;

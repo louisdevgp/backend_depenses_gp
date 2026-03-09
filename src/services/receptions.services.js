@@ -2,38 +2,17 @@ const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
+const realtime = require("../realtime");
+const {
+  normalizePermissionCode,
+  getScopesForPermissionFromUser,
+  buildOrgScopeWhere,
+} = require("../utils/permissionScopes");
 
 function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
 }
 
-function normalizePermissionCode(code) {
-  return String(code || "").trim().toUpperCase();
-}
-
-async function ensureAuthRoles(user) {
-  const existing = Array.isArray(user?.roles) ? user.roles.map(normalizeRoleName).filter(Boolean) : [];
-  if (existing.length) return existing;
-  const userId = user?.userId;
-  if (!userId) return [];
-
-  const [agent, userRoles] = await Promise.all([
-    prisma.agents.findFirst({
-      where: { user_id: Number(userId), deleted_at: null },
-      select: { roles: { select: { name: true } } },
-    }),
-    prisma.user_roles.findMany({
-      where: { user_id: Number(userId) },
-      select: { roles: { select: { name: true } } },
-    }),
-  ]);
-
-  const fromAgent = normalizeRoleName(agent?.roles?.name);
-  const fromUserRoles = (userRoles || []).map((ur) => normalizeRoleName(ur?.roles?.name)).filter(Boolean);
-  const merged = Array.from(new Set([fromAgent, ...fromUserRoles].filter(Boolean)));
-  if (user) user.roles = merged;
-  return merged;
-}
 function normalizeReceptionPhase(value) {
   if (value == null) return null;
   const v = String(value).trim().toUpperCase();
@@ -142,11 +121,8 @@ async function canActAsResponsableForDemande(tx, agentId, demandeOrg) {
   return !!delegation;
 }
 
-const GLOBAL_READ_ROLES = new Set(["ADMIN", "DAF"]);
-const DIRECTION_READ_ROLES = new Set(["DIRECTEUR", "RESPONSABLE", "ASSISTANTE_TECHNIQUE"]);
-
 async function getAgentFromAuthUser(user) {
-  const userId = user?.userId;
+  const userId = user?.userId ?? user?.id;
   if (!userId) return null;
   return prisma.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
@@ -154,14 +130,14 @@ async function getAgentFromAuthUser(user) {
   });
 }
 
-async function receptionScopeWhereForUser(user) {
-  const roles = new Set(await ensureAuthRoles(user));
-  const permSet = new Set((user?.permissions || []).map(normalizePermissionCode));
-  const hasListAll = permSet.has("RECEPTION_LIST_ALL");
-  const hasListSelf = permSet.has("RECEPTION_LIST_SELF") || permSet.has("RECEPTION_LIST");
-  if (hasListAll) return null;
-  if (Array.from(roles).some((r) => GLOBAL_READ_ROLES.has(r))) return null;
+function hasPermission(user, code) {
+  const perm = normalizePermissionCode(code);
+  if (!perm) return false;
+  const list = Array.isArray(user?.permissions) ? user.permissions : [];
+  return list.map(normalizePermissionCode).includes(perm);
+}
 
+async function receptionScopeWhereForUser(user) {
   const agent = await getAgentFromAuthUser(user);
   if (!agent) {
     const err = new Error("Accès interdit");
@@ -169,29 +145,35 @@ async function receptionScopeWhereForUser(user) {
     throw err;
   }
 
-  if (Array.from(roles).some((r) => DIRECTION_READ_ROLES.has(r))) {
-    if (!agent.direction_id) {
-      const err = new Error("Accès interdit");
-      err.statusCode = 403;
-      throw err;
-    }
-    return { demandes_paiement: { is: { direction_id: Number(agent.direction_id) } } };
+  const filters = [];
+  const listScopes = [];
+  if (hasPermission(user, "RECEPTION_LIST")) {
+    listScopes.push(...getScopesForPermissionFromUser(user, "RECEPTION_LIST"));
+  }
+  if (hasPermission(user, "RECEPTION_LIST_ALL")) {
+    listScopes.push(...getScopesForPermissionFromUser(user, "RECEPTION_LIST_ALL"));
   }
 
-  if (roles.has("DEMANDEUR")) {
-    return { demandes_paiement: { is: { demandeur_id: Number(agent.id) } } };
+  if (listScopes.length) {
+    const scopeWhere = buildOrgScopeWhere(listScopes, {
+      wrap: (base) => ({ demandes_paiement: { is: base } }),
+    });
+    if (scopeWhere === null) return null;
+    if (scopeWhere) filters.push(scopeWhere);
   }
 
-  if (hasListSelf) {
-    if (agent.direction_id) {
-      return { demandes_paiement: { is: { direction_id: Number(agent.direction_id) } } };
-    }
-    return { demandes_paiement: { is: { demandeur_id: Number(agent.id) } } };
+  if (hasPermission(user, "RECEPTION_LIST_SELF")) {
+    filters.push({ demandes_paiement: { is: { demandeur_id: Number(agent.id) } } });
   }
 
-  const err = new Error("Accès interdit");
-  err.statusCode = 403;
-  throw err;
+  if (!filters.length) {
+    const err = new Error("Accès interdit");
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (filters.length === 1) return filters[0];
+  return { OR: filters };
 }
 
 function userDisplayNameFromAgent(agent) {
@@ -468,6 +450,15 @@ async function createReception(payload, userAgentId) {
     // ignore email errors
   }
 
+  try {
+    const actorUserId = await findUserIdByAgentId(result?.reception?.recu_par_id);
+    if (actorUserId) {
+      await realtime.emitReceptionPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
+  }
+
   return result.reception;
 }
 
@@ -607,6 +598,15 @@ async function updateReception(id, payload, actorAgentId) {
     // ignore
   }
 
+  try {
+    const actorUserId = await findUserIdByAgentId(actorAgentId);
+    if (actorUserId) {
+      await realtime.emitReceptionPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
+  }
+
   return updated;
 }
 
@@ -671,6 +671,15 @@ async function visaDirecteur(id, { signature_directeur_url, signature_data_url, 
     // ignore
   }
 
+  try {
+    const actorUserId = await findUserIdByAgentId(directeurAgentId);
+    if (actorUserId) {
+      await realtime.emitReceptionPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
+  }
+
   return updated;
 }
 
@@ -709,6 +718,15 @@ async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire 
     }
   } catch {
     // ignore
+  }
+
+  try {
+    const actorUserId = await findUserIdByAgentId(dafAgentId);
+    if (actorUserId) {
+      await realtime.emitReceptionPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
   }
 
   return updated;
@@ -762,6 +780,15 @@ async function deleteReception(id, actorAgentId) {
     }
   } catch {
     // ignore
+  }
+
+  try {
+    const actorUserId = await findUserIdByAgentId(actorAgentId);
+    if (actorUserId) {
+      await realtime.emitReceptionPendingStatus(actorUserId);
+    }
+  } catch {
+    // ignore realtime errors
   }
 
   return true;

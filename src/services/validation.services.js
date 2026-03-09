@@ -3,6 +3,7 @@ const notifications = require("./notifications.services");
 const auditLogs = require("./auditLogs.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
 const { v4: uuidv4 } = require("uuid");
+const realtime = require("../realtime");
 
 function withStatusCode(err, statusCode) {
   err.statusCode = Number(statusCode);
@@ -95,6 +96,38 @@ function buildCustomPaiementConditions({ total, tranches = [] }) {
   }
 
   return out;
+}
+
+function computeTranchesPourcentageSum(total, tranches = []) {
+  const totalNum = Number(total);
+  let sum = 0;
+  let hasAny = false;
+
+  for (const t of tranches) {
+    const p = t?.pourcentage != null ? Number(t.pourcentage) : null;
+    if (Number.isFinite(p)) {
+      sum += p;
+      hasAny = true;
+      continue;
+    }
+    const m = t?.montant_prevu != null ? Number(t.montant_prevu) : null;
+    if (Number.isFinite(m) && Number.isFinite(totalNum) && totalNum > 0) {
+      sum += (m / totalNum) * 100;
+      hasAny = true;
+    }
+  }
+
+  return { sum, hasAny };
+}
+
+function assertTranchesSumTo100(total, tranches, label = "Conditions de paiement") {
+  const { sum, hasAny } = computeTranchesPourcentageSum(total, tranches);
+  if (!hasAny) {
+    throw withStatusCode(new Error(`${label}: au moins une tranche est requise`), 400);
+  }
+  if (Math.abs(sum - 100) > 0.01) {
+    throw withStatusCode(new Error(`${label}: la somme des pourcentages doit etre 100%`), 400);
+  }
 }
 
 function getEnvAny(keys) {
@@ -222,6 +255,17 @@ function toStageStatus(roleName) {
   return `validation_${String(roleName).toLowerCase()}`;
 }
 
+function normalizeRoleName(role) {
+  return String(role || "").trim().toUpperCase();
+}
+
+function normalizeValidationStopRole(value) {
+  if (!value) return null;
+  const v = String(value).trim().toUpperCase();
+  if (["DAF", "DGA", "DG"].includes(v)) return v;
+  return null;
+}
+
 async function getAgentFromUserId(userId) {
   return prisma.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
@@ -318,7 +362,11 @@ async function getPendingForUser(userId) {
   return prisma.validation_steps.findMany({
     where,
     include: {
-      demandes_paiement: true,
+      demandes_paiement: {
+        include: {
+          conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
+        },
+      },
       agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
       agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
     },
@@ -366,7 +414,17 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         daf_critere4,
         conditions_paiement_mode,
         conditions_paiement_custom,
+        conditions_paiement_use_demandeur,
+        validation_stop_role,
       } = extra || {};
+      const useDemandeurRaw = isBoolean(conditions_paiement_use_demandeur)
+        ? conditions_paiement_use_demandeur
+        : normalizeBooleanLikeString(conditions_paiement_use_demandeur);
+      const useDemandeur = useDemandeurRaw === true;
+      const validationStopRole = normalizeValidationStopRole(validation_stop_role);
+      if (validation_stop_role != null && !validationStopRole) {
+        throw withStatusCode(new Error("Categorie de validation invalide (attendu: DAF, DGA, DG)"), 400);
+      }
       if (!isBoolean(budget_prevu) || !isBoolean(budget_disponible) || !isBoolean(paiement_immediat)) {
         throw withStatusCode(
           new Error(
@@ -389,7 +447,17 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         if (!commentaireTrimmed) {
           throw withStatusCode(new Error("Commentaire obligatoire si paiement non immediat"), 400);
         }
-        if (conditions_paiement_custom === undefined && conditions_paiement_mode === undefined) {
+        const hasCustom = conditions_paiement_custom !== undefined;
+        const hasMode = conditions_paiement_mode !== undefined;
+        if (useDemandeur && (hasCustom || hasMode)) {
+          throw withStatusCode(
+            new Error(
+              "Choisir soit les conditions du demandeur, soit un mode ou des conditions personnalisees"
+            ),
+            400
+          );
+        }
+        if (!useDemandeur && !hasCustom && !hasMode) {
           throw withStatusCode(new Error("Definir les conditions de paiement (mode ou personnalise)"), 400);
         }
       }
@@ -401,6 +469,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
           budget_disponible: Boolean(budget_disponible),
           paiement_immediat: Boolean(paiement_immediat),
           daf_critere4: dafCritere4Value,
+          ...(validationStopRole ? { validation_stop_role: validationStopRole } : {}),
           updated_at: new Date(),
         },
       });
@@ -412,10 +481,38 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
             : step?.demandes_paiement?.montant;
 
         const hasCustom = conditions_paiement_custom !== undefined;
+        if (hasCustom && !Array.isArray(conditions_paiement_custom)) {
+          throw withStatusCode(new Error("conditions_paiement_custom invalide"), 400);
+        }
         const customTranches = Array.isArray(conditions_paiement_custom) ? conditions_paiement_custom : null;
 
         let conditions = [];
-        if (hasCustom) {
+        if (useDemandeur) {
+          const demandeurConditions = await tx.conditions_paiement.findMany({
+            where: { demande_id: Number(step.demande_id), source: "DEMANDEUR" },
+            orderBy: { id: "asc" },
+          });
+          if (!demandeurConditions.length) {
+            throw withStatusCode(
+              new Error(
+                "Conditions du demandeur introuvables: definir un mode ou des conditions personnalisees"
+              ),
+              400
+            );
+          }
+          assertTranchesSumTo100(totalForConditions, demandeurConditions, "Conditions du demandeur");
+          const tranches = demandeurConditions.map((c, idx) => ({
+            label: c?.label || `Tranche ${idx + 1}`,
+            pourcentage: c?.pourcentage != null ? Number(c.pourcentage) : null,
+            montant_prevu: c?.montant_prevu != null ? Number(c.montant_prevu) : null,
+            condition_texte: c?.condition_texte ? String(c.condition_texte) : null,
+          }));
+          conditions = buildCustomPaiementConditions({ total: totalForConditions, tranches });
+        } else if (hasCustom) {
+          if (!customTranches) {
+            throw withStatusCode(new Error("conditions_paiement_custom invalide"), 400);
+          }
+          assertTranchesSumTo100(totalForConditions, customTranches);
           conditions = buildCustomPaiementConditions({ total: totalForConditions, tranches: customTranches });
         } else {
           const paiementMode = normalizePaiementMode(conditions_paiement_mode);
@@ -473,16 +570,30 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       },
     });
 
-    // ✅ débloquer le next step
-    const next = await tx.validation_steps.findFirst({
-      where: { demande_id: step.demande_id, level: step.level + 1 },
-    });
+    const stopRole = normalizeValidationStopRole(
+      extra?.validation_stop_role || step?.demandes_paiement?.validation_stop_role
+    );
+    const shouldStopAfterCurrent = stopRole && normalizeRoleName(step.role_name) === stopRole;
 
-    if (next && next.status === "bloque") {
-      await tx.validation_steps.update({
-        where: { id: next.id },
-        data: { status: "en_attente", updated_at: new Date() },
+    let next = null;
+
+    if (shouldStopAfterCurrent) {
+      // Stop role reached: remove downstream steps to avoid blocking payment/reception.
+      await tx.validation_steps.deleteMany({
+        where: { demande_id: step.demande_id, level: { gt: step.level } },
       });
+    } else {
+      // ✅ débloquer le next step
+      next = await tx.validation_steps.findFirst({
+        where: { demande_id: step.demande_id, level: step.level + 1 },
+      });
+
+      if (next && next.status === "bloque") {
+        await tx.validation_steps.update({
+          where: { id: next.id },
+          data: { status: "en_attente", updated_at: new Date() },
+        });
+      }
     }
 
     const stage = await setDemandeStageFromCurrentStep(tx, step.demande_id);
@@ -661,6 +772,12 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
     // ignore email errors
   }
 
+  try {
+    await realtime.emitPendingStatus(userId);
+  } catch {
+    // ignore realtime errors
+  }
+
   return { stepId: result.stepId, demandeId: result.demandeId, stage: result.stage };
 }
 
@@ -757,6 +874,12 @@ async function rejectStep(stepId, userId, commentaire) {
     }
   } catch {
     // ignore email errors
+  }
+
+  try {
+    await realtime.emitPendingStatus(userId);
+  } catch {
+    // ignore realtime errors
   }
 
   return { rejected: true, stepId: result.stepId, demandeId: result.demandeId };
@@ -901,6 +1024,12 @@ async function returnForModification(stepId, userId, commentaire) {
     // ignore
   }
 
+  try {
+    await realtime.emitPendingStatus(userId);
+  } catch {
+    // ignore realtime errors
+  }
+
   return { returned: true, stepId: result.stepId, demandeId: result.demandeId };
 }
 
@@ -954,7 +1083,12 @@ async function getByUuid(uuid) {
   return prisma.validation_steps.findFirst({
     where: { uuid: String(uuid), demandes_paiement: { is: { deleted_at: null } } },
     include: {
-      demandes_paiement: { include: { documents: true } },
+      demandes_paiement: {
+        include: {
+          documents: true,
+          conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
+        },
+      },
       agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
       agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
     },
@@ -1400,6 +1534,12 @@ async function cancelStep(stepId, userId, payload = {}) {
     }
   } catch {
     // ignore notification errors
+  }
+
+  try {
+    await realtime.emitPendingStatus(userId);
+  } catch {
+    // ignore realtime errors
   }
 
   return result;
