@@ -1,6 +1,8 @@
 const { sendMail } = require("../config/mailer");
 const { buildNotificationEmail } = require("./notificationEmailTemplate");
 
+const APP_NAME = "E-Dépenses";
+
 function buildDefaultEmail({ subject, message, meta }) {
   const safeMeta = meta ? JSON.stringify(meta, null, 2) : null;
 
@@ -15,7 +17,7 @@ function buildDefaultEmail({ subject, message, meta }) {
           ? `<pre style="background:#f6f6f6;padding:12px;border-radius:8px">${safeMeta}</pre>`
           : ""
       }
-      <p style="color:#777;margin-top:16px">— GP Achats</p>
+      <p style="color:#777;margin-top:16px">— ${APP_NAME}</p>
     </div>
   `;
 
@@ -27,7 +29,7 @@ async function sendNotificationEmail({ to, type, message, meta }) {
     const built = buildNotificationEmail({ type, message, meta });
     return sendMail({ to, subject: built.subject, text: built.text, html: built.html });
   } catch {
-    const subject = `GP Achats - ${type}`;
+    const subject = `${APP_NAME} - ${type}`;
     const { text, html } = buildDefaultEmail({ subject, message, meta });
     return sendMail({ to, subject, text, html });
   }

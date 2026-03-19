@@ -227,7 +227,10 @@ async function dashboard(userId, query = {}) {
 
     validator = await prisma.validation_steps.findMany({
       where,
-      include: { demandes_paiement: { select: { id: true, uuid: true, montant: true, created_at: true, statut: true } } },
+      select: {
+        id: true,
+        demandes_paiement: { select: { id: true, uuid: true, montant: true, created_at: true, statut: true } },
+      },
       orderBy: { id: "desc" },
     });
   }

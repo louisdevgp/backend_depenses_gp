@@ -945,28 +945,25 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
     const dga = pick("DGA");
     const daf = pick("DAF");
 
-    // On n'affiche plus les signatures électroniques, seulement les noms des validateurs
+    // On n'affiche plus les signatures électroniques ni les dates, seulement les noms
     html = injectDemandeSignataires(html, {
       // Demandeur: affiché dès la soumission (création)
-      demandeur: signatureCellHtml({ name: demandeurName, at: asDateTime(d.created_at), signatureDataUrl: null }),
+      demandeur: signatureCellHtml({ name: demandeurName, signatureDataUrl: null }),
       daf: daf?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(daf),
-            at: asDateTime(daf.validated_at),
             signatureDataUrl: null, // Plus de signature
           })
         : "",
       dga: dga?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(dga),
-            at: asDateTime(dga.validated_at),
             signatureDataUrl: null, // Plus de signature
           })
         : "",
       dg: dg?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(dg),
-            at: asDateTime(dg.validated_at),
             signatureDataUrl: null, // Plus de signature
           })
         : "",

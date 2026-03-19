@@ -6,6 +6,8 @@ const P = require("../constants/permissions");
 
 // CRUD
 router.post("/", auth, requirePermission(P.DEMANDE_CREATE), ctrl.create);
+router.post("/signature/start", auth, requirePermission(P.DEMANDE_CREATE), ctrl.startSignature);
+router.post("/signature/complete", auth, requirePermission(P.DEMANDE_CREATE), ctrl.completeSignature);
 // Liste globale (encadrement): rôles de validation + compta + admin
 router.get("/", auth, requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_ALL]), ctrl.list);
 router.get("/my", auth, requirePermission(P.DEMANDE_LIST_SELF), ctrl.listMine);

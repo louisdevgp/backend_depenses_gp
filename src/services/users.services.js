@@ -103,7 +103,16 @@ async function me(userId) {
         start_at: { lte: now },
         end_at: { gte: now },
       },
-      select: { id: true, uuid: true, role_name: true, principal_id: true, start_at: true, end_at: true, is_active: true },
+      select: {
+        id: true,
+        uuid: true,
+        role_name: true,
+        principal_id: true,
+        scope: true,
+        start_at: true,
+        end_at: true,
+        is_active: true,
+      },
     });
     delegatedRoles = Array.from(new Set(dels.map((d) => normalizeRoleName(d.role_name)).filter(Boolean)));
     delegated = dels;

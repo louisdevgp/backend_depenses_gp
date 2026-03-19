@@ -76,7 +76,7 @@ function getTransporter() {
 }
 
 async function sendMail({ to, subject, text, html, cc, bcc, attachments }) {
-  const fromName = getEnvAny(["MAIL_FROM_NAME", "SMTP_FROM_NAME", "EMAIL_FROM_NAME"]) || "GP Achats";
+  const fromName = getEnvAny(["MAIL_FROM_NAME", "SMTP_FROM_NAME", "EMAIL_FROM_NAME"]) || "E-Dépenses";
   const fromEmail =
     getEnvAny(["MAIL_FROM_EMAIL", "SMTP_FROM_EMAIL", "EMAIL_FROM_EMAIL"]) ||
     getEnvAny(["MAIL_USER", "SMTP_USER", "EMAIL_USER", "NODEMAILER_USER"]);

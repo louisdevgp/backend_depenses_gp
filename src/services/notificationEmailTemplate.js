@@ -1,17 +1,11 @@
-function getEnvAny(keys) {
-  for (const k of keys) {
-    const v = process.env[k];
-    if (v !== undefined && v !== null && String(v).trim() !== "") return v;
-  }
-  return undefined;
-}
+const { resolveFrontendBaseUrl } = require("../utils/frontendUrl");
 
-function getFrontendBaseUrl() {
-  const raw =
-    getEnvAny(["FRONTEND_URL", "APP_FRONTEND_URL", "DASHBOARD_URL", "WEB_URL"]) ||
-    "http://localhost:5173";
-  return String(raw).replace(/\/+$/, "");
-}
+const APP_NAME = "E-Dépenses";
+const BRAND_PRIMARY = "#16a34a";
+const BRAND_DARK = "#166534";
+const BRAND_LIGHT = "#ecfdf3";
+const BRAND_BG = "#f3f4f6";
+const BRAND_TEXT = "#0f172a";
 
 function escapeHtml(s) {
   return String(s)
@@ -31,7 +25,7 @@ function joinUrl(base, path) {
 }
 
 function inferCta(type, meta) {
-  const front = getFrontendBaseUrl();
+  const front = resolveFrontendBaseUrl();
   const m = meta && typeof meta === "object" ? meta : {};
 
   if (m.paiementUuid) {
@@ -64,54 +58,55 @@ function inferCta(type, meta) {
 function subjectForType(type, meta) {
   const t = String(type || "notification");
   const m = meta && typeof meta === "object" ? meta : {};
+  const prefix = `${APP_NAME} — `;
 
   switch (t) {
     case "demande_created":
-      return "GP Achats — Demande soumise";
+      return `${prefix}Demande soumise`;
     case "demande_updated":
-      return "GP Achats — Demande mise à jour";
+      return `${prefix}Demande mise à jour`;
     case "demande_deleted":
-      return "GP Achats — Demande supprimée";
+      return `${prefix}Demande supprimée`;
     case "validation_pending":
-      return `GP Achats — Validation en attente${m.role ? ` (${m.role})` : ""}`;
+      return `${prefix}Validation en attente${m.role ? ` (${m.role})` : ""}`;
     case "validation_step_approved":
-      return `GP Achats — Demande validée${m.role ? ` (${m.role})` : ""}`;
+      return `${prefix}Demande validée${m.role ? ` (${m.role})` : ""}`;
     case "validation_rejected":
-      return `GP Achats — Demande rejetée${m.role ? ` (${m.role})` : ""}`;
+      return `${prefix}Demande rejetée${m.role ? ` (${m.role})` : ""}`;
     case "demande_returned_for_modification":
-      return `GP Achats — Demande retournée pour modification${m.fromRole ? ` (${m.fromRole})` : ""}`;
+      return `${prefix}Demande retournée pour modification${m.fromRole ? ` (${m.fromRole})` : ""}`;
     case "paiement_effectue":
-      return "GP Achats — Paiement effectué";
+      return `${prefix}Paiement effectué`;
     case "paiement_pending":
-      return "GP Achats — Paiement à effectuer";
+      return `${prefix}Paiement à effectuer`;
     case "paiement_updated":
-      return "GP Achats — Paiement modifié";
+      return `${prefix}Paiement modifié`;
     case "paiement_deleted":
-      return "GP Achats — Paiement supprimé";
+      return `${prefix}Paiement supprimé`;
     case "reception_creee":
-      return "GP Achats — Réception créée";
+      return `${prefix}Réception créée`;
     case "reception_updated":
-      return "GP Achats — Réception modifiée";
+      return `${prefix}Réception modifiée`;
     case "reception_deleted":
-      return "GP Achats — Réception supprimée";
+      return `${prefix}Réception supprimée`;
     case "reception_reminder":
-      return "GP Achats - Reception en attente";
+      return `${prefix}Réception en attente`;
     case "reception_visa_pending":
-      return "GP Achats — Visa DAF requis";
+      return `${prefix}Visa DAF requis`;
     case "reception_visa_directeur":
-      return "GP Achats — Visa Directeur effectué";
+      return `${prefix}Visa Directeur effectué`;
     case "reception_visa_daf":
-      return "GP Achats — Visa DAF effectué";
+      return `${prefix}Visa DAF effectué`;
     case "delegation_created":
-      return "GP Achats — Délégation créée";
+      return `${prefix}Délégation créée`;
     case "delegation_updated":
-      return "GP Achats — Délégation modifiée";
+      return `${prefix}Délégation modifiée`;
     case "delegation_toggled":
-      return "GP Achats — Délégation mise à jour";
+      return `${prefix}Délégation mise à jour`;
     case "delegation_deleted":
-      return "GP Achats — Délégation supprimée";
+      return `${prefix}Délégation supprimée`;
     default:
-      return `GP Achats — ${t}`;
+      return `${prefix}${t}`;
   }
 }
 
@@ -151,7 +146,6 @@ function buildNotificationEmail({ type, message, meta }) {
   const subject = subjectForType(type, safeMeta);
   const { label: ctaLabel, url: ctaUrl } = inferCta(type, safeMeta);
   const highlights = pickHighlights(type, safeMeta);
-  const appName = "GP Achats";
 
   const textLines = [safeMessage];
   if (ctaUrl) {
@@ -162,13 +156,13 @@ function buildNotificationEmail({ type, message, meta }) {
   const highlightsHtml =
     highlights.length > 0
       ? `
-      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; margin-top:12px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse;">
         ${highlights
           .map(
             (h) => `
           <tr>
-            <td style="padding:6px 0; color:#666; width:180px;">${escapeHtml(h.label)}</td>
-            <td style="padding:6px 0; color:#111; font-weight:600;">${escapeHtml(h.value)}</td>
+            <td style="padding:6px 0; color:#475467; width:180px;">${escapeHtml(h.label)}</td>
+            <td style="padding:6px 0; color:${BRAND_TEXT}; font-weight:600;">${escapeHtml(h.value)}</td>
           </tr>`
           )
           .join("")}
@@ -176,31 +170,41 @@ function buildNotificationEmail({ type, message, meta }) {
       : "";
 
   const html = `
-  <div style="background:#f6f7f9; padding:24px 0;">
+  <div style="background:${BRAND_BG}; padding:24px 0;">
     <div style="max-width:640px; margin:0 auto; padding:0 16px;">
-      <div style="font-family: Arial, sans-serif; color:#111;">
-        <div style="padding:16px 18px; background:#ffffff; border-radius:12px;">
-          <div style="font-size:14px; color:#666;">${escapeHtml(appName)}</div>
-          <div style="font-size:20px; font-weight:700; margin-top:6px;">${escapeHtml(subject)}</div>
-          <div style="margin-top:14px; font-size:15px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(
-            safeMessage
-          )}</div>
-          ${highlightsHtml}
-
-          <div style="margin-top:18px;">
-            <a href="${escapeHtml(ctaUrl)}" style="display:inline-block; padding:10px 14px; background:#111; color:#fff; text-decoration:none; border-radius:10px; font-size:14px; font-weight:700;">${escapeHtml(
-              ctaLabel
-            )}</a>
+      <div style="font-family: Arial, sans-serif; color:${BRAND_TEXT};">
+        <div style="background:#ffffff; border-radius:14px; overflow:hidden; border:1px solid #e5e7eb;">
+          <div style="background:${BRAND_PRIMARY}; color:#ffffff; padding:16px 18px;">
+            <div style="font-size:13px; opacity:0.9; letter-spacing:.2px;">${escapeHtml(APP_NAME)}</div>
+            <div style="font-size:20px; font-weight:700; margin-top:4px;">${escapeHtml(subject)}</div>
           </div>
 
-          <div style="margin-top:14px; font-size:12px; color:#666;">
-            Si le bouton ne fonctionne pas, utilisez ce lien :
-            <a href="${escapeHtml(ctaUrl)}" style="color:#111;">${escapeHtml(ctaUrl)}</a>
+          <div style="padding:18px;">
+            <div style="font-size:15px; line-height:1.6; white-space:pre-wrap;">${escapeHtml(safeMessage)}</div>
+
+            ${
+              highlights.length > 0
+                ? `<div style="margin-top:14px; background:${BRAND_LIGHT}; border:1px solid #d1fae5; border-radius:12px; padding:12px 14px;">
+                    ${highlightsHtml}
+                   </div>`
+                : ""
+            }
+
+            <div style="margin-top:20px;">
+              <a href="${escapeHtml(ctaUrl)}" style="display:inline-block; padding:11px 16px; background:${BRAND_DARK}; color:#fff; text-decoration:none; border-radius:10px; font-size:14px; font-weight:700;">${escapeHtml(
+                ctaLabel
+              )}</a>
+            </div>
+
+            <div style="margin-top:14px; font-size:12px; color:#6b7280;">
+              Si le bouton ne fonctionne pas, utilisez ce lien :
+              <a href="${escapeHtml(ctaUrl)}" style="color:${BRAND_DARK};">${escapeHtml(ctaUrl)}</a>
+            </div>
           </div>
         </div>
 
-        <div style="text-align:center; font-size:12px; color:#888; margin-top:12px;">
-          — ${escapeHtml(appName)}
+        <div style="text-align:center; font-size:12px; color:#9ca3af; margin-top:12px;">
+          — ${escapeHtml(APP_NAME)}
         </div>
       </div>
     </div>
@@ -209,4 +213,4 @@ function buildNotificationEmail({ type, message, meta }) {
   return { subject, text, html };
 }
 
-module.exports = { buildNotificationEmail, getFrontendBaseUrl };
+module.exports = { buildNotificationEmail };

@@ -6,6 +6,9 @@ const P = require("../constants/permissions");
 
 router.get("/pending", auth, requirePermission(P.VALIDATION_LIST_PENDING), ctrl.listMyPendingValidations);
 router.post("/:stepId/approve", auth, requirePermission(P.VALIDATION_APPROVE), ctrl.approveStep);
+router.post("/:stepId/signature/start", auth, requirePermission(P.VALIDATION_APPROVE), ctrl.startSignature);
+router.post("/:stepId/signature/complete", auth, requirePermission(P.VALIDATION_APPROVE), ctrl.completeSignature);
+router.get("/:stepId/signature/download", auth, requirePermission(P.VALIDATION_APPROVE), ctrl.downloadSignature);
 router.post("/:stepId/reject", auth, requirePermission(P.VALIDATION_REJECT), ctrl.rejectStep);
 router.post("/:stepId/cancel", auth, requirePermission(P.VALIDATION_CANCEL), ctrl.cancelStep);
 router.post(

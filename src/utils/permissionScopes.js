@@ -1,5 +1,23 @@
 const DEFAULT_SCOPE = { type: "GLOBAL", id: null };
 const VALID_SCOPE_TYPES = new Set(["GLOBAL", "DIRECTION", "DEPARTEMENT", "SERVICE"]);
+const ROLE_IMPLICATIONS = {
+  DG: ["DIRECTEUR"],
+  DGA: ["DIRECTEUR"],
+  DAF: ["DIRECTEUR"],
+};
+
+function normalizeRoleName(role) {
+  return String(role || "").trim().toUpperCase();
+}
+
+function expandRoles(roleNames) {
+  const out = new Set((roleNames || []).map(normalizeRoleName).filter(Boolean));
+  for (const r of Array.from(out)) {
+    const implied = ROLE_IMPLICATIONS[r] || [];
+    for (const ir of implied) out.add(normalizeRoleName(ir));
+  }
+  return Array.from(out);
+}
 
 function normalizePermissionCode(code) {
   return String(code || "").trim().toUpperCase();
@@ -15,6 +33,19 @@ function normalizeScopeId(value) {
   if (value == null) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function parseDelegationScope(scopeRaw) {
+  if (scopeRaw == null) return DEFAULT_SCOPE;
+  const s = String(scopeRaw).trim();
+  if (!s) return DEFAULT_SCOPE;
+  if (s.toUpperCase() === "GLOBAL") return DEFAULT_SCOPE;
+  const m = /^([A-Z_]+)\s*:\s*(\d+)$/i.exec(s);
+  if (!m) return null;
+  const type = normalizeScopeType(m[1]);
+  const id = normalizeScopeId(m[2]);
+  if (!type) return null;
+  return { type, id };
 }
 
 function scopeKey(scope) {
@@ -103,16 +134,72 @@ async function getUserPermissionProfile({ prisma, userId }) {
     return { allowedCodes: [], deniedCodes: [], scopesByCode: {} };
   }
 
-  const rows = await prisma.user_permissions.findMany({
-    where: { user_id: id, deleted_at: null },
-    select: { permission_id: true, is_allowed: true },
-  });
+  const [user, agent] = await Promise.all([
+    prisma.users.findUnique({
+      where: { id },
+      select: { user_roles: { select: { roles: { select: { name: true } } } } },
+    }),
+    prisma.agents.findFirst({
+      where: { user_id: id, deleted_at: null },
+      select: { id: true, roles: { select: { name: true } } },
+    }),
+  ]);
 
-  if (!rows.length) {
-    return { allowedCodes: [], deniedCodes: [], scopesByCode: {} };
+  const baseRoles = [
+    ...(user?.user_roles || []).map((ur) => normalizeRoleName(ur?.roles?.name)),
+    normalizeRoleName(agent?.roles?.name),
+  ].filter(Boolean);
+
+  let delegations = [];
+  if (agent?.id) {
+    const now = new Date();
+    delegations = await prisma.delegations.findMany({
+      where: {
+        delegate_id: Number(agent.id),
+        is_active: true,
+        start_at: { lte: now },
+        end_at: { gte: now },
+      },
+      select: { role_name: true, scope: true },
+    });
   }
 
-  const permIds = Array.from(new Set(rows.map((r) => r.permission_id).filter(Boolean)));
+  const delegatedRoles = Array.from(
+    new Set(delegations.map((d) => normalizeRoleName(d.role_name)).filter(Boolean))
+  );
+
+  const effectiveRoles = expandRoles([...baseRoles, ...delegatedRoles]);
+
+  const roleRows = effectiveRoles.length
+    ? await prisma.roles.findMany({
+        where: { name: { in: effectiveRoles }, deleted_at: null, is_active: true },
+        select: { id: true, name: true },
+      })
+    : [];
+
+  const roleById = new Map(roleRows.map((r) => [Number(r.id), normalizeRoleName(r.name)]));
+  const roleIds = roleRows.map((r) => r.id);
+
+  const [userPermRows, rolePermRows] = await Promise.all([
+    prisma.user_permissions.findMany({
+      where: { user_id: id, deleted_at: null },
+      select: { permission_id: true, is_allowed: true },
+    }),
+    roleIds.length
+      ? prisma.role_permissions.findMany({
+          where: { role_id: { in: roleIds }, deleted_at: null },
+          select: { role_id: true, permission_id: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const permIds = Array.from(
+    new Set([
+      ...userPermRows.map((r) => r.permission_id).filter(Boolean),
+      ...rolePermRows.map((r) => r.permission_id).filter(Boolean),
+    ])
+  );
+
   if (!permIds.length) {
     return { allowedCodes: [], deniedCodes: [], scopesByCode: {} };
   }
@@ -123,27 +210,44 @@ async function getUserPermissionProfile({ prisma, userId }) {
   });
 
   const idToCode = new Map(permRows.map((p) => [p.id, normalizePermissionCode(p.code)]));
-  const allowSet = new Set();
-  const denySet = new Set();
-  const allowIds = new Set();
+  const codeToId = new Map(permRows.map((p) => [normalizePermissionCode(p.code), p.id]));
 
-  for (const row of rows) {
+  const roleAllowed = new Set();
+  const roleToCodes = new Map();
+  for (const row of rolePermRows) {
     const code = idToCode.get(row.permission_id);
     if (!code) continue;
-    if (row.is_allowed) {
-      allowSet.add(code);
-      allowIds.add(row.permission_id);
-    } else {
-      denySet.add(code);
-    }
+    roleAllowed.add(code);
+    const roleName = roleById.get(Number(row.role_id));
+    if (!roleName) continue;
+    const list = roleToCodes.get(roleName) || new Set();
+    list.add(code);
+    roleToCodes.set(roleName, list);
   }
 
+  const allowSet = new Set();
+  const denySet = new Set();
+  for (const row of userPermRows) {
+    const code = idToCode.get(row.permission_id);
+    if (!code) continue;
+    if (row.is_allowed) allowSet.add(code);
+    else denySet.add(code);
+  }
+
+  const allowedCodes = Array.from(
+    new Set([...roleAllowed, ...allowSet].filter((c) => !denySet.has(c)))
+  );
+
+  const allowedPermIds = Array.from(
+    new Set(allowedCodes.map((c) => codeToId.get(c)).filter(Boolean))
+  );
+
   const scopesMap = new Map();
-  if (allowIds.size) {
+  if (allowedPermIds.length) {
     const scopeRows = await prisma.user_permission_scopes.findMany({
       where: {
         user_id: id,
-        permission_id: { in: Array.from(allowIds) },
+        permission_id: { in: allowedPermIds },
         deleted_at: null,
       },
       select: { permission_id: true, scope_type: true, scope_id: true },
@@ -156,7 +260,23 @@ async function getUserPermissionProfile({ prisma, userId }) {
     }
   }
 
-  const allowedCodes = Array.from(allowSet);
+  if (delegations.length) {
+    for (const del of delegations) {
+      const baseRole = normalizeRoleName(del.role_name);
+      if (!baseRole) continue;
+      const expanded = expandRoles([baseRole]);
+      const scope = parseDelegationScope(del.scope);
+      if (!scope) continue;
+      for (const r of expanded) {
+        const codes = roleToCodes.get(r);
+        if (!codes) continue;
+        for (const code of codes) {
+          addScopeToMap(scopesMap, code, scope);
+        }
+      }
+    }
+  }
+
   ensureDefaultScopes(allowedCodes, scopesMap);
 
   return {
@@ -175,5 +295,7 @@ module.exports = {
   getUserPermissionProfile,
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,
+  parseDelegationScope,
+  expandRoles,
   scopeKey,
 };

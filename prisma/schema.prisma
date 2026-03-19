@@ -617,6 +617,11 @@ model validation_steps {
   validated_by_id                                 Int?              @db.UnsignedInt
   commentaire                                     String?           @db.Text
   signature_url                                   String?           @db.VarChar(500)
+  signature_provider                              String?           @db.VarChar(20)
+  signature_request_id                            String?           @db.VarChar(100)
+  signature_request_user_id                       String?           @db.VarChar(100)
+  signature_status                                String?           @db.VarChar(30)
+  signature_payload                               Json?
   validated_at                                    DateTime?         @db.DateTime(0)
   created_at                                      DateTime          @default(now()) @db.DateTime(0)
   updated_at                                      DateTime          @default(now()) @db.DateTime(0)
@@ -629,6 +634,30 @@ model validation_steps {
   @@index([status], map: "idx_vs_status")
   @@index([validated_by_id], map: "idx_vs_validated_by")
   @@index([validator_id], map: "idx_vs_validator")
+}
+
+model signature_sessions {
+  id                        Int      @id @default(autoincrement()) @db.UnsignedInt
+  uuid                      String   @unique(map: "uk_signature_sessions_uuid") @db.Char(36)
+  entity_type               String   @db.VarChar(50)
+  action                    String   @db.VarChar(50)
+  entity_id                 Int?     @db.UnsignedInt
+  signer_user_id            Int?     @db.UnsignedInt
+  signer_agent_id           Int?     @db.UnsignedInt
+  signature_provider        String?  @db.VarChar(20)
+  signature_request_id      String?  @db.VarChar(100)
+  signature_request_user_id String?  @db.VarChar(100)
+  signature_status          String?  @db.VarChar(30)
+  signature_url             String?  @db.VarChar(500)
+  payload                   Json?
+  signature_payload         Json?
+  created_at                DateTime @default(now()) @db.DateTime(0)
+  updated_at                DateTime @default(now()) @db.DateTime(0)
+
+  @@index([action], map: "idx_sig_action")
+  @@index([entity_type, entity_id], map: "idx_sig_entity")
+  @@index([signature_request_id], map: "idx_sig_req")
+  @@index([signer_user_id], map: "idx_sig_user")
 }
 
 enum ReceptionPhase {

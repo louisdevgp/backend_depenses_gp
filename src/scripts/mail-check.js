@@ -52,7 +52,7 @@ async function main() {
   const front = process.env.FRONTEND_URL || "http://localhost:5173";
   await sendMail({
     to: testTo,
-    subject: "GP Achats — Test SMTP",
+    subject: "E-Dépenses — Test SMTP",
     text: `Ceci est un email de test. Lien: ${front}`,
     html: `<p>Ceci est un email de test.</p><p><a href="${front}">Ouvrir l'application</a></p>`,
   });

@@ -10,48 +10,144 @@ function isNumericId(v) {
   return v !== null && v !== undefined && v !== "" && /^[0-9]+$/.test(String(v));
 }
 
+const ROLE_IMPLICATIONS = {
+  DG: ["DIRECTEUR"],
+  DGA: ["DIRECTEUR"],
+  DAF: ["DIRECTEUR"],
+};
+
+function normalizeRoleName(role) {
+  return String(role || "").trim().toUpperCase();
+}
+
+function expandRoles(roleNames) {
+  const out = new Set((roleNames || []).map(normalizeRoleName).filter(Boolean));
+  for (const r of Array.from(out)) {
+    const implied = ROLE_IMPLICATIONS[r] || [];
+    for (const ir of implied) out.add(normalizeRoleName(ir));
+  }
+  return Array.from(out);
+}
+
 async function isAdminUserId(userId) {
   const u = await prisma.users.findUnique({
     where: { id: Number(userId) },
     include: { user_roles: { include: { roles: true } } },
   });
   const roleNames = (u?.user_roles || []).map((ur) => ur?.roles?.name).filter(Boolean);
-  return roleNames.includes("ADMIN");
+  return expandRoles(roleNames).includes("ADMIN");
 }
 
-async function getUserRoleNames(userId) {
+async function getEffectiveRoleNames(userId, agentId = null) {
   if (!userId) return [];
-  const u = await prisma.users.findUnique({
-    where: { id: Number(userId) },
-    include: { user_roles: { include: { roles: true } } },
-  });
-  return (u?.user_roles || []).map((ur) => ur?.roles?.name).filter(Boolean);
+  const [u, agent] = await Promise.all([
+    prisma.users.findUnique({
+      where: { id: Number(userId) },
+      include: { user_roles: { include: { roles: true } } },
+    }),
+    agentId
+      ? prisma.agents.findUnique({
+          where: { id: Number(agentId) },
+          select: { roles: { select: { name: true } } },
+        })
+      : prisma.agents.findFirst({
+          where: { user_id: Number(userId), deleted_at: null },
+          select: { roles: { select: { name: true } } },
+        }),
+  ]);
+
+  const roleNames = [
+    ...(u?.user_roles || []).map((ur) => ur?.roles?.name).filter(Boolean),
+    agent?.roles?.name,
+  ].filter(Boolean);
+
+  return expandRoles(roleNames);
 }
 
 function hasAnyRole(roleNames, allowed) {
-  const set = new Set((roleNames || []).map((r) => String(r).toUpperCase()));
-  return (allowed || []).some((r) => set.has(String(r).toUpperCase()));
+  const set = new Set(expandRoles(roleNames || []));
+  return (allowed || []).some((r) => set.has(normalizeRoleName(r)));
 }
 
 const DOCUMENT_UPLOAD_ROLES = ["DAF", "COMPTABLE", "CAISSE", "DG", "DGA", "DIRECTEUR"];
+
+function candidateScopesForDemandeOrg(org) {
+  const scopes = ["GLOBAL"];
+  if (!org) return scopes;
+  if (org.direction_id) scopes.push(`DIRECTION:${Number(org.direction_id)}`);
+  if (org.departement_id) scopes.push(`DEPARTEMENT:${Number(org.departement_id)}`);
+  if (org.service_id) scopes.push(`SERVICE:${Number(org.service_id)}`);
+  return scopes;
+}
+
+async function hasDelegatedRoleForDemande({ agentId, demandeOrg, allowedRoles }) {
+  if (!agentId) return false;
+  const now = new Date();
+  const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
+  const allowedSet = new Set((allowedRoles || []).map(normalizeRoleName).filter(Boolean));
+
+  const delegations = await prisma.delegations.findMany({
+    where: {
+      delegate_id: Number(agentId),
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    },
+    select: { role_name: true },
+  });
+
+  for (const d of delegations) {
+    const expanded = expandRoles([d?.role_name]);
+    if (expanded.some((r) => allowedSet.has(normalizeRoleName(r)))) return true;
+  }
+
+  return false;
+}
 
 async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId, actionLabel }) {
   if (!userId) return { ok: false, status: 401, message: "Unauthorized" };
   if (!demandeId) return { ok: false, status: 400, message: "demande_id introuvable" };
 
   if (await isAdminUserId(userId)) return { ok: true };
-  const roleNames = await getUserRoleNames(userId);
-  if (hasAnyRole(roleNames, DOCUMENT_UPLOAD_ROLES)) return { ok: true };
 
   const demande = await prisma.demandes_paiement.findUnique({
     where: { id: Number(demandeId) },
     select: {
       id: true,
       demandeur_id: true,
+      direction_id: true,
+      departement_id: true,
+      service_id: true,
       agents_demandes_paiement_demandeur_idToagents: { select: { user_id: true } },
     },
   });
   if (!demande) return { ok: false, status: 404, message: "Demande introuvable" };
+
+  const effectiveRoles = await getEffectiveRoleNames(userId, agentId);
+  if (hasAnyRole(effectiveRoles, DOCUMENT_UPLOAD_ROLES)) return { ok: true };
+
+  if (!agentId) {
+    const a = await prisma.agents.findFirst({
+      where: { user_id: Number(userId), deleted_at: null },
+      select: { id: true },
+    });
+    agentId = a?.id || null;
+  }
+
+  if (
+    await hasDelegatedRoleForDemande({
+      agentId,
+      demandeOrg: {
+        direction_id: demande.direction_id ?? null,
+        departement_id: demande.departement_id ?? null,
+        service_id: demande.service_id ?? null,
+      },
+      allowedRoles: DOCUMENT_UPLOAD_ROLES,
+    })
+  ) {
+    return { ok: true };
+  }
 
   const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
   if (demandeurUserId != null && Number(demandeurUserId) === Number(userId)) return { ok: true };

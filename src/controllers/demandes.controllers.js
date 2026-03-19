@@ -12,6 +12,27 @@ exports.create = async (req, res) => {
   }
 };
 
+exports.startSignature = async (req, res) => {
+  try {
+    const result = await service.startCreateSignature(req.user, req.body);
+    return res.json({ success: true, data: result });
+  } catch (e) {
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message });
+  }
+};
+
+exports.completeSignature = async (req, res) => {
+  try {
+    const sessionId = req?.body?.session_id || req?.body?.sessionId;
+    const result = await service.completeCreateSignature(req.user, sessionId);
+    return res.json({ success: true, data: result });
+  } catch (e) {
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message });
+  }
+};
+
 exports.list = async (req, res) => {
   try {
     const result = await service.listDemandes(req.user, req.query);

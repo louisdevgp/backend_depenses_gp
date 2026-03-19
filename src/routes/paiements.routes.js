@@ -5,6 +5,8 @@ const requirePermission = require("../middlewares/requirePermission.middleware")
 const P = require("../constants/permissions");
 
 router.post("/pay", requireAuth, requirePermission(P.PAIEMENT_CREATE), ctrl.create);
+router.post("/signature/start", requireAuth, requirePermission(P.PAIEMENT_CREATE), ctrl.startSignature);
+router.post("/signature/complete", requireAuth, requirePermission(P.PAIEMENT_CREATE), ctrl.completeSignature);
 router.get("/", requireAuth, requirePermission(P.PAIEMENT_LIST), ctrl.list);
 
 router.get("/uuid/:uuid", requireAuth, requirePermission(P.PAIEMENT_GET), ctrl.getByUuid);

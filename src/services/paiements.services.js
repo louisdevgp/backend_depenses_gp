@@ -1,12 +1,17 @@
-const prisma = require("../config/prisma");
+﻿const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
 const { sendMail } = require("../config/mailer");
+const PDFDocument = require("pdfkit");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const realtime = require("../realtime");
 const { resolveUploadsPathFromUrl } = require("./signatures.services");
+const firma = require("./firma.services");
+const signatureSessions = require("./signatureSessions.services");
+const permissionMap = require("../config/permissions");
+const P = require("../constants/permissions");
 const {
   normalizePermissionCode,
   getScopesForPermissionFromUser,
@@ -146,6 +151,130 @@ function amountsEqual(a, b, tolerance = 0.01) {
   return Math.abs(na - nb) <= tolerance;
 }
 
+function formatMoneyValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  const formatted = new Intl.NumberFormat("fr-FR").format(n);
+  return formatted.replace(/[\u202F\u00A0]/g, " ");
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return "-";
+  return new Intl.DateTimeFormat("fr-FR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(dt);
+}
+
+function agentDisplayName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  const full = `${prenom} ${nom}`.trim();
+  if (full) return full;
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  return email || "-";
+}
+
+function splitAgentName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  if (prenom || nom) return { first_name: prenom || nom || "Signataire", last_name: nom || "" };
+
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  if (!email) return { first_name: "Signataire", last_name: "" };
+  const [user] = email.split("@");
+  return { first_name: user || "Signataire", last_name: "" };
+}
+
+function buildSignatureFields({ recipientId }) {
+  const A4_WIDTH = 595.28;
+  const A4_HEIGHT = 841.89;
+  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
+
+  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
+  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
+
+  const toField = (type, rect) => ({
+    recipient_id: recipientId,
+    type,
+    page_number: 1,
+    position: {
+      x: toPct(rect.x, A4_WIDTH),
+      y: toPct(rect.y, A4_HEIGHT),
+      width: toPct(rect.width, A4_WIDTH),
+      height: toPct(rect.height, A4_HEIGHT),
+    },
+  });
+
+  return [
+    toField("signature", signatureRect),
+    toField("date", dateRect),
+  ];
+}
+
+function buildPaiementSignaturePdf({ payload, demande, comptable }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.font("Helvetica-Bold").fontSize(16).text("Creation de paiement", { align: "center" });
+    doc.moveDown(0.6);
+    doc.font("Helvetica").fontSize(10);
+
+    const devise = demande?.devise ? String(demande.devise) : "FCFA";
+    const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
+
+    const rows = [
+      ["Demande", demande?.uuid || demande?.id || "-"],
+      ["Motif", demande?.motif || "-"],
+      ["Beneficiaire", demande?.beneficiaire || "-"],
+      [
+        "Montant demande",
+        montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-",
+      ],
+      [
+        "Montant paiement",
+        payload?.montant != null ? `${formatMoneyValue(payload.montant)} ${devise}` : "-",
+      ],
+      ["Type paiement", payload?.type_paiement || "-"],
+      ["Moyen paiement", payload?.moyen_paiement || "-"],
+      ["Comptable", agentDisplayName(comptable)],
+      ["Date", formatDateTime(payload?.date_paiement || new Date())],
+    ];
+
+    rows.forEach(([label, value]) => {
+      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
+      doc.font("Helvetica").text(String(value ?? "-"));
+    });
+
+    doc.moveDown(2);
+    doc.font("Helvetica").fontSize(9).text(
+      "Ce document sert uniquement de preuve de signature electronique pour la creation."
+    );
+
+    const pageHeight = doc.page.height;
+    const sigHeight = 50;
+    const sigY = 140;
+    const sigTop = pageHeight - sigY - sigHeight;
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
+    doc.rect(50, sigTop, 250, sigHeight).stroke();
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
+    doc.rect(320, sigTop, 120, sigHeight).stroke();
+
+    doc.end();
+  });
+}
+
 function deriveModeFromConditions(conds) {
   const list = Array.isArray(conds) ? conds : [];
   const pcts = list.map((c) => Number(c?.pourcentage)).filter((n) => Number.isFinite(n));
@@ -165,6 +294,75 @@ function normalizeConditionsSource(value) {
   if (v === "DAF") return "DAF";
   if (v === "DEMANDEUR") return "DEMANDEUR";
   return null;
+}
+
+function normalizeRoleName(role) {
+  return String(role || "").trim().toUpperCase();
+}
+
+function candidateScopesForDemandeOrg(demande) {
+  const scopes = ["GLOBAL"];
+  if (!demande) return scopes;
+  if (demande.direction_id) scopes.push(`DIRECTION:${Number(demande.direction_id)}`);
+  if (demande.departement_id) scopes.push(`DEPARTEMENT:${Number(demande.departement_id)}`);
+  if (demande.service_id) scopes.push(`SERVICE:${Number(demande.service_id)}`);
+  return scopes;
+}
+
+function agentRoleSet(agent) {
+  const out = new Set();
+  const primary = normalizeRoleName(agent?.roles?.name);
+  if (primary) out.add(primary);
+  const secondary = (agent?.users?.user_roles || [])
+    .map((ur) => normalizeRoleName(ur?.roles?.name))
+    .filter(Boolean);
+  secondary.forEach((r) => out.add(r));
+  return out;
+}
+
+const PAIEMENT_ACTOR_ROLES = new Set(
+  (permissionMap?.[P.PAIEMENT_CREATE] || []).map(normalizeRoleName).filter(Boolean)
+);
+
+async function isPaiementDelegated(agent, demandeOrg) {
+  if (!agent?.id) return false;
+  if (!PAIEMENT_ACTOR_ROLES.size) return false;
+
+  const roles = agentRoleSet(agent);
+  if (roles.has("ADMIN")) return false;
+  if (Array.from(PAIEMENT_ACTOR_ROLES).some((r) => roles.has(r))) return false;
+
+  const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
+  const now = new Date();
+  const delegation = await prisma.delegations.findFirst({
+    where: {
+      delegate_id: Number(agent.id),
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+      role_name: { in: Array.from(PAIEMENT_ACTOR_ROLES) },
+      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    },
+    select: { id: true },
+  });
+
+  return !!delegation;
+}
+
+async function withPaiementDelegationFlags(paiement) {
+  if (!paiement) return paiement;
+  const demandeOrg = {
+    direction_id: paiement?.demandes_paiement?.direction_id ?? null,
+    departement_id: paiement?.demandes_paiement?.departement_id ?? null,
+    service_id: paiement?.demandes_paiement?.service_id ?? null,
+  };
+  const comptable = paiement?.agents || null;
+  const delegated = comptable ? await isPaiementDelegated(comptable, demandeOrg) : false;
+  return {
+    ...paiement,
+    comptable_nom: comptable ? agentDisplayName(comptable) : null,
+    paiement_delegated: Boolean(delegated),
+  };
 }
 
 function hasPermission(user, code) {
@@ -214,6 +412,14 @@ async function findUserIdByAgentId(agentId) {
     select: { users: { select: { id: true } } },
   });
   return a?.users?.id || null;
+}
+
+async function getAgentById(agentId) {
+  if (!agentId) return null;
+  return prisma.agents.findUnique({
+    where: { id: Number(agentId) },
+    include: { users: true },
+  });
 }
 
 async function assertDemandePayable(demandeId) {
@@ -289,7 +495,7 @@ async function ensureConditionsForDemande(tx, demandeId, source) {
   });
 }
 
-async function createPaiement(payload, comptableAgentId) {
+async function createPaiement(payload, comptableAgentId, options = {}) {
   const {
     demande_id,
     type_paiement,
@@ -561,7 +767,7 @@ async function createPaiement(payload, comptableAgentId) {
     const uniqueRecipients = Array.from(new Set(recipients.map((x) => String(x).trim()).filter(Boolean)));
 
     if (uniqueRecipients.length > 0) {
-      const subject = `GP Achats — Paiement effectué (Demande ${demande?.uuid || Number(demande_id)})`;
+      const subject = `E-Dépenses — Paiement effectué (Demande ${demande?.uuid || Number(demande_id)})`;
 
       const validatorsLine = (steps || [])
         .map((s) => (s?.role_name ? String(s.role_name) : null))
@@ -607,7 +813,7 @@ async function createPaiement(payload, comptableAgentId) {
             ${skippedHtml}
           </div>
 
-          <p style="margin-top:16px;color:#777">— GP Achats</p>
+          <p style="margin-top:16px;color:#777">— E-Dépenses</p>
         </div>
       `;
 
@@ -628,6 +834,209 @@ async function createPaiement(payload, comptableAgentId) {
   }
 
   return result;
+}
+
+async function startCreateSignature(payload, comptableAgentId, userId) {
+  const signerUserId = userId != null ? Number(userId) : await findUserIdByAgentId(comptableAgentId);
+  if (!signerUserId) {
+    const err = new Error("Utilisateur signataire introuvable");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!payload?.demande_id) {
+    const err = new Error("demande_id requis");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  await assertDemandePayable(payload.demande_id);
+
+  const demande = await prisma.demandes_paiement.findUnique({
+    where: { id: Number(payload.demande_id) },
+    select: {
+      id: true,
+      uuid: true,
+      motif: true,
+      montant: true,
+      montant_net: true,
+      devise: true,
+      beneficiaire: true,
+    },
+  });
+  if (!demande) {
+    const err = new Error("Demande introuvable");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const comptable = await getAgentById(comptableAgentId);
+  if (!comptable || !comptable.users?.email) {
+    const err = new Error("Email du signataire introuvable");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const pdfBuffer = await buildPaiementSignaturePdf({
+    payload,
+    demande,
+    comptable,
+  });
+
+  const { first_name, last_name } = splitAgentName(comptable);
+  const email = String(comptable.users.email).trim();
+  const recipientId = "temp_signer_1";
+
+  const signingRequest = await firma.createSigningRequest({
+    name: `Creation paiement ${demande.uuid || demande.id}`,
+    document: pdfBuffer.toString("base64"),
+    recipients: [
+      {
+        id: recipientId,
+        first_name,
+        last_name,
+        email,
+        designation: "Signer",
+        order: 1,
+      },
+    ],
+    fields: buildSignatureFields({ recipientId }),
+    allow_download: true,
+    attach_pdf_on_finish: true,
+    settings: {
+      send_signing_email: false,
+      send_finish_email: false,
+      allow_download: true,
+      attach_pdf_on_finish: true,
+    },
+  });
+
+  const signingRequestId = signingRequest?.id;
+  if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
+
+  try {
+    await firma.sendSigningRequest(signingRequestId);
+  } catch (e) {
+    if (e?.statusCode && Number(e.statusCode) !== 404) throw e;
+  }
+
+  const resolved = await firma.resolveSignerUser(signingRequestId, email, {
+    attempts: 5,
+    delayMs: 350,
+  });
+  const firmaSignerUserId = resolved.signerUserId;
+  const signingUrl =
+    resolved.signingUrl || (firmaSignerUserId ? `https://app.firma.dev/signing/${String(firmaSignerUserId)}` : "");
+  if (!firmaSignerUserId && !signingUrl) throw new Error("Firma: signataire introuvable");
+
+  const signaturePayload = {
+    signer_user_id: signerUserId,
+    signer_agent_id: Number(comptableAgentId),
+    signer_email: email,
+    created_at: new Date().toISOString(),
+    demande_id: Number(payload.demande_id),
+  };
+
+  const session = await signatureSessions.createSignatureSession({
+    entity_type: "paiement",
+    action: "create",
+    entity_id: null,
+    signer_user_id: signerUserId,
+    signer_agent_id: Number(comptableAgentId),
+    signature_provider: "firma",
+    signature_request_id: String(signingRequestId),
+    signature_request_user_id: firmaSignerUserId != null ? String(firmaSignerUserId) : null,
+    signature_status: "pending",
+    payload: payload || {},
+    signature_payload: signaturePayload,
+  });
+
+  return {
+    sessionId: session.id,
+    signingRequestId: String(signingRequestId),
+    signingRequestUserId: firmaSignerUserId != null ? String(firmaSignerUserId) : null,
+    signingUrl,
+  };
+}
+
+async function completeCreateSignature(sessionId, userId) {
+  if (!sessionId) {
+    const err = new Error("Session de signature manquante");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const session = await signatureSessions.getSignatureSessionById(sessionId);
+  if (!session) {
+    const err = new Error("Session de signature introuvable");
+    err.statusCode = 404;
+    throw err;
+  }
+  if (session.entity_type !== "paiement" || session.action !== "create") {
+    const err = new Error("Session de signature invalide");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (session.signer_user_id && userId != null && Number(session.signer_user_id) !== Number(userId)) {
+    const err = new Error("Non autorise");
+    err.statusCode = 403;
+    throw err;
+  }
+  if (session.signature_status === "completed") {
+    if (session.entity_id) {
+      const existing = await prisma.paiements.findUnique({ where: { id: Number(session.entity_id) } });
+      return existing || { alreadyCompleted: true };
+    }
+    return { alreadyCompleted: true };
+  }
+  if (!session.signature_request_id) {
+    throw new Error("Signature non initialisee");
+  }
+
+  const fallbackAgent = await getAgentById(session.signer_agent_id);
+  const fallbackEmail = fallbackAgent?.users?.email ? String(fallbackAgent.users.email).trim() : "";
+  const waitResult = await firma.waitForSignerFinished(session.signature_request_id, {
+    signerUserId: session.signature_request_user_id,
+    email: fallbackEmail,
+  });
+  const signerUser = waitResult.signerUser;
+  if (!signerUser) throw new Error("Signature introuvable");
+  if (!firma.isSignerFinished(signerUser) && !waitResult.requestFinished) {
+    const err = new Error("Signature non terminee");
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const signerUserId = firma.extractUserId(signerUser);
+  if (!session.signature_request_user_id && signerUserId) {
+    await signatureSessions.updateSignatureSession(session.id, {
+      signature_request_user_id: String(signerUserId),
+    });
+  }
+
+  let finalDocumentUrl = null;
+  try {
+    const request = await firma.getSigningRequest(session.signature_request_id);
+    finalDocumentUrl = firma.extractFinalDocumentUrl(request) || null;
+  } catch {
+    // ignore download url errors
+  }
+
+  const payload = session.payload || {};
+  const paiement = await createPaiement(payload, Number(session.signer_agent_id), { signatureValidated: true });
+
+  await signatureSessions.updateSignatureSession(session.id, {
+    signature_status: "completed",
+    signature_url: finalDocumentUrl || null,
+    entity_id: Number(paiement.id),
+    signature_payload: {
+      ...(session.signature_payload || {}),
+      completed_at: new Date().toISOString(),
+      final_document_url: finalDocumentUrl || null,
+    },
+  });
+
+  return { ...paiement, signature_url: finalDocumentUrl || null };
 }
 
 async function listPaiements({ demande_id, from, to, moyen_paiement }, authUser = null) {
@@ -655,14 +1064,32 @@ async function getPaiementById(id, authUser = null) {
 
   const paiement = await prisma.paiements.findFirst({
     where,
-    include: { documents: true, demandes_paiement: true },
+    include: {
+      documents: true,
+      demandes_paiement: true,
+      agents: {
+        select: {
+          id: true,
+          direction_id: true,
+          roles: { select: { name: true } },
+          users: {
+            select: {
+              prenom: true,
+              nom: true,
+              email: true,
+              user_roles: { select: { roles: { select: { name: true } } } },
+            },
+          },
+        },
+      },
+    },
   });
   if (!paiement) {
     const err = new Error("Paiement introuvable");
     err.statusCode = 404;
     throw err;
   }
-  return paiement;
+  return withPaiementDelegationFlags(paiement);
 }
 
 async function getPaiementByUuid(uuid, authUser = null) {
@@ -671,14 +1098,32 @@ async function getPaiementByUuid(uuid, authUser = null) {
 
   const paiement = await prisma.paiements.findFirst({
     where,
-    include: { documents: true, demandes_paiement: true },
+    include: {
+      documents: true,
+      demandes_paiement: true,
+      agents: {
+        select: {
+          id: true,
+          direction_id: true,
+          roles: { select: { name: true } },
+          users: {
+            select: {
+              prenom: true,
+              nom: true,
+              email: true,
+              user_roles: { select: { roles: { select: { name: true } } } },
+            },
+          },
+        },
+      },
+    },
   });
   if (!paiement) {
     const err = new Error("Paiement introuvable");
     err.statusCode = 404;
     throw err;
   }
-  return paiement;
+  return withPaiementDelegationFlags(paiement);
 }
 
 async function listByDemande(demandeId, authUser = null) {
@@ -850,6 +1295,8 @@ async function deletePaiement(id, actorAgentId) {
 
 module.exports = {
   createPaiement,
+  startCreateSignature,
+  completeCreateSignature,
   listPaiements,
   getPaiementById,
   getPaiementByUuid,

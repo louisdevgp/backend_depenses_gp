@@ -1,8 +1,11 @@
-const prisma = require("../config/prisma");
+﻿const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
 const realtime = require("../realtime");
+const PDFDocument = require("pdfkit");
+const firma = require("./firma.services");
+const signatureSessions = require("./signatureSessions.services");
 const {
   normalizePermissionCode,
   getScopesForPermissionFromUser,
@@ -60,6 +63,58 @@ function agentRoleSet(agent) {
   secondary.forEach((r) => out.add(r));
   return out;
 }
+
+function isDirectRoleForDemande(agent, roleName, demandeOrg) {
+  if (!agent) return false;
+  const target = normalizeRoleName(roleName);
+  if (!target) return false;
+  const roles = agentRoleSet(agent);
+  if (!roles.has(target)) return false;
+  if (target === "DIRECTEUR") {
+    if (!agent.direction_id || !demandeOrg?.direction_id) return false;
+    return Number(agent.direction_id) === Number(demandeOrg.direction_id);
+  }
+  return true;
+}
+
+async function isDelegatedRoleForDemande(agent, roleName, demandeOrg) {
+  if (!agent?.id) return false;
+  const target = normalizeRoleName(roleName);
+  if (!target) return false;
+  const roles = agentRoleSet(agent);
+  if (roles.has("ADMIN")) return false;
+  if (isDirectRoleForDemande(agent, target, demandeOrg)) return false;
+
+  const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
+  const now = new Date();
+  const delegation = await prisma.delegations.findFirst({
+    where: {
+      delegate_id: Number(agent.id),
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+      role_name: target,
+      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    },
+    select: { id: true },
+  });
+
+  return !!delegation;
+}
+
+const RECEPTION_AGENT_SELECT = {
+  id: true,
+  direction_id: true,
+  roles: { select: { name: true } },
+  users: {
+    select: {
+      prenom: true,
+      nom: true,
+      email: true,
+      user_roles: { select: { roles: { select: { name: true } } } },
+    },
+  },
+};
 
 async function canActAsDirectorForDemande(tx, agentId, demandeOrg, { allowAdmin = true } = {}) {
   const client = tx || prisma;
@@ -130,6 +185,14 @@ async function getAgentFromAuthUser(user) {
   });
 }
 
+async function getAgentWithUser(agentId) {
+  if (!agentId) return null;
+  return prisma.agents.findUnique({
+    where: { id: Number(agentId) },
+    include: { users: true, roles: true },
+  });
+}
+
 function hasPermission(user, code) {
   const perm = normalizePermissionCode(code);
   if (!perm) return false;
@@ -193,6 +256,206 @@ function withReceptionDisplayNames(row) {
   };
 }
 
+async function withReceptionDelegationFlags(row) {
+  if (!row) return row;
+  const demandeOrg = {
+    direction_id: row?.demandes_paiement?.direction_id ?? null,
+    departement_id: row?.demandes_paiement?.departement_id ?? null,
+    service_id: row?.demandes_paiement?.service_id ?? null,
+  };
+
+  const visaDirecteurDelegated = row.visa_directeur_id
+    ? await isDelegatedRoleForDemande(row.agents_receptions_visa_directeur_idToagents, "DIRECTEUR", demandeOrg)
+    : false;
+  const visaDafDelegated = row.visa_daf_id
+    ? await isDelegatedRoleForDemande(row.agents_receptions_visa_daf_idToagents, "DAF", demandeOrg)
+    : false;
+
+  return {
+    ...row,
+    visa_directeur_delegated: Boolean(visaDirecteurDelegated),
+    visa_daf_delegated: Boolean(visaDafDelegated),
+  };
+}
+
+function formatMoneyValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  const formatted = new Intl.NumberFormat("fr-FR").format(n);
+  return formatted.replace(/[\u202F\u00A0]/g, " ");
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return "-";
+  return new Intl.DateTimeFormat("fr-FR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(dt);
+}
+
+function agentDisplayName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  const full = `${prenom} ${nom}`.trim();
+  if (full) return full;
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  return email || "-";
+}
+
+function splitAgentName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  if (prenom || nom) return { first_name: prenom || nom || "Signataire", last_name: nom || "" };
+
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  if (!email) return { first_name: "Signataire", last_name: "" };
+  const [user] = email.split("@");
+  return { first_name: user || "Signataire", last_name: "" };
+}
+
+function buildSignatureFields({ recipientId }) {
+  const A4_WIDTH = 595.28;
+  const A4_HEIGHT = 841.89;
+  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
+
+  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
+  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
+
+  const toField = (type, rect) => ({
+    recipient_id: recipientId,
+    type,
+    page_number: 1,
+    position: {
+      x: toPct(rect.x, A4_WIDTH),
+      y: toPct(rect.y, A4_HEIGHT),
+      width: toPct(rect.width, A4_WIDTH),
+      height: toPct(rect.height, A4_HEIGHT),
+    },
+  });
+
+  return [
+    toField("signature", signatureRect),
+    toField("date", dateRect),
+  ];
+}
+
+function buildReceptionCreationSignaturePdf({ payload, demande, paiement, receveur }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.font("Helvetica-Bold").fontSize(16).text("Creation de reception", { align: "center" });
+    doc.moveDown(0.6);
+    doc.font("Helvetica").fontSize(10);
+
+    const devise = demande?.devise ? String(demande.devise) : "FCFA";
+    const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
+
+    const rows = [
+      ["Demande", demande?.uuid || demande?.id || "-"],
+      ["Paiement", paiement?.uuid || paiement?.id || "-"],
+      ["Motif", demande?.motif || "-"],
+      ["Beneficiaire", demande?.beneficiaire || "-"],
+      [
+        "Montant demande",
+        montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-",
+      ],
+      ["Phase", payload?.phase || "-"],
+      ["Conforme", payload?.conforme ? "Oui" : "Non"],
+      ["Receveur", agentDisplayName(receveur)],
+      ["Date reception", formatDateTime(payload?.date_reception || new Date())],
+    ];
+
+    rows.forEach(([label, value]) => {
+      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
+      doc.font("Helvetica").text(String(value ?? "-"));
+    });
+
+    doc.moveDown(2);
+    doc.font("Helvetica").fontSize(9).text(
+      "Ce document sert uniquement de preuve de signature electronique pour la creation."
+    );
+
+    const pageHeight = doc.page.height;
+    const sigHeight = 50;
+    const sigY = 140;
+    const sigTop = pageHeight - sigY - sigHeight;
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
+    doc.rect(50, sigTop, 250, sigHeight).stroke();
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
+    doc.rect(320, sigTop, 120, sigHeight).stroke();
+
+    doc.end();
+  });
+}
+
+function buildReceptionVisaSignaturePdf({ kind, reception, demande, signer, commentaire }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    const title = kind === "daf" ? "Visa DAF" : "Visa Directeur";
+    doc.font("Helvetica-Bold").fontSize(16).text(title, { align: "center" });
+    doc.moveDown(0.6);
+    doc.font("Helvetica").fontSize(10);
+
+    const devise = demande?.devise ? String(demande.devise) : "FCFA";
+    const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
+
+    const rows = [
+      ["Reception", reception?.uuid || reception?.id || "-"],
+      ["Demande", demande?.uuid || demande?.id || "-"],
+      ["Motif", demande?.motif || "-"],
+      ["Beneficiaire", demande?.beneficiaire || "-"],
+      [
+        "Montant demande",
+        montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-",
+      ],
+      ["Conforme", reception?.conforme ? "Oui" : "Non"],
+      ["Receveur", reception?.receveur_nom || agentDisplayName(reception?.agents_receptions_recu_par_idToagents)],
+      ["Signataire", agentDisplayName(signer)],
+      ["Commentaire", commentaire ? String(commentaire) : "-"],
+      ["Date", formatDateTime(new Date())],
+    ];
+
+    rows.forEach(([label, value]) => {
+      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
+      doc.font("Helvetica").text(String(value ?? "-"));
+    });
+
+    doc.moveDown(2);
+    doc.font("Helvetica").fontSize(9).text(
+      "Ce document sert uniquement de preuve de signature electronique pour le visa."
+    );
+
+    const pageHeight = doc.page.height;
+    const sigHeight = 50;
+    const sigY = 140;
+    const sigTop = pageHeight - sigY - sigHeight;
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
+    doc.rect(50, sigTop, 250, sigHeight).stroke();
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
+    doc.rect(320, sigTop, 120, sigHeight).stroke();
+
+    doc.end();
+  });
+}
+
 async function findUserIdByAgentId(agentId) {
   if (!agentId) return null;
   const a = await prisma.agents.findUnique({
@@ -225,7 +488,7 @@ async function resolveRoleUserId(roleName) {
   return agent?.users?.id || null;
 }
 
-async function createReception(payload, userAgentId) {
+async function createReception(payload, userAgentId, options = {}) {
   const {
     paiement_id,
     demande_id,
@@ -462,6 +725,483 @@ async function createReception(payload, userAgentId) {
   return result.reception;
 }
 
+async function startCreateSignature(payload, userAgentId, userId) {
+  if (!payload?.paiement_id && !payload?.demande_id) {
+    const err = new Error("paiement_id ou demande_id obligatoire");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const requestedPhase = normalizeReceptionPhase(payload.phase);
+  if (payload.phase != null && !requestedPhase) {
+    const err = new Error("Phase de reception invalide");
+    err.statusCode = 400;
+    throw err;
+  }
+  const phase = requestedPhase || (payload.paiement_id ? "APRES_PAIEMENT" : "AVANT_PAIEMENT");
+
+  let demande = null;
+  let paiement = null;
+
+  if (payload.paiement_id) {
+    paiement = await prisma.paiements.findUnique({
+      where: { id: Number(payload.paiement_id) },
+      include: { demandes_paiement: true },
+    });
+    if (!paiement) {
+      const err = new Error("Paiement introuvable");
+      err.statusCode = 404;
+      throw err;
+    }
+    demande = paiement.demandes_paiement;
+  } else if (payload.demande_id) {
+    demande = await prisma.demandes_paiement.findUnique({
+      where: { id: Number(payload.demande_id) },
+    });
+    if (!demande) {
+      const err = new Error("Demande introuvable");
+      err.statusCode = 404;
+      throw err;
+    }
+  }
+
+  const signer = await getAgentWithUser(userAgentId);
+  if (!signer || !signer.users?.email) {
+    const err = new Error("Email du signataire introuvable");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const pdfBuffer = await buildReceptionCreationSignaturePdf({
+    payload: { ...(payload || {}), phase },
+    demande,
+    paiement,
+    receveur: signer,
+  });
+
+  const { first_name, last_name } = splitAgentName(signer);
+  const email = String(signer.users.email).trim();
+  const recipientId = "temp_signer_1";
+
+  const signingRequest = await firma.createSigningRequest({
+    name: `Creation reception ${demande?.uuid || demande?.id || ""}`,
+    document: pdfBuffer.toString("base64"),
+    recipients: [
+      {
+        id: recipientId,
+        first_name,
+        last_name,
+        email,
+        designation: "Signer",
+        order: 1,
+      },
+    ],
+    fields: buildSignatureFields({ recipientId }),
+    allow_download: true,
+    attach_pdf_on_finish: true,
+    settings: {
+      send_signing_email: false,
+      send_finish_email: false,
+      allow_download: true,
+      attach_pdf_on_finish: true,
+    },
+  });
+
+  const signingRequestId = signingRequest?.id;
+  if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
+
+  try {
+    await firma.sendSigningRequest(signingRequestId);
+  } catch (e) {
+    if (e?.statusCode && Number(e.statusCode) !== 404) throw e;
+  }
+
+  const resolved = await firma.resolveSignerUser(signingRequestId, email, {
+    attempts: 5,
+    delayMs: 350,
+  });
+  const firmaSignerUserId = resolved.signerUserId;
+  const signingUrl =
+    resolved.signingUrl || (firmaSignerUserId ? `https://app.firma.dev/signing/${String(firmaSignerUserId)}` : "");
+  if (!firmaSignerUserId && !signingUrl) throw new Error("Firma: signataire introuvable");
+
+  const signerUserId = userId != null ? Number(userId) : await findUserIdByAgentId(userAgentId);
+  if (!signerUserId) {
+    const err = new Error("Utilisateur signataire introuvable");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const signaturePayload = {
+    signer_user_id: signerUserId,
+    signer_agent_id: Number(userAgentId),
+    signer_email: email,
+    created_at: new Date().toISOString(),
+    phase,
+  };
+
+  const sessionPayload = {
+    ...(payload || {}),
+    phase,
+    date_reception: payload?.date_reception || new Date().toISOString(),
+  };
+
+  const session = await signatureSessions.createSignatureSession({
+    entity_type: "reception",
+    action: "create",
+    entity_id: null,
+    signer_user_id: signerUserId,
+    signer_agent_id: Number(userAgentId),
+    signature_provider: "firma",
+    signature_request_id: String(signingRequestId),
+    signature_request_user_id: firmaSignerUserId != null ? String(firmaSignerUserId) : null,
+    signature_status: "pending",
+    payload: sessionPayload,
+    signature_payload: signaturePayload,
+  });
+
+  return {
+    sessionId: session.id,
+    signingRequestId: String(signingRequestId),
+    signingRequestUserId: firmaSignerUserId != null ? String(firmaSignerUserId) : null,
+    signingUrl,
+  };
+}
+
+async function completeCreateSignature(sessionId, userId) {
+  if (!sessionId) {
+    const err = new Error("Session de signature manquante");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const session = await signatureSessions.getSignatureSessionById(sessionId);
+  if (!session) {
+    const err = new Error("Session de signature introuvable");
+    err.statusCode = 404;
+    throw err;
+  }
+  if (session.entity_type !== "reception" || session.action !== "create") {
+    const err = new Error("Session de signature invalide");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (session.signer_user_id && userId != null && Number(session.signer_user_id) !== Number(userId)) {
+    const err = new Error("Non autorise");
+    err.statusCode = 403;
+    throw err;
+  }
+  if (session.signature_status === "completed") {
+    if (session.entity_id) {
+      const existing = await prisma.receptions.findUnique({ where: { id: Number(session.entity_id) } });
+      return existing || { alreadyCompleted: true };
+    }
+    return { alreadyCompleted: true };
+  }
+  if (!session.signature_request_id) {
+    throw new Error("Signature non initialisee");
+  }
+
+  const signer = await getAgentWithUser(session.signer_agent_id);
+  const fallbackEmail = signer?.users?.email ? String(signer.users.email).trim() : "";
+  const waitResult = await firma.waitForSignerFinished(session.signature_request_id, {
+    signerUserId: session.signature_request_user_id,
+    email: fallbackEmail,
+  });
+  const signerUser = waitResult.signerUser;
+  if (!signerUser) throw new Error("Signature introuvable");
+  if (!firma.isSignerFinished(signerUser) && !waitResult.requestFinished) {
+    const err = new Error("Signature non terminee");
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const signerUserId = firma.extractUserId(signerUser);
+  if (!session.signature_request_user_id && signerUserId) {
+    await signatureSessions.updateSignatureSession(session.id, {
+      signature_request_user_id: String(signerUserId),
+    });
+  }
+
+  let finalDocumentUrl = null;
+  try {
+    const request = await firma.getSigningRequest(session.signature_request_id);
+    finalDocumentUrl = firma.extractFinalDocumentUrl(request) || null;
+  } catch {
+    // ignore download url errors
+  }
+
+  const payload = session.payload || {};
+  const reception = await createReception(payload, Number(session.signer_agent_id), { signatureValidated: true });
+
+  await signatureSessions.updateSignatureSession(session.id, {
+    signature_status: "completed",
+    signature_url: finalDocumentUrl || null,
+    entity_id: Number(reception.id),
+    signature_payload: {
+      ...(session.signature_payload || {}),
+      completed_at: new Date().toISOString(),
+      final_document_url: finalDocumentUrl || null,
+    },
+  });
+
+  return { ...reception, signature_url: finalDocumentUrl || null };
+}
+
+async function startVisaSignature(kind, receptionId, payload, agentId, userId) {
+  const reception = await prisma.receptions.findUnique({
+    where: { id: Number(receptionId) },
+    include: {
+      demandes_paiement: true,
+      agents_receptions_recu_par_idToagents: { include: { users: true } },
+    },
+  });
+  if (!reception) {
+    const err = new Error("Reception introuvable");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (kind === "directeur") {
+    if (reception.visa_directeur_id) {
+      const err = new Error("Reception deja visee par le Directeur");
+      err.statusCode = 409;
+      throw err;
+    }
+    const demandeOrg = {
+      direction_id: reception?.demandes_paiement?.direction_id ?? null,
+      departement_id: reception?.demandes_paiement?.departement_id ?? null,
+      service_id: reception?.demandes_paiement?.service_id ?? null,
+    };
+    const canVisa = await canActAsDirectorForDemande(prisma, agentId, demandeOrg);
+    if (!canVisa) {
+      const err = new Error("Visa Directeur non autorise pour cette direction");
+      err.statusCode = 403;
+      throw err;
+    }
+  } else if (kind === "daf") {
+    if (!reception.visa_directeur_id) {
+      const err = new Error("Visa Directeur requis avant le Visa DAF");
+      err.statusCode = 409;
+      throw err;
+    }
+    if (reception.visa_daf_id) {
+      const err = new Error("Reception deja visee par le DAF");
+      err.statusCode = 409;
+      throw err;
+    }
+  } else {
+    const err = new Error("Type de visa invalide");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const signer = await getAgentWithUser(agentId);
+  if (!signer || !signer.users?.email) {
+    const err = new Error("Email du signataire introuvable");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const commentaireTrimmed = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
+  const pdfBuffer = await buildReceptionVisaSignaturePdf({
+    kind,
+    reception,
+    demande: reception.demandes_paiement,
+    signer,
+    commentaire: commentaireTrimmed,
+  });
+
+  const { first_name, last_name } = splitAgentName(signer);
+  const email = String(signer.users.email).trim();
+  const recipientId = "temp_signer_1";
+
+  const signingRequest = await firma.createSigningRequest({
+    name: `${kind === "daf" ? "Visa DAF" : "Visa Directeur"} ${reception.uuid || reception.id}`,
+    document: pdfBuffer.toString("base64"),
+    recipients: [
+      {
+        id: recipientId,
+        first_name,
+        last_name,
+        email,
+        designation: "Signer",
+        order: 1,
+      },
+    ],
+    fields: buildSignatureFields({ recipientId }),
+    allow_download: true,
+    attach_pdf_on_finish: true,
+    settings: {
+      send_signing_email: false,
+      send_finish_email: false,
+      allow_download: true,
+      attach_pdf_on_finish: true,
+    },
+  });
+
+  const signingRequestId = signingRequest?.id;
+  if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
+
+  try {
+    await firma.sendSigningRequest(signingRequestId);
+  } catch (e) {
+    if (e?.statusCode && Number(e.statusCode) !== 404) throw e;
+  }
+
+  const resolved = await firma.resolveSignerUser(signingRequestId, email, {
+    attempts: 5,
+    delayMs: 350,
+  });
+  const firmaSignerUserId = resolved.signerUserId;
+  const signingUrl =
+    resolved.signingUrl || (firmaSignerUserId ? `https://app.firma.dev/signing/${String(firmaSignerUserId)}` : "");
+  if (!firmaSignerUserId && !signingUrl) throw new Error("Firma: signataire introuvable");
+
+  const signerUserId = userId != null ? Number(userId) : await findUserIdByAgentId(agentId);
+  if (!signerUserId) {
+    const err = new Error("Utilisateur signataire introuvable");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const signaturePayload = {
+    signer_user_id: signerUserId,
+    signer_agent_id: Number(agentId),
+    signer_email: email,
+    created_at: new Date().toISOString(),
+    kind,
+  };
+
+  const session = await signatureSessions.createSignatureSession({
+    entity_type: "reception",
+    action: kind === "daf" ? "visa_daf" : "visa_directeur",
+    entity_id: Number(reception.id),
+    signer_user_id: signerUserId,
+    signer_agent_id: Number(agentId),
+    signature_provider: "firma",
+    signature_request_id: String(signingRequestId),
+    signature_request_user_id: firmaSignerUserId != null ? String(firmaSignerUserId) : null,
+    signature_status: "pending",
+    payload: { commentaire: commentaireTrimmed || null },
+    signature_payload: signaturePayload,
+  });
+
+  return {
+    sessionId: session.id,
+    signingRequestId: String(signingRequestId),
+    signingRequestUserId: firmaSignerUserId != null ? String(firmaSignerUserId) : null,
+    signingUrl,
+  };
+}
+
+async function completeVisaSignature(kind, sessionId, userId, receptionId = null) {
+  if (!sessionId) {
+    const err = new Error("Session de signature manquante");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const session = await signatureSessions.getSignatureSessionById(sessionId);
+  if (!session) {
+    const err = new Error("Session de signature introuvable");
+    err.statusCode = 404;
+    throw err;
+  }
+  const expectedAction = kind === "daf" ? "visa_daf" : "visa_directeur";
+  if (session.entity_type !== "reception" || session.action !== expectedAction) {
+    const err = new Error("Session de signature invalide");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (receptionId != null && session.entity_id != null && Number(session.entity_id) !== Number(receptionId)) {
+    const err = new Error("Session de signature invalide");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (session.signer_user_id && userId != null && Number(session.signer_user_id) !== Number(userId)) {
+    const err = new Error("Non autorise");
+    err.statusCode = 403;
+    throw err;
+  }
+  if (session.signature_status === "completed") {
+    if (session.entity_id) {
+      const existing = await prisma.receptions.findUnique({ where: { id: Number(session.entity_id) } });
+      return existing || { alreadyCompleted: true };
+    }
+    return { alreadyCompleted: true };
+  }
+  if (!session.signature_request_id) {
+    throw new Error("Signature non initialisee");
+  }
+
+  const signer = await getAgentWithUser(session.signer_agent_id);
+  const fallbackEmail = signer?.users?.email ? String(signer.users.email).trim() : "";
+  const waitResult = await firma.waitForSignerFinished(session.signature_request_id, {
+    signerUserId: session.signature_request_user_id,
+    email: fallbackEmail,
+    attempts: 6,
+    delayMs: 600,
+  });
+  const signerUser = waitResult.signerUser;
+  if (!signerUser) throw new Error("Signature introuvable");
+  if (!firma.isSignerFinished(signerUser)) {
+    const err = new Error("Signature non terminee");
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const signerUserId = firma.extractUserId(signerUser);
+  if (!session.signature_request_user_id && signerUserId) {
+    await signatureSessions.updateSignatureSession(session.id, {
+      signature_request_user_id: String(signerUserId),
+    });
+  }
+
+  let finalDocumentUrl = null;
+  try {
+    const request = await firma.getSigningRequest(session.signature_request_id);
+    finalDocumentUrl = firma.extractFinalDocumentUrl(request) || null;
+  } catch {
+    // ignore download url errors
+  }
+
+  const payload = session.payload || {};
+  const reception =
+    kind === "daf"
+      ? await visaDaf(session.entity_id, payload, Number(session.signer_agent_id), { signatureValidated: true })
+      : await visaDirecteur(session.entity_id, payload, Number(session.signer_agent_id), { signatureValidated: true });
+
+  await signatureSessions.updateSignatureSession(session.id, {
+    signature_status: "completed",
+    signature_url: finalDocumentUrl || null,
+    entity_id: Number(reception.id),
+    signature_payload: {
+      ...(session.signature_payload || {}),
+      completed_at: new Date().toISOString(),
+      final_document_url: finalDocumentUrl || null,
+    },
+  });
+
+  return { ...reception, signature_url: finalDocumentUrl || null };
+}
+
+async function startVisaDirecteurSignature(receptionId, payload, agentId, userId) {
+  return startVisaSignature("directeur", receptionId, payload, agentId, userId);
+}
+
+async function startVisaDafSignature(receptionId, payload, agentId, userId) {
+  return startVisaSignature("daf", receptionId, payload, agentId, userId);
+}
+
+async function completeVisaDirecteurSignature(sessionId, userId, receptionId = null) {
+  return completeVisaSignature("directeur", sessionId, userId, receptionId);
+}
+
+async function completeVisaDafSignature(sessionId, userId, receptionId = null) {
+  return completeVisaSignature("daf", sessionId, userId, receptionId);
+}
+
 async function listReceptions(query = {}, authUser = null) {
   const where = {};
 
@@ -487,13 +1227,15 @@ async function listReceptions(query = {}, authUser = null) {
     include: {
       documents: true,
       demandes_paiement: true,
-      agents_receptions_recu_par_idToagents: { include: { users: true } },
-      agents_receptions_visa_directeur_idToagents: { include: { users: true } },
-      agents_receptions_visa_daf_idToagents: { include: { users: true } },
+      agents_receptions_recu_par_idToagents: { select: RECEPTION_AGENT_SELECT },
+      agents_receptions_visa_directeur_idToagents: { select: RECEPTION_AGENT_SELECT },
+      agents_receptions_visa_daf_idToagents: { select: RECEPTION_AGENT_SELECT },
     },
   });
 
-  return (rows || []).map(withReceptionDisplayNames);
+  return Promise.all(
+    (rows || []).map(async (row) => withReceptionDelegationFlags(withReceptionDisplayNames(row)))
+  );
 }
 
 async function getReceptionById(id, authUser = null) {
@@ -506,12 +1248,12 @@ async function getReceptionById(id, authUser = null) {
     include: {
       documents: true,
       demandes_paiement: true,
-      agents_receptions_recu_par_idToagents: { include: { users: true } },
-      agents_receptions_visa_directeur_idToagents: { include: { users: true } },
-      agents_receptions_visa_daf_idToagents: { include: { users: true } },
+      agents_receptions_recu_par_idToagents: { select: RECEPTION_AGENT_SELECT },
+      agents_receptions_visa_directeur_idToagents: { select: RECEPTION_AGENT_SELECT },
+      agents_receptions_visa_daf_idToagents: { select: RECEPTION_AGENT_SELECT },
     },
   });
-  return withReceptionDisplayNames(row);
+  return withReceptionDelegationFlags(withReceptionDisplayNames(row));
 }
 
 async function getReceptionByUuid(uuid, authUser = null) {
@@ -524,12 +1266,12 @@ async function getReceptionByUuid(uuid, authUser = null) {
     include: {
       documents: true,
       demandes_paiement: true,
-      agents_receptions_recu_par_idToagents: { include: { users: true } },
-      agents_receptions_visa_directeur_idToagents: { include: { users: true } },
-      agents_receptions_visa_daf_idToagents: { include: { users: true } },
+      agents_receptions_recu_par_idToagents: { select: RECEPTION_AGENT_SELECT },
+      agents_receptions_visa_directeur_idToagents: { select: RECEPTION_AGENT_SELECT },
+      agents_receptions_visa_daf_idToagents: { select: RECEPTION_AGENT_SELECT },
     },
   });
-  return withReceptionDisplayNames(row);
+  return withReceptionDelegationFlags(withReceptionDisplayNames(row));
 }
 
 function isNumericId(v) {
@@ -610,7 +1352,12 @@ async function updateReception(id, payload, actorAgentId) {
   return updated;
 }
 
-async function visaDirecteur(id, { signature_directeur_url, signature_data_url, commentaire } = {}, directeurAgentId) {
+async function visaDirecteur(
+  id,
+  { signature_directeur_url, signature_data_url, commentaire } = {},
+  directeurAgentId,
+  options = {}
+) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) throw new Error("Reception introuvable");
   if (existing.visa_directeur_id) throw new Error("Réception déjà visée par le Directeur");
@@ -683,7 +1430,7 @@ async function visaDirecteur(id, { signature_directeur_url, signature_data_url, 
   return updated;
 }
 
-async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire } = {}, dafAgentId) {
+async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire } = {}, dafAgentId, options = {}) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) throw new Error("Reception introuvable");
   if (!existing.visa_directeur_id) throw new Error("Visa Directeur requis avant le Visa DAF");
@@ -796,6 +1543,12 @@ async function deleteReception(id, actorAgentId) {
 
 module.exports = {
   createReception,
+  startCreateSignature,
+  completeCreateSignature,
+  startVisaDirecteurSignature,
+  startVisaDafSignature,
+  completeVisaDirecteurSignature,
+  completeVisaDafSignature,
   listReceptions,
   getReceptionById,
   getReceptionByUuid,

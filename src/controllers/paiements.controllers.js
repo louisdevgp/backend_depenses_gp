@@ -34,6 +34,43 @@ exports.list = async (req, res) => {
   }
 };
 
+exports.startSignature = async (req, res) => {
+  try {
+    const agent = await prisma.agents.findFirst({
+      where: { user_id: req.user.userId, deleted_at: null },
+      select: { id: true },
+    });
+
+    if (!agent) {
+      return res.status(400).json({
+        success: false,
+        message: "Agent non trouve pour l'utilisateur connecte",
+      });
+    }
+
+    const data = await paiementsService.startCreateSignature(req.body, agent.id, req.user.userId);
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      success: false,
+      message: e.message || "Erreur signature",
+    });
+  }
+};
+
+exports.completeSignature = async (req, res) => {
+  try {
+    const sessionId = req?.body?.session_id || req?.body?.sessionId;
+    const data = await paiementsService.completeCreateSignature(sessionId, req.user.userId);
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({
+      success: false,
+      message: e.message || "Erreur signature",
+    });
+  }
+};
+
 exports.getById = async (req, res) => {
   try {
     const data = await paiementsService.getPaiementById(req.params.id, req.user);

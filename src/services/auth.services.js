@@ -4,6 +4,7 @@ const { hashPassword, comparePassword } = require("../utils/password");
 const { signAccessToken, signRefreshToken } = require("./token.services");
 const { v4: uuidv4 } = require("uuid");
 const { sendMail, getTransporter } = require("../config/mailer");
+const { resolveFrontendBaseUrl } = require("../utils/frontendUrl");
 
 function generateResetToken() {
   return crypto.randomBytes(32).toString("hex");
@@ -13,13 +14,6 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(String(token)).digest("hex");
 }
 
-function getFrontendBaseUrl() {
-  return (
-    process.env.FRONTEND_URL ||
-    process.env.DASHBOARD_URL ||
-    "http://localhost:5173"
-  );
-}
 
 async function register({ email, password, nom, prenom, agent }) {
   const existing = await prisma.users.findUnique({ where: { email } });
@@ -219,7 +213,7 @@ async function forgotPassword({ email }) {
     });
   });
 
-  const resetUrl = `${getFrontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
+  const resetUrl = `${resolveFrontendBaseUrl()}/reset-password?token=${encodeURIComponent(token)}`;
 
   // Non-blocking email send
   sendMail({

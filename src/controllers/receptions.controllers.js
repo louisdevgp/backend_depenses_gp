@@ -28,6 +28,28 @@ exports.create = async (req, res) => {
   }
 };
 
+exports.startSignature = async (req, res) => {
+  try {
+    const agentId = await resolveAgentIdFromAuth(req);
+    const authUserId = req?.user?.userId ?? req?.user?.id;
+    const data = await receptionsService.startCreateSignature(req.body, agentId, authUserId);
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
+};
+
+exports.completeSignature = async (req, res) => {
+  try {
+    const authUserId = req?.user?.userId ?? req?.user?.id;
+    const sessionId = req?.body?.session_id || req?.body?.sessionId;
+    const data = await receptionsService.completeCreateSignature(sessionId, authUserId);
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
+};
+
 
 exports.list = async (req, res) => {
   try {
@@ -88,6 +110,28 @@ exports.visaDirecteur = async (req, res) => {
   }
 };
 
+exports.startVisaDirecteurSignature = async (req, res) => {
+  try {
+    const agentId = await resolveAgentIdFromAuth(req);
+    const authUserId = req?.user?.userId ?? req?.user?.id;
+    const data = await receptionsService.startVisaDirecteurSignature(req.params.id, req.body, agentId, authUserId);
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(e.statusCode || 400).json({ success: false, message: e.message });
+  }
+};
+
+exports.completeVisaDirecteurSignature = async (req, res) => {
+  try {
+    const authUserId = req?.user?.userId ?? req?.user?.id;
+    const sessionId = req?.body?.session_id || req?.body?.sessionId;
+    const data = await receptionsService.completeVisaDirecteurSignature(sessionId, authUserId, req.params.id);
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(e.statusCode || 400).json({ success: false, message: e.message });
+  }
+};
+
 exports.visaDaf = async (req, res) => {
   try {
     const agentId = await resolveAgentIdFromAuth(req);
@@ -95,6 +139,28 @@ exports.visaDaf = async (req, res) => {
     res.json({ success: true, data: row });
   } catch (e) {
     res.status(400).json({ success: false, message: e.message });
+  }
+};
+
+exports.startVisaDafSignature = async (req, res) => {
+  try {
+    const agentId = await resolveAgentIdFromAuth(req);
+    const authUserId = req?.user?.userId ?? req?.user?.id;
+    const data = await receptionsService.startVisaDafSignature(req.params.id, req.body, agentId, authUserId);
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(e.statusCode || 400).json({ success: false, message: e.message });
+  }
+};
+
+exports.completeVisaDafSignature = async (req, res) => {
+  try {
+    const authUserId = req?.user?.userId ?? req?.user?.id;
+    const sessionId = req?.body?.session_id || req?.body?.sessionId;
+    const data = await receptionsService.completeVisaDafSignature(sessionId, authUserId, req.params.id);
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(e.statusCode || 400).json({ success: false, message: e.message });
   }
 };
 

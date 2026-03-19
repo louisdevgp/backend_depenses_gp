@@ -1,9 +1,10 @@
-const prisma = require("../config/prisma");
+﻿const prisma = require("../config/prisma");
 const notifications = require("./notifications.services");
 const auditLogs = require("./auditLogs.services");
-const { saveSignaturePngDataUrl } = require("./signatures.services");
 const { v4: uuidv4 } = require("uuid");
 const realtime = require("../realtime");
+const PDFDocument = require("pdfkit");
+const firma = require("./firma.services");
 
 function withStatusCode(err, statusCode) {
   err.statusCode = Number(statusCode);
@@ -128,6 +129,124 @@ function assertTranchesSumTo100(total, tranches, label = "Conditions de paiement
   if (Math.abs(sum - 100) > 0.01) {
     throw withStatusCode(new Error(`${label}: la somme des pourcentages doit etre 100%`), 400);
   }
+}
+
+function formatMoneyValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  const formatted = new Intl.NumberFormat("fr-FR").format(n);
+  return formatted.replace(/[\u202F\u00A0]/g, " ");
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return "-";
+  return new Intl.DateTimeFormat("fr-FR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(dt);
+}
+
+function agentDisplayName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  const full = `${prenom} ${nom}`.trim();
+  if (full) return full;
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  return email || "-";
+}
+
+function splitAgentName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  if (prenom || nom) return { first_name: prenom || nom || "Signataire", last_name: nom || "" };
+
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  if (!email) return { first_name: "Signataire", last_name: "" };
+  const [user] = email.split("@");
+  return { first_name: user || "Signataire", last_name: "" };
+}
+
+function buildValidationSignaturePdf({ demande, step, signer }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.font("Helvetica-Bold").fontSize(16).text("Validation de demande", { align: "center" });
+    doc.moveDown(0.6);
+    doc.font("Helvetica").fontSize(10);
+
+    const montant = demande?.montant_net != null ? demande.montant_net : demande?.montant;
+    const devise = demande?.devise ? String(demande.devise) : "FCFA";
+
+    const rows = [
+      ["Référence demande", demande?.uuid || demande?.id || "-"],
+      ["Motif", demande?.motif || "-"],
+      ["Bénéficiaire", demande?.beneficiaire || "-"],
+      ["Montant", montant != null ? `${formatMoneyValue(montant)} ${devise}` : "-"],
+      ["Demandeur", agentDisplayName(demande?.agents_demandes_paiement_demandeur_idToagents)],
+      ["Rôle validation", step?.role_name || "-"],
+      ["Validateur", agentDisplayName(signer)],
+      ["Date", formatDateTime(new Date())],
+    ];
+
+    rows.forEach(([label, value]) => {
+      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
+      doc.font("Helvetica").text(String(value ?? "-"));
+    });
+
+    doc.moveDown(2);
+    doc.font("Helvetica").fontSize(9).text(
+      "Ce document sert uniquement de preuve de signature électronique pour la validation."
+    );
+
+    // Zones visuelles pour la signature (repère)
+    const pageHeight = doc.page.height;
+    const sigHeight = 50;
+    const sigY = 140; // position depuis le bas (coordonnées Firma)
+    const sigTop = pageHeight - sigY - sigHeight;
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
+    doc.rect(50, sigTop, 250, sigHeight).stroke();
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
+    doc.rect(320, sigTop, 120, sigHeight).stroke();
+
+    doc.end();
+  });
+}
+
+function buildSignatureFields({ recipientId }) {
+  const A4_WIDTH = 595.28;
+  const A4_HEIGHT = 841.89;
+  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
+
+  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
+  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
+
+  const toField = (type, rect) => ({
+    recipient_id: recipientId,
+    type,
+    page_number: 1,
+    position: {
+      x: toPct(rect.x, A4_WIDTH),
+      y: toPct(rect.y, A4_HEIGHT),
+      width: toPct(rect.width, A4_WIDTH),
+      height: toPct(rect.height, A4_HEIGHT),
+    },
+  });
+
+  return [
+    toField("signature", signatureRect),
+    toField("date", dateRect),
+  ];
 }
 
 function getEnvAny(keys) {
@@ -264,6 +383,19 @@ function normalizeValidationStopRole(value) {
   const v = String(value).trim().toUpperCase();
   if (["DAF", "DGA", "DG"].includes(v)) return v;
   return null;
+}
+
+const PAID_STATUTS = new Set([
+  "paye",
+  "payee",
+  "en_attente_paiement",
+  "receptionnee",
+  "cloture",
+  "cloturee",
+]);
+
+function isPaidStatut(value) {
+  return PAID_STATUTS.has(String(value || "").toLowerCase());
 }
 
 async function getAgentFromUserId(userId) {
@@ -562,9 +694,9 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       where: { id: step.id },
       data: {
         status: "valide",
-        validated_by_id: agent.id,
         validated_at: new Date(),
         commentaire: commentaireTrimmed || null,
+        agents_validation_steps_validated_by_idToagents: { connect: { id: agent.id } },
         // Plus de signature_url
         updated_at: new Date(),
       },
@@ -809,9 +941,9 @@ async function rejectStep(stepId, userId, commentaire) {
       where: { id: step.id },
       data: {
         status: "rejete",
-        validated_by_id: agent.id,
         commentaire,
         validated_at: new Date(),
+        agents_validation_steps_validated_by_idToagents: { connect: { id: agent.id } },
         updated_at: new Date(),
       },
     });
@@ -940,10 +1072,10 @@ async function returnForModification(stepId, userId, commentaire) {
         where: { id: previous.id },
         data: {
           status: "bloque",
-          validated_by_id: null,
           validated_at: null,
           signature_url: null,
           commentaire: null,
+          agents_validation_steps_validated_by_idToagents: { disconnect: true },
           updated_at: new Date(),
         },
       });
@@ -1069,7 +1201,11 @@ async function validationDone(userId) {
   if (!agent) return [];
 
   return prisma.validation_steps.findMany({
-    where: { validated_by_id: agent.id, status: "valide", demandes_paiement: { is: { deleted_at: null } } },
+    where: {
+      agents_validation_steps_validated_by_idToagents: { is: { id: agent.id } },
+      status: "valide",
+      demandes_paiement: { is: { deleted_at: null } },
+    },
     orderBy: { validated_at: "desc" },
     include: {
       demandes_paiement: true,
@@ -1147,7 +1283,7 @@ async function validationHistory(userId, options = {}) {
   if (stepIdsRaw.length > 0) {
     const steps = await prisma.validation_steps.findMany({
       where: { id: { in: stepIdsRaw }, demandes_paiement: { is: { deleted_at: null } } },
-      select: { id: true, demande_id: true, level: true, status: true },
+      select: { id: true, demande_id: true, level: true, status: true, role_name: true },
     });
     const stepMap = new Map(steps.map((s) => [Number(s.id), s]));
     const existingIds = new Set(Array.from(stepMap.keys()));
@@ -1156,10 +1292,16 @@ async function validationHistory(userId, options = {}) {
       demandeIds.length > 0
         ? await prisma.demandes_paiement.findMany({
             where: { id: { in: demandeIds }, deleted_at: null },
-            select: { id: true, uuid: true },
+            select: { id: true, uuid: true, statut: true, validation_stop_role: true },
           })
         : [];
     const demandeUuidById = new Map(demandes.map((d) => [Number(d.id), String(d.uuid)]));
+    const demandeMetaById = new Map(demandes.map((d) => [Number(d.id), d]));
+    const stopRoleByDemande = new Map();
+    for (const d of demandes) {
+      const stopRole = normalizeValidationStopRole(d?.validation_stop_role);
+      if (stopRole) stopRoleByDemande.set(Number(d.id), stopRole);
+    }
 
     entries = entries.filter((e) => {
       if (!e.step_id || !existingIds.has(Number(e.step_id))) return false;
@@ -1193,16 +1335,45 @@ async function validationHistory(userId, options = {}) {
       }
     }
 
+    const stopLevelByDemande = new Map();
+    for (const s of steps) {
+      const did = Number(s.demande_id);
+      const stopRole = stopRoleByDemande.get(did);
+      if (!stopRole) continue;
+      if (normalizeRoleName(s.role_name) !== stopRole) continue;
+      const lvl = Number(s.level);
+      if (!Number.isFinite(lvl)) continue;
+      const current = stopLevelByDemande.get(did);
+      if (current == null || lvl > current) {
+        stopLevelByDemande.set(did, lvl);
+      }
+    }
+
     for (const entry of entries) {
       const step = entry.step_id ? stepMap.get(Number(entry.step_id)) : null;
       if (!step) continue;
       const maxLevel = maxValidatedLevelByDemande.get(Number(step.demande_id));
+      const stopLevel = stopLevelByDemande.get(Number(step.demande_id));
+      const effectiveMaxLevel =
+        Number.isFinite(Number(maxLevel)) && Number.isFinite(Number(stopLevel))
+          ? Math.min(Number(maxLevel), Number(stopLevel))
+          : Number(maxLevel);
       const isCurrent =
         String(step.status || "").toLowerCase() === "valide" &&
-        Number.isFinite(Number(maxLevel)) &&
-        Number(step.level) === Number(maxLevel);
-      entry.can_cancel = !!isCurrent;
+        Number.isFinite(Number(effectiveMaxLevel)) &&
+        Number(step.level) === Number(effectiveMaxLevel);
+      const demandeMeta = demandeMetaById.get(Number(step.demande_id));
+      const isPaid = isPaidStatut(demandeMeta?.statut);
+      entry.can_cancel = !!isCurrent && !isPaid;
       entry.current_status = step.status || null;
+      if (demandeMeta) {
+        entry.demande = {
+          ...(entry.demande || {}),
+          uuid: demandeMeta.uuid ?? entry.demande?.uuid ?? null,
+          statut: demandeMeta.statut ?? null,
+          validation_stop_role: demandeMeta.validation_stop_role ?? null,
+        };
+      }
     }
   }
 
@@ -1322,8 +1493,7 @@ async function cancelStep(stepId, userId, payload = {}) {
     if (step.status !== "valide") throw withStatusCode(new Error("Etape non annulable"), 409);
 
     const demandeStatut = String(step?.demandes_paiement?.statut || "").toLowerCase();
-    const paidStatuts = new Set(["paye", "payee", "receptionnee", "cloture", "cloturee"]);
-    if (paidStatuts.has(demandeStatut)) {
+    if (isPaidStatut(demandeStatut)) {
       throw withStatusCode(new Error("Annulation impossible: demande deja payee"), 409);
     }
 
@@ -1347,14 +1517,27 @@ async function cancelStep(stepId, userId, payload = {}) {
       throw withStatusCode(new Error("Annulation impossible: demande deja payee"), 409);
     }
 
-    const laterValidated = await tx.validation_steps.count({
-      where: {
-        demande_id: Number(step.demande_id),
-        level: { gt: Number(step.level) },
-        status: "valide",
-      },
+    const maxValidated = await tx.validation_steps.aggregate({
+      where: { demande_id: Number(step.demande_id), status: "valide" },
+      _max: { level: true },
     });
-    if (laterValidated > 0) {
+    const maxValidatedLevel = Number(maxValidated?._max?.level);
+    const stopRole = normalizeValidationStopRole(step?.demandes_paiement?.validation_stop_role);
+    let stopLevel = null;
+    if (stopRole) {
+      const stopStep = await tx.validation_steps.findFirst({
+        where: { demande_id: Number(step.demande_id), role_name: stopRole },
+        select: { level: true },
+      });
+      if (stopStep?.level != null) stopLevel = Number(stopStep.level);
+    }
+    const effectiveMaxLevel = Number.isFinite(maxValidatedLevel)
+      ? Number.isFinite(stopLevel)
+        ? Math.min(maxValidatedLevel, stopLevel)
+        : maxValidatedLevel
+      : null;
+
+    if (!Number.isFinite(effectiveMaxLevel) || Number(step.level) !== Number(effectiveMaxLevel)) {
       throw withStatusCode(new Error("Annulation impossible: validation superieure deja effectuee"), 409);
     }
 
@@ -1389,6 +1572,12 @@ async function cancelStep(stepId, userId, payload = {}) {
         data: {
           status: "retour_modification",
           commentaire: commentaireTrimmed,
+          signature_url: null,
+          signature_provider: null,
+          signature_request_id: null,
+          signature_request_user_id: null,
+          signature_status: null,
+          signature_payload: null,
           updated_at: new Date(),
         },
       });
@@ -1402,9 +1591,14 @@ async function cancelStep(stepId, userId, payload = {}) {
             where: { id: previous.id },
             data: {
               status: "bloque",
-              validated_by_id: null,
               validated_at: null,
+              agents_validation_steps_validated_by_idToagents: { disconnect: true },
               signature_url: null,
+              signature_provider: null,
+              signature_request_id: null,
+              signature_request_user_id: null,
+              signature_status: null,
+              signature_payload: null,
               commentaire: null,
               updated_at: new Date(),
             },
@@ -1434,9 +1628,14 @@ async function cancelStep(stepId, userId, payload = {}) {
       where: { id: step.id },
       data: {
         status: "en_attente",
-        validated_by_id: null,
         validated_at: null,
+        agents_validation_steps_validated_by_idToagents: { disconnect: true },
         signature_url: null,
+        signature_provider: null,
+        signature_request_id: null,
+        signature_request_user_id: null,
+        signature_status: null,
+        signature_payload: null,
         commentaire: commentaireTrimmed,
         updated_at: new Date(),
       },
@@ -1545,6 +1744,282 @@ async function cancelStep(stepId, userId, payload = {}) {
   return result;
 }
 
+async function startSignature(stepId, userId, payload = {}) {
+  const step = await prisma.validation_steps.findUnique({
+    where: { id: Number(stepId) },
+    include: {
+      demandes_paiement: {
+        include: {
+          agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+        },
+      },
+    },
+  });
+
+  if (!step || step.status !== "en_attente") throw new Error("Étape invalide");
+
+  const agent = await getAgentFromUserId(userId);
+  if (!agent || !agent.roles?.name) throw new Error("Non autorisé");
+
+  const ok = await canActByDelegation(prisma, step, agent);
+  if (!ok) throw new Error("Non autorisé");
+
+  const roleUpper = String(step.role_name || "").toUpperCase();
+  const commentaireTrimmed = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
+
+  if (roleUpper === "DAF") {
+    const {
+      budget_prevu,
+      budget_disponible,
+      paiement_immediat,
+      daf_critere4,
+      conditions_paiement_mode,
+      conditions_paiement_custom,
+      conditions_paiement_use_demandeur,
+      validation_stop_role,
+    } = payload || {};
+    const useDemandeurRaw = isBoolean(conditions_paiement_use_demandeur)
+      ? conditions_paiement_use_demandeur
+      : normalizeBooleanLikeString(conditions_paiement_use_demandeur);
+    const useDemandeur = useDemandeurRaw === true;
+    const validationStopRole = normalizeValidationStopRole(validation_stop_role);
+    if (validation_stop_role != null && !validationStopRole) {
+      throw withStatusCode(new Error("Categorie de validation invalide (attendu: DAF, DGA, DG)"), 400);
+    }
+    if (!isBoolean(budget_prevu) || !isBoolean(budget_disponible) || !isBoolean(paiement_immediat)) {
+      throw withStatusCode(
+        new Error(
+          "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat' (booleens)"
+        ),
+        400
+      );
+    }
+    const dafCritere4Value = normalizeDafCritere4(daf_critere4);
+    if (!dafCritere4Value) {
+      throw withStatusCode(
+        new Error("Controle DAF incomplet: renseignez le moyen de paiement (critere 4)"),
+        400
+      );
+    }
+    if (paiement_immediat === false) {
+      if (!commentaireTrimmed) {
+        throw withStatusCode(new Error("Commentaire obligatoire si paiement non immediat"), 400);
+      }
+      const hasCustom = conditions_paiement_custom !== undefined;
+      const hasMode = conditions_paiement_mode !== undefined;
+      if (useDemandeur && (hasCustom || hasMode)) {
+        throw withStatusCode(
+          new Error("Choisir soit les conditions du demandeur, soit un mode ou des conditions personnalisees"),
+          400
+        );
+      }
+      if (!useDemandeur && !hasCustom && !hasMode) {
+        throw withStatusCode(new Error("Definir les conditions de paiement (mode ou personnalise)"), 400);
+      }
+    }
+  }
+
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  if (!email) throw new Error("Email du signataire introuvable");
+
+  if (step.signature_status === "pending" && step.signature_request_id) {
+    const existingPayload = step.signature_payload || {};
+    const existingUserId = existingPayload?.signer_user_id;
+    if (existingUserId && Number(existingUserId) !== Number(userId)) {
+      throw withStatusCode(new Error("Signature dÃ©jÃ  initiÃ©e par un autre utilisateur"), 409);
+    }
+
+    if (step.signature_request_user_id) {
+      return {
+        signingRequestId: step.signature_request_id,
+        signingRequestUserId: step.signature_request_user_id,
+        signingUrl: `https://app.firma.dev/signing/${step.signature_request_user_id}`,
+      };
+    }
+
+    const resolved = await firma.resolveSignerUser(step.signature_request_id, email, {
+      attempts: 3,
+      delayMs: 300,
+    });
+    const resolvedUrl =
+      resolved.signingUrl ||
+      (resolved.signerUserId ? `https://app.firma.dev/signing/${String(resolved.signerUserId)}` : "");
+
+    if (resolved.signerUserId) {
+      await prisma.validation_steps.update({
+        where: { id: step.id },
+        data: {
+          signature_request_user_id: String(resolved.signerUserId),
+          updated_at: new Date(),
+        },
+      });
+    }
+
+    if (resolvedUrl) {
+      return {
+        signingRequestId: step.signature_request_id,
+        signingRequestUserId: resolved.signerUserId ? String(resolved.signerUserId) : null,
+        signingUrl: resolvedUrl,
+      };
+    }
+  }
+
+  const pdfBuffer = await buildValidationSignaturePdf({
+    demande: step.demandes_paiement,
+    step,
+    signer: agent,
+  });
+
+  const { first_name, last_name } = splitAgentName(agent);
+
+  const recipientId = "temp_signer_1";
+  const signingRequest = await firma.createSigningRequest({
+    name: `Validation demande ${step.demandes_paiement?.uuid || step.demande_id}`,
+    document: pdfBuffer.toString("base64"),
+    recipients: [
+      {
+        id: recipientId,
+        first_name,
+        last_name,
+        email,
+        designation: "Signer",
+        order: 1,
+      },
+    ],
+    fields: buildSignatureFields({ recipientId }),
+    allow_download: true,
+    attach_pdf_on_finish: true,
+    settings: {
+      send_signing_email: false,
+      send_finish_email: false,
+      allow_download: true,
+      attach_pdf_on_finish: true,
+    },
+  });
+
+  const signingRequestId = signingRequest?.id;
+  if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
+
+  try {
+    await firma.sendSigningRequest(signingRequestId);
+  } catch (e) {
+    // Certains comptes peuvent ne pas exiger l'appel send; on ignore le 404.
+    if (e?.statusCode && Number(e.statusCode) !== 404) throw e;
+  }
+
+  const resolved = await firma.resolveSignerUser(signingRequestId, email, {
+    attempts: 5,
+    delayMs: 350,
+  });
+  const signerUserId = resolved.signerUserId;
+  const signingUrl =
+    resolved.signingUrl || (signerUserId ? `https://app.firma.dev/signing/${String(signerUserId)}` : "");
+  if (!signerUserId && !signingUrl) throw new Error("Firma: signataire introuvable");
+
+  const signaturePayload = {
+    commentaire: commentaireTrimmed || null,
+    extra: payload || {},
+    signer_user_id: Number(userId),
+    signer_agent_id: Number(agent.id),
+    signer_email: email,
+    created_at: new Date().toISOString(),
+  };
+
+  await prisma.validation_steps.update({
+    where: { id: step.id },
+    data: {
+      signature_provider: "firma",
+      signature_request_id: String(signingRequestId),
+      signature_request_user_id: signerUserId != null ? String(signerUserId) : null,
+      signature_status: "pending",
+      signature_payload: signaturePayload,
+      updated_at: new Date(),
+    },
+  });
+
+  return {
+    signingRequestId: String(signingRequestId),
+    signingRequestUserId: signerUserId != null ? String(signerUserId) : null,
+    signingUrl,
+  };
+}
+
+async function completeSignature(stepId, userId) {
+  const step = await prisma.validation_steps.findUnique({
+    where: { id: Number(stepId) },
+  });
+  if (!step) throw new Error("Étape introuvable");
+
+  if (step.status === "valide") {
+    return { alreadyValidated: true };
+  }
+
+  if (!step.signature_request_id) {
+    throw new Error("Signature non initialisée");
+  }
+
+  const agent = await getAgentFromUserId(userId);
+  if (!agent || !agent.roles?.name) throw new Error("Non autorisé");
+
+  const ok = await canActByDelegation(prisma, step, agent);
+  if (!ok) throw new Error("Non autorisé");
+
+  const fallbackEmail = agent?.users?.email ? String(agent.users.email).trim() : "";
+  const waitResult = await firma.waitForSignerFinished(step.signature_request_id, {
+    signerUserId: step.signature_request_user_id,
+    email: fallbackEmail,
+  });
+  const signerUser = waitResult.signerUser;
+  if (!signerUser) throw new Error("Signature introuvable");
+  if (!firma.isSignerFinished(signerUser) && !waitResult.requestFinished) {
+    throw withStatusCode(new Error("Signature non terminée"), 409);
+  }
+
+  const signerUserId = firma.extractUserId(signerUser);
+  if (!step.signature_request_user_id && signerUserId) {
+    await prisma.validation_steps.update({
+      where: { id: step.id },
+      data: {
+        signature_request_user_id: String(signerUserId),
+        updated_at: new Date(),
+      },
+    });
+  }
+
+  let finalDocumentUrl = null;
+  try {
+    const request = await firma.getSigningRequest(step.signature_request_id);
+    finalDocumentUrl = firma.extractFinalDocumentUrl(request) || null;
+  } catch {
+    // ignore download url errors
+  }
+
+  const payload = step.signature_payload || {};
+  const commentaire = payload?.commentaire || null;
+  const extra = payload?.extra || {};
+
+  const result = await approveStep(stepId, userId, commentaire, null, {
+    ...(extra || {}),
+    signature_validated: true,
+  });
+
+  await prisma.validation_steps.update({
+    where: { id: step.id },
+    data: {
+      signature_status: "completed",
+      signature_url: finalDocumentUrl || step.signature_url,
+      signature_payload: {
+        ...(payload || {}),
+        completed_at: new Date().toISOString(),
+        final_document_url: finalDocumentUrl || null,
+      },
+      updated_at: new Date(),
+    },
+  });
+
+  return { ...result, signature_url: finalDocumentUrl || null };
+}
+
 module.exports = {
   getPendingForUser,
   approveStep,
@@ -1557,4 +2032,6 @@ module.exports = {
   getByUuid,
   getValidationsDoneBydemande,
   cancelStep,
+  startSignature,
+  completeSignature,
 };

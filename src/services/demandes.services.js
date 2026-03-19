@@ -1,7 +1,10 @@
-
+﻿
 const prisma = require("../config/prisma");
 const { v4: uuidv4 } = require("uuid");
 const notifications = require("./notifications.services");
+const PDFDocument = require("pdfkit");
+const firma = require("./firma.services");
+const signatureSessions = require("./signatureSessions.services");
 const {
   normalizePermissionCode,
   getScopesForPermissionFromUser,
@@ -354,6 +357,168 @@ exports.getDemandeHeader = async (user, idOrUuid) => {
   return demande;
 };
 
+exports.startCreateSignature = async (user, payload = {}) => {
+  const userId = getUserIdFromToken(user);
+  if (!userId) throw withStatusCode(new Error("Unauthorized"), 401);
+
+  const { agent, montantAPayer, remiseCalc } = await prepareCreateDemandePayload(user, payload);
+  const demandeUuid = uuidv4();
+
+  const pdfBuffer = await buildDemandeCreationSignaturePdf({
+    demandeUuid,
+    payload,
+    agent,
+    montantAPayer,
+    remiseCalc,
+  });
+
+  const { first_name, last_name } = splitAgentName(agent);
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  if (!email) throw new Error("Email du signataire introuvable");
+
+  const recipientId = "temp_signer_1";
+  const signingRequest = await firma.createSigningRequest({
+    name: `Creation demande ${demandeUuid}`,
+    document: pdfBuffer.toString("base64"),
+    recipients: [
+      {
+        id: recipientId,
+        first_name,
+        last_name,
+        email,
+        designation: "Signer",
+        order: 1,
+      },
+    ],
+    fields: buildSignatureFields({ recipientId }),
+    allow_download: true,
+    attach_pdf_on_finish: true,
+    settings: {
+      send_signing_email: false,
+      send_finish_email: false,
+      allow_download: true,
+      attach_pdf_on_finish: true,
+    },
+  });
+
+  const signingRequestId = signingRequest?.id;
+  if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
+
+  try {
+    await firma.sendSigningRequest(signingRequestId);
+  } catch (e) {
+    if (e?.statusCode && Number(e.statusCode) !== 404) throw e;
+  }
+
+  const resolved = await firma.resolveSignerUser(signingRequestId, email, {
+    attempts: 5,
+    delayMs: 350,
+  });
+  const signerUserId = resolved.signerUserId;
+  const signingUrl =
+    resolved.signingUrl || (signerUserId ? `https://app.firma.dev/signing/${String(signerUserId)}` : "");
+  if (!signerUserId && !signingUrl) throw new Error("Firma: signataire introuvable");
+
+  const signaturePayload = {
+    signer_user_id: Number(userId),
+    signer_agent_id: Number(agent.id),
+    signer_email: email,
+    created_at: new Date().toISOString(),
+    demande_uuid: demandeUuid,
+  };
+
+  const sessionPayload = { ...(payload || {}), demande_uuid: demandeUuid };
+
+  const session = await signatureSessions.createSignatureSession({
+    entity_type: "demande",
+    action: "create",
+    entity_id: null,
+    signer_user_id: Number(userId),
+    signer_agent_id: Number(agent.id),
+    signature_provider: "firma",
+    signature_request_id: String(signingRequestId),
+    signature_request_user_id: signerUserId != null ? String(signerUserId) : null,
+    signature_status: "pending",
+    payload: sessionPayload,
+    signature_payload: signaturePayload,
+  });
+
+  return {
+    sessionId: session.id,
+    signingRequestId: String(signingRequestId),
+    signingRequestUserId: signerUserId != null ? String(signerUserId) : null,
+    signingUrl,
+  };
+};
+
+exports.completeCreateSignature = async (user, sessionId) => {
+  const userId = getUserIdFromToken(user);
+  if (!userId) throw withStatusCode(new Error("Unauthorized"), 401);
+  if (!sessionId) throw withStatusCode(new Error("Session de signature manquante"), 400);
+
+  const session = await signatureSessions.getSignatureSessionById(sessionId);
+  if (!session) throw withStatusCode(new Error("Session de signature introuvable"), 404);
+  if (session.entity_type !== "demande" || session.action !== "create") {
+    throw withStatusCode(new Error("Session de signature invalide"), 400);
+  }
+  if (session.signer_user_id && Number(session.signer_user_id) !== Number(userId)) {
+    throw withStatusCode(new Error("Non autorise"), 403);
+  }
+  if (session.signature_status === "completed") {
+    if (session.entity_id) {
+      const existing = await prisma.demandes_paiement.findUnique({ where: { id: Number(session.entity_id) } });
+      return existing || { alreadyCompleted: true };
+    }
+    return { alreadyCompleted: true };
+  }
+  if (!session.signature_request_id) {
+    throw new Error("Signature non initialisee");
+  }
+
+  const agent = await getAgentFromUser(user);
+  const fallbackEmail = agent?.users?.email ? String(agent.users.email).trim() : "";
+  const waitResult = await firma.waitForSignerFinished(session.signature_request_id, {
+    signerUserId: session.signature_request_user_id,
+    email: fallbackEmail,
+  });
+  const signerUser = waitResult.signerUser;
+  if (!signerUser) throw new Error("Signature introuvable");
+  if (!firma.isSignerFinished(signerUser) && !waitResult.requestFinished) {
+    throw withStatusCode(new Error("Signature non terminee"), 409);
+  }
+
+  const signerUserId = firma.extractUserId(signerUser);
+  if (!session.signature_request_user_id && signerUserId) {
+    await signatureSessions.updateSignatureSession(session.id, {
+      signature_request_user_id: String(signerUserId),
+    });
+  }
+
+  let finalDocumentUrl = null;
+  try {
+    const request = await firma.getSigningRequest(session.signature_request_id);
+    finalDocumentUrl = firma.extractFinalDocumentUrl(request) || null;
+  } catch {
+    // ignore download url errors
+  }
+
+  const payload = session.payload || {};
+  const demande = await exports.createDemande(user, payload, { signatureValidated: true });
+
+  await signatureSessions.updateSignatureSession(session.id, {
+    signature_status: "completed",
+    signature_url: finalDocumentUrl || null,
+    entity_id: Number(demande.id),
+    signature_payload: {
+      ...(session.signature_payload || {}),
+      completed_at: new Date().toISOString(),
+      final_document_url: finalDocumentUrl || null,
+    },
+  });
+
+  return { ...demande, signature_url: finalDocumentUrl || null };
+};
+
 function normalizeBooleanLikeString(value) {
   if (typeof value !== "string") return null;
   const v = value.trim().toLowerCase();
@@ -513,6 +678,202 @@ function assertTranchesSumTo100(total, tranches, label = "Conditions de paiement
   if (Math.abs(sum - 100) > 0.01) {
     throw withStatusCode(new Error(`${label}: la somme des pourcentages doit etre 100%`), 400);
   }
+}
+
+function formatMoneyValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  const formatted = new Intl.NumberFormat("fr-FR").format(n);
+  return formatted.replace(/[\u202F\u00A0]/g, " ");
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return "-";
+  return new Intl.DateTimeFormat("fr-FR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(dt);
+}
+
+function agentDisplayName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  const full = `${prenom} ${nom}`.trim();
+  if (full) return full;
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  return email || "-";
+}
+
+function splitAgentName(agent) {
+  const prenom = agent?.prenom ? String(agent.prenom).trim() : "";
+  const nom = agent?.nom ? String(agent.nom).trim() : "";
+  if (prenom || nom) return { first_name: prenom || nom || "Signataire", last_name: nom || "" };
+
+  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  if (!email) return { first_name: "Signataire", last_name: "" };
+  const [user] = email.split("@");
+  return { first_name: user || "Signataire", last_name: "" };
+}
+
+function buildSignatureFields({ recipientId }) {
+  const A4_WIDTH = 595.28;
+  const A4_HEIGHT = 841.89;
+  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
+
+  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
+  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
+
+  const toField = (type, rect) => ({
+    recipient_id: recipientId,
+    type,
+    page_number: 1,
+    position: {
+      x: toPct(rect.x, A4_WIDTH),
+      y: toPct(rect.y, A4_HEIGHT),
+      width: toPct(rect.width, A4_WIDTH),
+      height: toPct(rect.height, A4_HEIGHT),
+    },
+  });
+
+  return [
+    toField("signature", signatureRect),
+    toField("date", dateRect),
+  ];
+}
+
+function buildDemandeCreationSignaturePdf({ demandeUuid, payload, agent, montantAPayer, remiseCalc }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.font("Helvetica-Bold").fontSize(16).text("Creation de demande", { align: "center" });
+    doc.moveDown(0.6);
+    doc.font("Helvetica").fontSize(10);
+
+    const devise = payload?.devise ? String(payload.devise) : "FCFA";
+    const montantNet = remiseCalc?.montant_net != null ? remiseCalc.montant_net : montantAPayer;
+    const itemsCount = Array.isArray(payload?.items) ? payload.items.filter((it) => it?.designation).length : 0;
+
+    const rows = [
+      ["Reference demande", demandeUuid || "-"],
+      ["Motif", payload?.motif || "-"],
+      ["Beneficiaire", payload?.beneficiaire || "-"],
+      [
+        "Montant brut",
+        montantAPayer != null ? `${formatMoneyValue(montantAPayer)} ${devise}` : "-",
+      ],
+      [
+        "Montant net",
+        montantNet != null ? `${formatMoneyValue(montantNet)} ${devise}` : "-",
+      ],
+      ["Demandeur", agentDisplayName(agent)],
+      ["Nb items", itemsCount ? String(itemsCount) : "-"],
+      ["Date", formatDateTime(new Date())],
+    ];
+
+    rows.forEach(([label, value]) => {
+      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
+      doc.font("Helvetica").text(String(value ?? "-"));
+    });
+
+    doc.moveDown(2);
+    doc.font("Helvetica").fontSize(9).text(
+      "Ce document sert uniquement de preuve de signature electronique pour la creation."
+    );
+
+    const pageHeight = doc.page.height;
+    const sigHeight = 50;
+    const sigY = 140;
+    const sigTop = pageHeight - sigY - sigHeight;
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
+    doc.rect(50, sigTop, 250, sigHeight).stroke();
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
+    doc.rect(320, sigTop, 120, sigHeight).stroke();
+
+    doc.end();
+  });
+}
+
+async function prepareCreateDemandePayload(user, payload) {
+  const agent = await getAgentFromUser(user);
+  const flow = await resolveValidationFlowForAgent(agent);
+  if (!payload.motif) throw new Error("motif requis");
+  if (!payload.beneficiaire) throw new Error("beneficiaire requis");
+
+  const items = Array.isArray(payload.items) ? payload.items : [];
+
+  let montantAPayer = payload.montant;
+  if (items.length > 0) {
+    const { total: totalItems, hasPricedItems } = computeItemsTotal(items);
+    if (hasPricedItems) montantAPayer = totalItems;
+  }
+
+  if (montantAPayer == null) throw new Error("montant requis");
+
+  const remiseCalc = computeMontantNet({
+    montantBrut: montantAPayer,
+    remise_type: payload.remise_type,
+    remise_valeur: payload.remise_valeur,
+  });
+
+  if (payload.conditions_paiement_custom !== undefined && payload.conditions_paiement_mode !== undefined) {
+    throw withStatusCode(new Error("Fournir soit conditions_paiement_mode, soit conditions_paiement_custom"), 400);
+  }
+
+  const hasCustomRaw = payload.conditions_paiement_custom !== undefined;
+  if (hasCustomRaw && !Array.isArray(payload.conditions_paiement_custom)) {
+    throw withStatusCode(new Error("conditions_paiement_custom invalide"), 400);
+  }
+  const customTranches = Array.isArray(payload.conditions_paiement_custom) ? payload.conditions_paiement_custom : null;
+  if (customTranches) {
+    const totalForValidation = remiseCalc.montant_net != null ? remiseCalc.montant_net : montantAPayer;
+    assertTranchesSumTo100(totalForValidation, customTranches);
+  }
+
+  for (const it of items) {
+    const designation = String(it?.designation ?? "").trim();
+    const unite = String(it?.unite ?? "").trim();
+    const specifications = String(it?.specifications ?? "").trim();
+    const qRaw = it?.quantite;
+    const puRaw = it?.prix_unitaire;
+    const tlRaw = it?.total_ligne;
+
+    const hasAnyField =
+      designation ||
+      unite ||
+      specifications ||
+      (qRaw !== undefined && qRaw !== null && String(qRaw).trim() !== "") ||
+      (puRaw !== undefined && puRaw !== null && String(puRaw).trim() !== "") ||
+      (tlRaw !== undefined && tlRaw !== null && String(tlRaw).trim() !== "");
+
+    if (!hasAnyField) continue;
+    if (!designation) throw withStatusCode(new Error("Chaque item doit avoir une designation"), 400);
+
+    const q = qRaw === undefined || qRaw === null || String(qRaw).trim() === "" ? 1 : Number(qRaw);
+    if (!Number.isFinite(q) || q <= 0) throw withStatusCode(new Error("Quantite invalide sur un item"), 400);
+
+    if (puRaw !== undefined && puRaw !== null && String(puRaw).trim() !== "") {
+      const pu = Number(puRaw);
+      if (!Number.isFinite(pu) || pu < 0) throw withStatusCode(new Error("Prix unitaire invalide sur un item"), 400);
+    }
+
+    if (tlRaw !== undefined && tlRaw !== null && String(tlRaw).trim() !== "") {
+      const tl = Number(tlRaw);
+      if (!Number.isFinite(tl) || tl < 0) throw withStatusCode(new Error("Total ligne invalide sur un item"), 400);
+    }
+  }
+
+  return { agent, flow, items, montantAPayer, remiseCalc, customTranches };
 }
 
 function toStageStatus(roleName) {
@@ -706,79 +1067,18 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
   return created;
 }
 
-exports.createDemande = async (user, payload) => {
-  const agent = await getAgentFromUser(user);
-  const flow = await resolveValidationFlowForAgent(agent);
-  if (!payload.motif) throw new Error("motif requis");
-  if (!payload.beneficiaire) throw new Error("beneficiaire requis");
-
-  const items = Array.isArray(payload.items) ? payload.items : [];
-
-  let montantAPayer = payload.montant;
-  if (items.length > 0) {
-    const { total: totalItems, hasPricedItems } = computeItemsTotal(items);
-    if (hasPricedItems) montantAPayer = totalItems;
-  }
-
-  if (montantAPayer == null) throw new Error("montant requis");
-
-  const remiseCalc = computeMontantNet({
-    montantBrut: montantAPayer,
-    remise_type: payload.remise_type,
-    remise_valeur: payload.remise_valeur,
-  });
-
-  if (payload.conditions_paiement_custom !== undefined && payload.conditions_paiement_mode !== undefined) {
-    throw withStatusCode(new Error("Fournir soit conditions_paiement_mode, soit conditions_paiement_custom"), 400);
-  }
-
-  const hasCustomRaw = payload.conditions_paiement_custom !== undefined;
-  if (hasCustomRaw && !Array.isArray(payload.conditions_paiement_custom)) {
-    throw withStatusCode(new Error("conditions_paiement_custom invalide"), 400);
-  }
-  const customTranches = Array.isArray(payload.conditions_paiement_custom) ? payload.conditions_paiement_custom : null;
-  if (customTranches) {
-    const totalForValidation = remiseCalc.montant_net != null ? remiseCalc.montant_net : montantAPayer;
-    assertTranchesSumTo100(totalForValidation, customTranches);
-  }
-
-  for (const it of items) {
-    const designation = String(it?.designation ?? "").trim();
-    const unite = String(it?.unite ?? "").trim();
-    const specifications = String(it?.specifications ?? "").trim();
-    const qRaw = it?.quantite;
-    const puRaw = it?.prix_unitaire;
-    const tlRaw = it?.total_ligne;
-
-    const hasAnyField =
-      designation ||
-      unite ||
-      specifications ||
-      (qRaw !== undefined && qRaw !== null && String(qRaw).trim() !== "") ||
-      (puRaw !== undefined && puRaw !== null && String(puRaw).trim() !== "") ||
-      (tlRaw !== undefined && tlRaw !== null && String(tlRaw).trim() !== "");
-
-    if (!hasAnyField) continue;
-    if (!designation) throw withStatusCode(new Error("Chaque item doit avoir une designation"), 400);
-
-    const q = qRaw === undefined || qRaw === null || String(qRaw).trim() === "" ? 1 : Number(qRaw);
-    if (!Number.isFinite(q) || q <= 0) throw withStatusCode(new Error("Quantite invalide sur un item"), 400);
-
-    if (puRaw !== undefined && puRaw !== null && String(puRaw).trim() !== "") {
-      const pu = Number(puRaw);
-      if (!Number.isFinite(pu) || pu < 0) throw withStatusCode(new Error("Prix unitaire invalide sur un item"), 400);
-    }
-
-    if (tlRaw !== undefined && tlRaw !== null && String(tlRaw).trim() !== "") {
-      const tl = Number(tlRaw);
-      if (!Number.isFinite(tl) || tl < 0) throw withStatusCode(new Error("Total ligne invalide sur un item"), 400);
-    }
-  }
+exports.createDemande = async (user, payload, options = {}) => {
+  const { agent, flow, items, montantAPayer, remiseCalc, customTranches } = await prepareCreateDemandePayload(
+    user,
+    payload
+  );
+  const rawUuid = payload?.demande_uuid ? String(payload.demande_uuid).trim() : "";
+  const demandeUuid = rawUuid || uuidv4();
 
   const demande = await prisma.$transaction(async (tx) => {
     const demande = await tx.demandes_paiement.create({
       data: {
-        uuid: uuidv4(),
+        uuid: demandeUuid,
         motif: payload.motif,
         description: payload.description || null,
         montant: String(montantAPayer),
