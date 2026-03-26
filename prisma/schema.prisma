@@ -208,6 +208,7 @@ model demandes_paiement {
   budget_prevu                                     Boolean?
   budget_disponible                                Boolean?
   paiement_immediat                                Boolean?
+  validation_oci                                   Boolean?
   ajournee                                         Boolean               @default(false)
   ajournee_le                                      DateTime?             @db.DateTime(0)
   ajournee_par_id                                  Int?                  @db.UnsignedInt

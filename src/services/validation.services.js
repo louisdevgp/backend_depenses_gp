@@ -543,6 +543,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         budget_prevu,
         budget_disponible,
         paiement_immediat,
+        validation_oci,
         daf_critere4,
         conditions_paiement_mode,
         conditions_paiement_custom,
@@ -557,10 +558,15 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       if (validation_stop_role != null && !validationStopRole) {
         throw withStatusCode(new Error("Categorie de validation invalide (attendu: DAF, DGA, DG)"), 400);
       }
-      if (!isBoolean(budget_prevu) || !isBoolean(budget_disponible) || !isBoolean(paiement_immediat)) {
+      if (
+        !isBoolean(budget_prevu) ||
+        !isBoolean(budget_disponible) ||
+        !isBoolean(paiement_immediat) ||
+        !isBoolean(validation_oci)
+      ) {
         throw withStatusCode(
           new Error(
-            "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat' (booleens)"
+            "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat', 'validation_oci' (booleens)"
           ),
           400
         );
@@ -573,6 +579,10 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
           new Error("Controle DAF incomplet: renseignez le moyen de paiement (critere 4)"),
           400
         );
+      }
+
+      if (validation_oci === false && !commentaireTrimmed) {
+        throw withStatusCode(new Error("Commentaire obligatoire si validation OCI = non"), 400);
       }
 
       if (paiement_immediat === false) {
@@ -600,6 +610,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
           budget_prevu: Boolean(budget_prevu),
           budget_disponible: Boolean(budget_disponible),
           paiement_immediat: Boolean(paiement_immediat),
+          validation_oci: Boolean(validation_oci),
           daf_critere4: dafCritere4Value,
           ...(validationStopRole ? { validation_stop_role: validationStopRole } : {}),
           updated_at: new Date(),
@@ -1772,6 +1783,7 @@ async function startSignature(stepId, userId, payload = {}) {
       budget_prevu,
       budget_disponible,
       paiement_immediat,
+      validation_oci,
       daf_critere4,
       conditions_paiement_mode,
       conditions_paiement_custom,
@@ -1786,10 +1798,15 @@ async function startSignature(stepId, userId, payload = {}) {
     if (validation_stop_role != null && !validationStopRole) {
       throw withStatusCode(new Error("Categorie de validation invalide (attendu: DAF, DGA, DG)"), 400);
     }
-    if (!isBoolean(budget_prevu) || !isBoolean(budget_disponible) || !isBoolean(paiement_immediat)) {
+    if (
+      !isBoolean(budget_prevu) ||
+      !isBoolean(budget_disponible) ||
+      !isBoolean(paiement_immediat) ||
+      !isBoolean(validation_oci)
+    ) {
       throw withStatusCode(
         new Error(
-          "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat' (booleens)"
+          "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat', 'validation_oci' (booleens)"
         ),
         400
       );
@@ -1800,6 +1817,9 @@ async function startSignature(stepId, userId, payload = {}) {
         new Error("Controle DAF incomplet: renseignez le moyen de paiement (critere 4)"),
         400
       );
+    }
+    if (validation_oci === false && !commentaireTrimmed) {
+      throw withStatusCode(new Error("Commentaire obligatoire si validation OCI = non"), 400);
     }
     if (paiement_immediat === false) {
       if (!commentaireTrimmed) {

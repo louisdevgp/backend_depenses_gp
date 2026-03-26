@@ -888,6 +888,7 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
   const bp = yesNoMarks(d.budget_prevu);
   const bd = yesNoMarks(d.budget_disponible);
   const pi = yesNoMarks(d.paiement_immediat);
+  const oci = yesNoMarks(d.validation_oci);
   const c4 = formatDafCritere4(d.daf_critere4);
 
   const montantBrut = Number(d.montant ?? 0);
@@ -925,6 +926,8 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
     budget_disponible_non: bd.non,
     paiement_immediat_oui: pi.oui,
     paiement_immediat_non: pi.non,
+    validation_oci_oui: oci.oui,
+    validation_oci_non: oci.non,
 
     daf_critere4_label: c4.label,
     daf_critere4_value: c4.value,
