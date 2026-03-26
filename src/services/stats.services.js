@@ -17,6 +17,12 @@ function normalizeRoleName(roleName) {
   return String(roleName).trim().toUpperCase();
 }
 
+function parseDirectionId(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function parsePeriod({ from, to } = {}) {
   const now = new Date();
 
@@ -59,7 +65,7 @@ function computeAgingBuckets(items, now = new Date()) {
 async function getAgentByUserId(userId) {
   return prisma.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
-    include: { roles: true, users: true },
+    include: { roles: true, users: true, directions: true },
   });
 }
 
@@ -73,6 +79,47 @@ async function dashboard(userId, query = {}) {
 
   const role = normalizeRoleName(agent?.roles?.name);
   const period = parsePeriod(query);
+  const globalRoles = new Set(["ADMIN", "DG", "DGA", "DAF"]);
+  const isGlobalRole = globalRoles.has(role);
+  const directionIdParam = parseDirectionId(query?.direction_id ?? query?.directionId ?? query?.direction);
+  const agentDirectionId = agent?.direction_id != null ? Number(agent.direction_id) : null;
+  const scopeDirectionId = isGlobalRole ? directionIdParam : agentDirectionId;
+  const denyAll = !isGlobalRole && !scopeDirectionId;
+  const directionScopeWhere = denyAll
+    ? { direction_id: -1 }
+    : scopeDirectionId
+      ? { direction_id: Number(scopeDirectionId) }
+      : {};
+  const paiementsScopeWhere =
+    Object.keys(directionScopeWhere).length > 0
+      ? { demandes_paiement: { is: directionScopeWhere } }
+      : {};
+
+  let directions = null;
+  if (isGlobalRole) {
+    directions = await prisma.directions.findMany({
+      where: { deleted_at: null },
+      select: { id: true, nom: true },
+      orderBy: { nom: "asc" },
+    });
+  }
+
+  let direction = null;
+  if (scopeDirectionId) {
+    if (Array.isArray(directions) && directions.length) {
+      direction = directions.find((d) => Number(d.id) === Number(scopeDirectionId)) || null;
+    } else if (agent?.directions && Number(agent.direction_id) === Number(scopeDirectionId)) {
+      direction = { id: agent.directions.id, nom: agent.directions.nom };
+    } else {
+      const found = await prisma.directions.findUnique({
+        where: { id: Number(scopeDirectionId) },
+        select: { id: true, nom: true },
+      });
+      direction = found || null;
+    }
+  } else if (!isGlobalRole && agent?.directions) {
+    direction = { id: agent.directions.id, nom: agent.directions.nom };
+  }
 
   const base = {
     role,
@@ -80,18 +127,20 @@ async function dashboard(userId, query = {}) {
       from: period.from.toISOString(),
       to: period.to.toISOString(),
     },
+    direction,
+    directions,
   };
 
   // ---------------- GLOBAL (léger, utile à tous) ----------------
   const globalDemandesAgg = await prisma.demandes_paiement.aggregate({
-    where: { deleted_at: null, created_at: { gte: period.from, lte: period.to } },
+    where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
     _count: { _all: true },
     _sum: { montant: true },
   });
 
   const globalByStatutRaw = await prisma.demandes_paiement.groupBy({
     by: ["statut"],
-    where: { deleted_at: null, created_at: { gte: period.from, lte: period.to } },
+    where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
     _count: { _all: true },
     _sum: { montant: true },
   });
@@ -105,15 +154,28 @@ async function dashboard(userId, query = {}) {
     }));
 
   // validations en attente (global) via SQL join pour éviter de charger des lignes
-  const pendingValidationsGlobal = await prisma.$queryRaw`
-    SELECT
-      COUNT(*) AS count,
-      COALESCE(SUM(dp.montant), 0) AS montant
-    FROM validation_steps vs
-    JOIN demandes_paiement dp ON dp.id = vs.demande_id
-    WHERE vs.status = 'en_attente'
-      AND dp.deleted_at IS NULL
-  `;
+  const pendingValidationsGlobal = denyAll
+    ? [{ count: 0, montant: 0 }]
+    : scopeDirectionId
+      ? await prisma.$queryRaw`
+        SELECT
+          COUNT(*) AS count,
+          COALESCE(SUM(dp.montant), 0) AS montant
+        FROM validation_steps vs
+        JOIN demandes_paiement dp ON dp.id = vs.demande_id
+        WHERE vs.status = 'en_attente'
+          AND dp.deleted_at IS NULL
+          AND dp.direction_id = ${scopeDirectionId}
+      `
+      : await prisma.$queryRaw`
+        SELECT
+          COUNT(*) AS count,
+          COALESCE(SUM(dp.montant), 0) AS montant
+        FROM validation_steps vs
+        JOIN demandes_paiement dp ON dp.id = vs.demande_id
+        WHERE vs.status = 'en_attente'
+          AND dp.deleted_at IS NULL
+      `;
 
   const pendingGlobalRow = Array.isArray(pendingValidationsGlobal) ? pendingValidationsGlobal[0] : null;
   const global = {
@@ -131,20 +193,38 @@ async function dashboard(userId, query = {}) {
   // ---------------- ADMIN (vue globale par profil) ----------------
   let admin = null;
   if (role === "ADMIN") {
-    const demandesByProfil = await prisma.$queryRaw`
-      SELECT
-        COALESCE(r.name, 'SANS_ROLE') AS role,
-        COUNT(*) AS count,
-        COALESCE(SUM(dp.montant), 0) AS montant
-      FROM demandes_paiement dp
-      JOIN agents a ON a.id = dp.demandeur_id
-      LEFT JOIN roles r ON r.id = a.role_id
-      WHERE dp.deleted_at IS NULL
-        AND dp.created_at >= ${period.from}
-        AND dp.created_at <= ${period.to}
-      GROUP BY r.name
-      ORDER BY count DESC
-    `;
+    const demandesByProfil = denyAll
+      ? []
+      : scopeDirectionId
+        ? await prisma.$queryRaw`
+          SELECT
+            COALESCE(r.name, 'SANS_ROLE') AS role,
+            COUNT(*) AS count,
+            COALESCE(SUM(dp.montant), 0) AS montant
+          FROM demandes_paiement dp
+          JOIN agents a ON a.id = dp.demandeur_id
+          LEFT JOIN roles r ON r.id = a.role_id
+          WHERE dp.deleted_at IS NULL
+            AND dp.created_at >= ${period.from}
+            AND dp.created_at <= ${period.to}
+            AND dp.direction_id = ${scopeDirectionId}
+          GROUP BY r.name
+          ORDER BY count DESC
+        `
+        : await prisma.$queryRaw`
+          SELECT
+            COALESCE(r.name, 'SANS_ROLE') AS role,
+            COUNT(*) AS count,
+            COALESCE(SUM(dp.montant), 0) AS montant
+          FROM demandes_paiement dp
+          JOIN agents a ON a.id = dp.demandeur_id
+          LEFT JOIN roles r ON r.id = a.role_id
+          WHERE dp.deleted_at IS NULL
+            AND dp.created_at >= ${period.from}
+            AND dp.created_at <= ${period.to}
+          GROUP BY r.name
+          ORDER BY count DESC
+        `;
 
     admin = {
       demandesByProfil: (Array.isArray(demandesByProfil) ? demandesByProfil : []).map((r) => ({
@@ -219,7 +299,7 @@ async function dashboard(userId, query = {}) {
 
     const where = {
       status: "en_attente",
-      demandes_paiement: { is: { deleted_at: null } },
+      demandes_paiement: { is: { deleted_at: null, ...directionScopeWhere } },
       ...(delegatedOr.length > 0
         ? { OR: [{ validator_id: Number(agent.id) }, ...delegatedOr] }
         : { validator_id: Number(agent.id) }),
@@ -259,6 +339,7 @@ async function dashboard(userId, query = {}) {
           status: { in: ["en_attente", "bloque", "rejete"] },
         },
       },
+      ...directionScopeWhere,
     };
 
     const payableAgg = await prisma.demandes_paiement.aggregate({
@@ -269,7 +350,7 @@ async function dashboard(userId, query = {}) {
 
     const paiementsByMoyen = await prisma.paiements.groupBy({
       by: ["moyen_paiement"],
-      where: { date_paiement: { gte: period.from, lte: period.to } },
+      where: { date_paiement: { gte: period.from, lte: period.to }, ...paiementsScopeWhere },
       _count: { _all: true },
       _sum: { montant: true },
       orderBy: { _sum: { montant: "desc" } },
@@ -286,8 +367,12 @@ async function dashboard(userId, query = {}) {
         montant: toNumber(r._sum?.montant),
       })),
       exceptions: {
-        payeSansReception: await prisma.demandes_paiement.count({ where: { deleted_at: null, statut: "paye" } }),
-        receptionSansPaiement: await prisma.demandes_paiement.count({ where: { deleted_at: null, statut: "receptionnee" } }),
+        payeSansReception: await prisma.demandes_paiement.count({
+          where: { deleted_at: null, statut: "paye", ...directionScopeWhere },
+        }),
+        receptionSansPaiement: await prisma.demandes_paiement.count({
+          where: { deleted_at: null, statut: "receptionnee", ...directionScopeWhere },
+        }),
       },
     };
   }
@@ -297,20 +382,20 @@ async function dashboard(userId, query = {}) {
   let exec = null;
   if (isExec) {
     const demandesAgg = await prisma.demandes_paiement.aggregate({
-      where: { deleted_at: null, created_at: { gte: period.from, lte: period.to } },
+      where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
       _count: { _all: true },
       _sum: { montant: true },
     });
 
     const paiementsAgg = await prisma.paiements.aggregate({
-      where: { date_paiement: { gte: period.from, lte: period.to } },
+      where: { date_paiement: { gte: period.from, lte: period.to }, ...paiementsScopeWhere },
       _count: { _all: true },
       _sum: { montant: true },
     });
 
     const topBeneficiaires = await prisma.demandes_paiement.groupBy({
       by: ["beneficiaire"],
-      where: { deleted_at: null, created_at: { gte: period.from, lte: period.to } },
+      where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
       _count: { _all: true },
       _sum: { montant: true },
       orderBy: { _sum: { montant: "desc" } },
