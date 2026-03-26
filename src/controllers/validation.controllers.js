@@ -140,7 +140,7 @@ exports.downloadSignature = async (req, res) => {
     let signatureUrl = step.signature_url;
     if (!signatureUrl && step.signature_request_id) {
       try {
-        const wait = await firma.waitForProofUrl(step.signature_request_id, { attempts: 4, delayMs: 900 });
+        const wait = await firma.waitForProofUrl(step.signature_request_id, { attempts: 12, delayMs: 1500 });
         signatureUrl = wait?.url || "";
         if (signatureUrl) {
           await prisma.validation_steps.update({
@@ -154,7 +154,10 @@ exports.downloadSignature = async (req, res) => {
     }
 
     if (!signatureUrl) {
-      return res.status(409).json({ success: false, message: "Document de preuve indisponible" });
+      return res.status(409).json({
+        success: false,
+        message: "Document en cours de gÃ©nÃ©ration. RÃ©essayez dans quelques instants.",
+      });
     }
 
     const file = await firma.downloadSignedDocument(signatureUrl);
