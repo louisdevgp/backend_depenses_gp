@@ -477,11 +477,16 @@ async function resolveDemandeurUserIdByDemandeId(demandeId) {
   return d?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null;
 }
 
-async function resolveRoleUserId(roleName) {
+async function resolveRoleUserId(roleName, directionId = null) {
   const role = await prisma.roles.findFirst({ where: { name: String(roleName).toUpperCase(), is_active: true } });
   if (!role) return null;
+  const where = {
+    role_id: role.id,
+    deleted_at: null,
+    ...(directionId != null ? { direction_id: Number(directionId) } : {}),
+  };
   const agent = await prisma.agents.findFirst({
-    where: { role_id: role.id, deleted_at: null },
+    where,
     select: { users: { select: { id: true } } },
     orderBy: { id: "asc" },
   });
@@ -670,6 +675,7 @@ async function createReception(payload, userAgentId, options = {}) {
       reception,
       demandeurUserId: demandeurUser?.id || null,
       demandeId: Number(demande.id),
+      demandeDirectionId: demande?.direction_id ?? null,
       nextStatut,
       paiementId: paiement ? paiement.id : null,
       autoVisaDirecteur,
@@ -693,7 +699,7 @@ async function createReception(payload, userAgentId, options = {}) {
     }
 
     if (result?.autoVisaDirecteur) {
-      const dafUserId = await resolveRoleUserId("DAF");
+      const dafUserId = await resolveRoleUserId("DAF", result?.demandeDirectionId);
       if (dafUserId) {
         await notifications.createNotification({
           user_id: dafUserId,
@@ -1404,7 +1410,7 @@ async function visaDirecteur(
   try {
     const actorUserId = await findUserIdByAgentId(directeurAgentId);
     const demandeurUserId = await resolveDemandeurUserIdByDemandeId(existing.demande_id);
-    const dafUserId = await resolveRoleUserId("DAF");
+    const dafUserId = await resolveRoleUserId("DAF", demandeOrg?.direction_id);
 
     if (demandeurUserId && Number(demandeurUserId) !== Number(actorUserId)) {
       await notifications.createNotification({
