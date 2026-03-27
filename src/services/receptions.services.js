@@ -1219,7 +1219,19 @@ async function listReceptions(query = {}, authUser = null) {
   }
 
   const scopeWhere = await receptionScopeWhereForUser(authUser);
-  const scopedWhere = scopeWhere ? { AND: [where, scopeWhere] } : where;
+  const agent = await getAgentFromAuthUser(authUser);
+  const tokenRoles = Array.isArray(authUser?.roles) ? authUser.roles : [];
+  const roleSet = new Set(tokenRoles.map(normalizeRoleName).filter(Boolean));
+  const isAdmin = roleSet.has("ADMIN");
+  const directionWhere =
+    !isAdmin && agent?.direction_id
+      ? { demandes_paiement: { is: { direction_id: Number(agent.direction_id) } } }
+      : null;
+  const scopedWhere = scopeWhere
+    ? { AND: [where, scopeWhere, ...(directionWhere ? [directionWhere] : [])] }
+    : directionWhere
+      ? { AND: [where, directionWhere] }
+      : where;
 
   const rows = await prisma.receptions.findMany({
     where: scopedWhere,
