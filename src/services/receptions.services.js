@@ -477,20 +477,16 @@ async function resolveDemandeurUserIdByDemandeId(demandeId) {
   return d?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null;
 }
 
-async function resolveRoleUserId(roleName, directionId = null) {
+async function resolveRoleUserIds(roleName) {
   const role = await prisma.roles.findFirst({ where: { name: String(roleName).toUpperCase(), is_active: true } });
-  if (!role) return null;
-  const where = {
-    role_id: role.id,
-    deleted_at: null,
-    ...(directionId != null ? { direction_id: Number(directionId) } : {}),
-  };
-  const agent = await prisma.agents.findFirst({
-    where,
+  if (!role) return [];
+  const agents = await prisma.agents.findMany({
+    where: { role_id: role.id, deleted_at: null },
     select: { users: { select: { id: true } } },
     orderBy: { id: "asc" },
   });
-  return agent?.users?.id || null;
+  const ids = agents.map((a) => a?.users?.id).filter(Boolean);
+  return Array.from(new Set(ids));
 }
 
 async function createReception(payload, userAgentId, options = {}) {
@@ -699,8 +695,8 @@ async function createReception(payload, userAgentId, options = {}) {
     }
 
     if (result?.autoVisaDirecteur) {
-      const dafUserId = await resolveRoleUserId("DAF", result?.demandeDirectionId);
-      if (dafUserId) {
+      const dafUserIds = await resolveRoleUserIds("DAF");
+      for (const dafUserId of dafUserIds) {
         await notifications.createNotification({
           user_id: dafUserId,
           type: "reception_visa_pending",
@@ -1229,8 +1225,9 @@ async function listReceptions(query = {}, authUser = null) {
   const tokenRoles = Array.isArray(authUser?.roles) ? authUser.roles : [];
   const roleSet = new Set(tokenRoles.map(normalizeRoleName).filter(Boolean));
   const isAdmin = roleSet.has("ADMIN");
+  const isDaf = roleSet.has("DAF");
   const fallbackDirectionWhere =
-    !isAdmin && scopeWhere == null && agent?.direction_id
+    !isAdmin && !isDaf && scopeWhere == null && agent?.direction_id
       ? { demandes_paiement: { is: { direction_id: Number(agent.direction_id) } } }
       : null;
 
@@ -1410,7 +1407,7 @@ async function visaDirecteur(
   try {
     const actorUserId = await findUserIdByAgentId(directeurAgentId);
     const demandeurUserId = await resolveDemandeurUserIdByDemandeId(existing.demande_id);
-    const dafUserId = await resolveRoleUserId("DAF", demandeOrg?.direction_id);
+    const dafUserIds = await resolveRoleUserIds("DAF");
 
     if (demandeurUserId && Number(demandeurUserId) !== Number(actorUserId)) {
       await notifications.createNotification({
@@ -1423,15 +1420,17 @@ async function visaDirecteur(
       });
     }
 
-    if (dafUserId && Number(dafUserId) !== Number(actorUserId)) {
-      await notifications.createNotification({
-        user_id: dafUserId,
-        type: "reception_visa_pending",
-        demande_id: existing.demande_id,
-        message: "Une réception attend votre Visa DAF.",
-        meta: { receptionId: updated.id, receptionUuid: updated.uuid },
-        sendEmailNow: true,
-      });
+    for (const dafUserId of dafUserIds) {
+      if (dafUserId && Number(dafUserId) !== Number(actorUserId)) {
+        await notifications.createNotification({
+          user_id: dafUserId,
+          type: "reception_visa_pending",
+          demande_id: existing.demande_id,
+          message: "Une réception attend votre Visa DAF.",
+          meta: { receptionId: updated.id, receptionUuid: updated.uuid },
+          sendEmailNow: true,
+        });
+      }
     }
   } catch {
     // ignore
