@@ -618,6 +618,20 @@ async function createReception(payload, userAgentId, options = {}) {
       throw err;
     }
 
+    const statutLower = String(demande?.statut || "").toLowerCase();
+    const isPaidStatut = ["paye", "payee"].includes(statutLower);
+    if (isPaidStatut) {
+      const anyReception = await tx.receptions.findFirst({
+        where: { demande_id: Number(demande.id) },
+        select: { id: true },
+      });
+      if (anyReception) {
+        const err = new Error("Réception déjà créée pour cette demande");
+        err.statusCode = 409;
+        throw err;
+      }
+    }
+
     const existingReception = await tx.receptions.findFirst({
       where: { demande_id: Number(demande.id), phase },
       select: { id: true },
