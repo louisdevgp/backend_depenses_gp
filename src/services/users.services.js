@@ -2,6 +2,8 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { v4: uuidv4 } = require("uuid");
 const { hashPassword } = require("../utils/password");
+const { sendMail } = require("../config/mailer");
+const { resolveFrontendBaseUrl } = require("../utils/frontendUrl");
 const permissionMap = require("../config/permissions");
 const {
   getUserPermissionProfile,
@@ -57,6 +59,41 @@ function generateTemporaryPassword() {
     out += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
   return out;
+}
+
+function buildAccessEmail({ email, nom, prenom, temporaryPassword }) {
+  const front = resolveFrontendBaseUrl().replace(/\/+$/, "");
+  const loginUrl = `${front}/signin`;
+  const displayName = [prenom, nom].filter(Boolean).join(" ").trim();
+  const greeting = displayName ? `Bonjour ${displayName},` : "Bonjour,";
+
+  const subject = "E-Depenses - Vos acces";
+  const lines = [
+    greeting,
+    "",
+    "Votre compte a ete cree avec succes.",
+    `Identifiant : ${email}`,
+    `Mot de passe temporaire : ${temporaryPassword}`,
+    "",
+    `Connexion : ${loginUrl}`,
+    "",
+    "Pour des raisons de securite, merci de changer votre mot de passe a la premiere connexion.",
+  ];
+  const text = lines.join("\n");
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height:1.5;">
+      <p>${greeting}</p>
+      <p>Votre compte a ete cree avec succes.</p>
+      <p><strong>Identifiant :</strong> ${email}<br />
+         <strong>Mot de passe temporaire :</strong> ${temporaryPassword}</p>
+      <p><a href="${loginUrl}">Se connecter</a></p>
+      <p>Pour des raisons de securite, merci de changer votre mot de passe a la premiere connexion.</p>
+      <p style="color:#777;margin-top:16px">— E-Depenses</p>
+    </div>
+  `;
+
+  return { subject, text, html };
 }
 
 function idWhere(idOrUuid) {
@@ -253,6 +290,19 @@ async function create(payload, performedByUserId) {
       last_login_at: null,
     },
   });
+
+  // Send access email (non-blocking).
+  try {
+    const mail = buildAccessEmail({ email, nom, prenom, temporaryPassword });
+    const res = await sendMail({ to: email, subject: mail.subject, text: mail.text, html: mail.html });
+    if (res?.skipped) {
+      // eslint-disable-next-line no-console
+      console.warn("[users] access email skipped:", res.reason || "skipped");
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn("[users] access email failed:", String(e?.message || e));
+  }
 
   return {
     id: created.id,
