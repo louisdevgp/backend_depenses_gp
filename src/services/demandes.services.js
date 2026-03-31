@@ -1196,6 +1196,7 @@ exports.listDemandes = async (user, query) => {
 
   const agent = await getAgentFromUser(user);
   const roles = userEffectiveRoles(user, agent);
+  const canViewDirectionByEntity = hasPermission(user, "VIEW_GLOBAL_DASH_BY_ENTITY");
   const accessWhere = buildDemandeAccessWhere({ user, agent });
   const where = accessWhere ? { AND: [whereBase, accessWhere] } : whereBase;
 
@@ -1223,9 +1224,27 @@ exports.listDemandes = async (user, query) => {
         if (query.direction_id) where.direction_id = Number(query.direction_id);
         break;
       case "GLOBAL":
-        if (!hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"])) {
-          // keep scoped where
+        if (hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"])) {
+          // full global view
+          break;
         }
+        if (hasAnyRole(roles, ["DIRECTEUR"]) && agent?.direction_id) {
+          where.direction_id = Number(agent.direction_id);
+          break;
+        }
+        if (hasAnyRole(roles, ["RESPONSABLE"])) {
+          if (canViewDirectionByEntity && agent?.direction_id) {
+            where.direction_id = Number(agent.direction_id);
+          } else if (agent?.departement_id) {
+            where.departement_id = Number(agent.departement_id);
+          } else if (agent?.service_id) {
+            where.service_id = Number(agent.service_id);
+          } else if (agent?.id) {
+            where.demandeur_id = Number(agent.id);
+          }
+          break;
+        }
+        if (agent?.id) where.demandeur_id = Number(agent.id);
         break;
       default:
         break;

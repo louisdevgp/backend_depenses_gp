@@ -62,6 +62,11 @@ module.exports = {
   // Dashboard
   [P.DASHBOARD_VIEW_SELF]: { module: "Dashboard", appliesTo: ["menu", "action"] },
   [P.DASHBOARD_VIEW_ALL]: { module: "Dashboard", appliesTo: ["menu", "action"] },
+  [P.VIEW_GLOBAL_DASH_BY_ENTITY]: {
+    module: "Dashboard",
+    appliesTo: ["menu", "action"],
+    description: "Etend la vue globale au perimetre directionnel (par entite).",
+  },
 
   // Bon de commande
   [P.BON_COMMANDE_CREATE]: { module: "BonCommande", appliesTo: ["action"] },
