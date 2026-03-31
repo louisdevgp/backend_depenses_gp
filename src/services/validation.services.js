@@ -497,6 +497,7 @@ async function getPendingForUser(userId) {
       demandes_paiement: {
         include: {
           conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
+          agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
       },
       agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
@@ -1234,6 +1235,7 @@ async function getByUuid(uuid) {
         include: {
           documents: true,
           conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
+          agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
       },
       agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
