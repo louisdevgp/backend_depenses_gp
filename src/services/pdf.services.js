@@ -504,19 +504,28 @@ function signatureUrlToDataUrl(signatureUrl) {
   }
 }
 
-function signatureCellHtml({ name, nameLines, at, signatureDataUrl }) {
+function signatureCellHtml({ name, nameLines, at, ref, qrDataUrl, signatureDataUrl }) {
   const safeLines = Array.isArray(nameLines)
     ? nameLines.map((x) => (x != null ? escapeHtml(String(x)) : "")).filter(Boolean)
     : [name ? escapeHtml(String(name)) : ""].filter(Boolean);
-  const metaParts = [...safeLines, at ? escapeHtml(String(at)) : ""].filter(Boolean);
+  const metaParts = [
+    ...safeLines,
+    at ? escapeHtml(String(at)) : "",
+    ref ? escapeHtml(String(ref)) : "",
+  ].filter(Boolean);
   const meta = metaParts.join("<br/>");
   const img = signatureDataUrl
     ? `<div style="height:44px;display:flex;align-items:center;justify-content:center;margin-bottom:4px;">
          <img src="${escapeHtml(signatureDataUrl)}" alt="signature" style="max-width:100%;max-height:44px;object-fit:contain;" />
        </div>`
     : "";
+  const qr = qrDataUrl
+    ? `<div style="margin-top:4px;display:flex;align-items:center;justify-content:center;">
+         <img src="${escapeHtml(qrDataUrl)}" alt="qr" style="width:85px;height:85px;object-fit:contain;" />
+       </div>`
+    : "";
   const metaDiv = meta ? `<div style="font-size:10px;line-height:1.2;color:#111;">${meta}</div>` : "";
-  return `${img}${metaDiv}`;
+  return `${img}${metaDiv}${qr}`;
 }
 
 async function renderHtmlToPdfBuffer(html) {
@@ -947,26 +956,62 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
     const dg = pick("DG");
     const dga = pick("DGA");
     const daf = pick("DAF");
+    const signatureRef = (s) => {
+      if (!s) return null;
+      const ref = s.signature_request_id || s.signature_request_user_id || null;
+      return ref ? `ID: ${ref}` : null;
+    };
+    const signatureAt = (s) => {
+      if (!s?.validated_at) return null;
+      return `Date: ${asDateTime(s.validated_at)}`;
+    };
+    const signatureQrDataUrl = async (s) => {
+      if (!s?.uuid || !s?.validated_at) return null;
+      const validatedIso = asIsoDateTime(s.validated_at);
+      if (!validatedIso) return null;
+      const tokenBase = `GP|validation|${s.uuid}|${validatedIso}`;
+      const sig = hmacSignature(tokenBase);
+      if (!sig) return null;
+      const token = `${tokenBase}|${sig}`;
+      const qrText = buildScanUrl(token, req) || token;
+      const qrBuf = await qrPngBuffer(qrText);
+      return `data:image/png;base64,${qrBuf.toString("base64")}`;
+    };
 
-    // On n'affiche plus les signatures électroniques ni les dates, seulement les noms
+    const [dafQr, dgaQr, dgQr] = await Promise.all([
+      daf?.validated_by_id ? signatureQrDataUrl(daf) : Promise.resolve(null),
+      dga?.validated_by_id ? signatureQrDataUrl(dga) : Promise.resolve(null),
+      dg?.validated_by_id ? signatureQrDataUrl(dg) : Promise.resolve(null),
+    ]);
+
+    // Noms + date + identifiant + QR de validation
     html = injectDemandeSignataires(html, {
       // Demandeur: affiché dès la soumission (création)
       demandeur: signatureCellHtml({ name: demandeurName, signatureDataUrl: null }),
       daf: daf?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(daf),
+            at: signatureAt(daf),
+            ref: signatureRef(daf),
+            qrDataUrl: dafQr,
             signatureDataUrl: null, // Plus de signature
           })
         : "",
       dga: dga?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(dga),
+            at: signatureAt(dga),
+            ref: signatureRef(dga),
+            qrDataUrl: dgaQr,
             signatureDataUrl: null, // Plus de signature
           })
         : "",
       dg: dg?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(dg),
+            at: signatureAt(dg),
+            ref: signatureRef(dg),
+            qrDataUrl: dgQr,
             signatureDataUrl: null, // Plus de signature
           })
         : "",

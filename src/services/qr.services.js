@@ -64,7 +64,7 @@ function parseQrToken(token) {
   const [prefix, type, uuid, finalizedIso, sig] = parts;
   if (prefix !== "GP") return null;
   if (!type || !uuid || !finalizedIso || !sig) return null;
-  if (type !== "demande" && type !== "reception") return null;
+  if (type !== "demande" && type !== "reception" && type !== "validation") return null;
 
   const dt = new Date(finalizedIso);
   if (Number.isNaN(dt.getTime())) return null;
@@ -144,6 +144,8 @@ async function verifyToken({ token, user = null }) {
           role: s.role_name,
           status: s.status,
           validated_at: s.validated_at ? asIsoDateTime(s.validated_at) : null,
+          signature_id: s.signature_request_id || s.signature_request_user_id || null,
+          signature_status: s.signature_status || null,
           validated_by: s.validated_by_id
             ? {
                 id: s.validated_by_id,
@@ -179,6 +181,69 @@ async function verifyToken({ token, user = null }) {
           }
         : { statut: demande.statut },
       approvals,
+      scope: showDetails ? "private" : "public",
+    };
+  }
+
+  if (parsed.type === "validation") {
+    const step = await prisma.validation_steps.findFirst({
+      where: { uuid: parsed.uuid },
+      include: {
+        demandes_paiement: {
+          include: {
+            agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+          },
+        },
+        agents_validation_steps_validated_by_idToagents: { include: { users: true } },
+      },
+    });
+
+    if (!step) {
+      return { valid: false, reason: "NOT_FOUND", type: parsed.type, uuid: parsed.uuid };
+    }
+
+    const validatedIso = step.validated_at ? asIsoDateTime(step.validated_at) : "";
+    if (!validatedIso || String(parsed.finalizedIso) !== String(validatedIso)) {
+      return { valid: false, reason: "MISMATCH_VALIDATED_AT", type: parsed.type, uuid: parsed.uuid };
+    }
+
+    const demande = step.demandes_paiement || null;
+    const showDetails = demande ? canViewDemandeDetails({ user, demande }) : false;
+
+    const validatedBy = step.validated_by_id
+      ? {
+          id: step.validated_by_id,
+          nom: step.agents_validation_steps_validated_by_idToagents?.nom || null,
+          prenom: step.agents_validation_steps_validated_by_idToagents?.prenom || null,
+          email: step.agents_validation_steps_validated_by_idToagents?.users?.email || null,
+        }
+      : null;
+
+    return {
+      valid: true,
+      type: parsed.type,
+      uuid: parsed.uuid,
+      isFinal: true,
+      finalizedAt: validatedIso,
+      validatedAt: validatedIso,
+      ref: String(parsed.sig).slice(0, 16),
+      role: step.role_name,
+      status: step.status,
+      signature_id: step.signature_request_id || step.signature_request_user_id || null,
+      signature_status: step.signature_status || null,
+      validated_by: showDetails ? validatedBy : null,
+      document: demande
+        ? showDetails
+          ? {
+              uuid: demande.uuid,
+              motif: demande.motif,
+              montant: demande.montant,
+              beneficiaire: demande.beneficiaire,
+              statut: demande.statut,
+              created_at: asIsoDateTime(demande.created_at),
+            }
+          : { statut: demande.statut, uuid: demande.uuid }
+        : null,
       scope: showDetails ? "private" : "public",
     };
   }
