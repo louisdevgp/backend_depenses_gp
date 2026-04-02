@@ -1,5 +1,5 @@
 const prisma = require("../config/prisma");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 
 async function createSignatureSession({
   entity_type,
@@ -54,3 +54,4 @@ module.exports = {
   getSignatureSessionById,
   updateSignatureSession,
 };
+

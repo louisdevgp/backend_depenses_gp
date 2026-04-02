@@ -1,5 +1,5 @@
 const prisma = require("../config/prisma");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 
 const VALID_ROLES = ["ADMIN", "DEMANDEUR", "RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE"];
 
@@ -147,3 +147,4 @@ exports.reorderSteps = async (flowId, { items }) => {
     });
   });
 };
+

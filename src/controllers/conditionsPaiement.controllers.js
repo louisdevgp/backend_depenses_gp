@@ -1,4 +1,4 @@
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const prisma = require("../config/prisma");
 const service = require("../services/conditionsPaiement.services");
 
@@ -133,3 +133,4 @@ exports.remove = async (req, res) => {
     res.status(500).json({ success: false, message: "Erreur delete condition", error: e.message });
   }
 };
+

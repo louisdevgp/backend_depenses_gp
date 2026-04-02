@@ -25,7 +25,8 @@ exports.getOne = async (req, res) => {
 exports.create = async (req, res) => {
   const {nom, code } = req.body;
   if (!nom) return res.status(400).json({ success: false, message: "nom required" });
-    const uuid = require("uuid").v4();
+  
+  const uuid = require("crypto").randomUUID();
 
   const row = await prisma.directions.create({
     data: { uuid, nom, code: code || null },
@@ -64,3 +65,4 @@ exports.remove = async (req, res) => {
 
   res.json({ success: true, message: "Deleted" });
 };
+

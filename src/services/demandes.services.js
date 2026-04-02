@@ -1,6 +1,6 @@
-ï»¿
+
 const prisma = require("../config/prisma");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const notifications = require("./notifications.services");
 const PDFDocument = require("pdfkit");
 const firma = require("./firma.services");
@@ -979,9 +979,9 @@ async function resolveValidatorForRole(tx, roleName, demandeOrg) {
   const baseWhere = {
     deleted_at: null,
     OR: [
-      // rÃ´le principal (agents.role_id -> roles.name)
+      // rôle principal (agents.role_id -> roles.name)
       { roles: { is: { name: role } } },
-      // rÃ´le secondaire (users.user_roles)
+      // rôle secondaire (users.user_roles)
       { users: { user_roles: { some: { roles: { name: role } } } } },
     ],
   };
@@ -1040,7 +1040,7 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
       throw new Error(`Aucun validateur trouve pour le role ${role}`);
     }
 
-    // Ne pas dÃ©dupliquer: un mÃªme agent peut valider plusieurs rÃ´les (ex: DIRECTEUR + DAF)
+    // Ne pas dédupliquer: un même agent peut valider plusieurs rôles (ex: DIRECTEUR + DAF)
     const row = await tx.validation_steps.create({
       data: {
         uuid: uuidv4(),
@@ -1633,7 +1633,7 @@ exports.update = async (user, idOrUuid, payload) => {
             user_id: uid,
             type: "demande_updated",
             demande_id: updated.id,
-            message: `La demande${label} a Ã©tÃ© modifiÃ©e.`,
+            message: `La demande${label} a été modifiée.`,
             meta: { demandeUuid, action: "updated" },
             sendEmailNow: true,
           })
@@ -1682,7 +1682,7 @@ exports.softDelete = async (user, idOrUuid) => {
             user_id: uid,
             type: "demande_cancelled",
             demande_id: demande.id,
-            message: `La demande${label} a Ã©tÃ© annulÃ©e.`,
+            message: `La demande${label} a été annulée.`,
             meta: { demandeUuid, action: "cancelled" },
             sendEmailNow: true,
           })
@@ -1733,7 +1733,7 @@ exports.closeDemande = async (user, idOrUuid) => {
             user_id: uid,
             type: "demande_closed",
             demande_id: demande.id,
-            message: `La demande${label} a Ã©tÃ© clÃ´turÃ©e.`,
+            message: `La demande${label} a été clôturée.`,
             meta: { demandeUuid, action: "closed" },
             sendEmailNow: true,
           })
@@ -1746,3 +1746,4 @@ exports.closeDemande = async (user, idOrUuid) => {
 
   return updated;
 };
+

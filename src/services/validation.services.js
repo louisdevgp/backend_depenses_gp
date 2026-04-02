@@ -1,7 +1,7 @@
-Ôªøconst prisma = require("../config/prisma");
+const prisma = require("../config/prisma");
 const notifications = require("./notifications.services");
 const auditLogs = require("./auditLogs.services");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const realtime = require("../realtime");
 const PDFDocument = require("pdfkit");
 const firma = require("./firma.services");
@@ -187,12 +187,12 @@ function buildValidationSignaturePdf({ demande, step, signer }) {
     const devise = demande?.devise ? String(demande.devise) : "FCFA";
 
     const rows = [
-      ["R√©f√©rence demande", demande?.uuid || demande?.id || "-"],
+      ["RÈfÈrence demande", demande?.uuid || demande?.id || "-"],
       ["Motif", demande?.motif || "-"],
-      ["B√©n√©ficiaire", demande?.beneficiaire || "-"],
+      ["BÈnÈficiaire", demande?.beneficiaire || "-"],
       ["Montant", montant != null ? `${formatMoneyValue(montant)} ${devise}` : "-"],
       ["Demandeur", agentDisplayName(demande?.agents_demandes_paiement_demandeur_idToagents)],
-      ["R√¥le validation", step?.role_name || "-"],
+      ["RÙle validation", step?.role_name || "-"],
       ["Validateur", agentDisplayName(signer)],
       ["Date", formatDateTime(new Date())],
     ];
@@ -204,13 +204,13 @@ function buildValidationSignaturePdf({ demande, step, signer }) {
 
     doc.moveDown(2);
     doc.font("Helvetica").fontSize(9).text(
-      "Ce document sert uniquement de preuve de signature √©lectronique pour la validation."
+      "Ce document sert uniquement de preuve de signature Èlectronique pour la validation."
     );
 
-    // Zones visuelles pour la signature (rep√®re)
+    // Zones visuelles pour la signature (repËre)
     const pageHeight = doc.page.height;
     const sigHeight = 50;
-    const sigY = 140; // position depuis le bas (coordonn√©es Firma)
+    const sigY = 140; // position depuis le bas (coordonnÈes Firma)
     const sigTop = pageHeight - sigY - sigHeight;
 
     doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
@@ -408,10 +408,10 @@ async function getAgentFromUserId(userId) {
 async function canActByDelegation(tx, step, agent) {
   // agent peut agir si:
   // - il est validator_id
-  // - OU il a une d√©l√©gation active du principal validator_id sur le m√™me role
+  // - OU il a une dÈlÈgation active du principal validator_id sur le mÍme role
   if (Number(step.validator_id) === Number(agent.id)) return true;
 
-  // Scope (port√©e): la d√©l√©gation doit couvrir la demande (GLOBAL, ou DIRECTION/DEPARTEMENT/SERVICE correspondants)
+  // Scope (portÈe): la dÈlÈgation doit couvrir la demande (GLOBAL, ou DIRECTION/DEPARTEMENT/SERVICE correspondants)
   const demandeOrg = await tx.demandes_paiement.findUnique({
     where: { id: Number(step.demande_id) },
     select: { direction_id: true, departement_id: true, service_id: true },
@@ -462,7 +462,7 @@ async function getPendingForUser(userId) {
   const agent = await getAgentFromUserId(userId);
   if (!agent) return [];
 
-  // ‚úÖ visibilit√©: steps "en_attente" o√π il est validator OU o√π il a une d√©l√©gation active
+  // ? visibilitÈ: steps "en_attente" o˘ il est validator OU o˘ il a une dÈlÈgation active
   const now = new Date();
   const dels = await prisma.delegations.findMany({
     where: {
@@ -510,7 +510,7 @@ async function getPendingForUser(userId) {
 
 async function approveStep(stepId, userId, commentaire, signatureDataUrl = null, extra = {}) {
   const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
-  // On ignore la signatureDataUrl car on ne g√®re plus les signatures √©lectroniques
+  // On ignore la signatureDataUrl car on ne gËre plus les signatures Èlectroniques
 
   const result = await prisma.$transaction(async (tx) => {
     const step = await tx.validation_steps.findUnique({
@@ -524,7 +524,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       },
     });
 
-    if (!step || step.status !== "en_attente") throw new Error("√âtape invalide");
+    if (!step || step.status !== "en_attente") throw new Error("…tape invalide");
 
     const roleUpper = String(step.role_name || "").toUpperCase();
 
@@ -532,13 +532,13 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       where: { user_id: Number(userId), deleted_at: null },
       include: { roles: true, users: true },
     });
-    if (!agent || !agent.roles?.name) throw new Error("Non autoris√©");
+    if (!agent || !agent.roles?.name) throw new Error("Non autorisÈ");
 
-    // ‚úÖ autorisation : validator_id OU d√©l√©gation active
+    // ? autorisation : validator_id OU dÈlÈgation active
     const ok = await canActByDelegation(tx, step, agent);
-    if (!ok) throw new Error("Non autoris√©");
+    if (!ok) throw new Error("Non autorisÈ");
 
-    // ‚úÖ Contr√¥le DAF: champs obligatoires au moment de la validation DAF
+    // ? ContrÙle DAF: champs obligatoires au moment de la validation DAF
     if (roleUpper === "DAF") {
       const {
         budget_prevu,
@@ -701,7 +701,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       }
     }
 
-    // Mise √† jour de l'√©tape de validation sans signature
+    // Mise ‡ jour de l'Ètape de validation sans signature
     await tx.validation_steps.update({
       where: { id: step.id },
       data: {
@@ -727,7 +727,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         where: { demande_id: step.demande_id, level: { gt: step.level } },
       });
     } else {
-      // ‚úÖ d√©bloquer le next step
+      // ? dÈbloquer le next step
       next = await tx.validation_steps.findFirst({
         where: { demande_id: step.demande_id, level: step.level + 1 },
       });
@@ -821,7 +821,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         user_id: result.demandeurUserId,
         type: "validation_step_approved",
         demande_id: result.demandeId,
-        message: `Votre demande a √©t√© valid√©e (${result.role}). Statut: ${result.stage?.statut}`,
+        message: `Votre demande a ÈtÈ validÈe (${result.role}). Statut: ${result.stage?.statut}`,
         meta: { stepId: result.stepId, role: result.role, demandeUuid: result.demandeUuid, validationUuid: result.validationUuid },
         sendEmailNow: true,
       });
@@ -838,7 +838,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       });
     }
 
-    // ‚úÖ notifier aussi les d√©l√©gu√©s actifs du prochain validateur (m√™me role)
+    // ? notifier aussi les dÈlÈguÈs actifs du prochain validateur (mÍme role)
     if (result?.nextValidatorAgentId && result?.nextRole) {
       const now = new Date();
       const candidateScopes = candidateScopesForDemandeOrg(result?.demandeOrg);
@@ -869,7 +869,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
             user_id: uid,
             type: "validation_pending",
             demande_id: result.demandeId,
-            message: `Une demande est en attente de validation (d√©l√©gation: ${result.nextRole}).`,
+            message: `Une demande est en attente de validation (dÈlÈgation: ${result.nextRole}).`,
             meta: { stepId: result.nextStepId, role: result.nextRole, delegated: true, demandeUuid: result.demandeUuid, validationUuid: result.nextStepUuid },
             sendEmailNow: true,
           });
@@ -877,7 +877,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       }
     }
 
-    // ‚úÖ Demande enti√®rement approuv√©e => informer les payeurs (DAF/COMPTABLE)
+    // ? Demande entiËrement approuvÈe => informer les payeurs (DAF/COMPTABLE)
     if (result?.stage?.statut === "approuvee" && result?.demandeId) {
       const payeurUserIds = await getPayeurUserIds();
       if (payeurUserIds.length > 0) {
@@ -889,9 +889,9 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         const demandeUuid = demande?.uuid || result.demandeUuid || null;
         const labelMontant = demande?.montant != null ? String(demande.montant) : "";
         const devise = demande?.devise ? String(demande.devise) : "";
-        const message = `Une demande est maintenant approuv√©e et peut √™tre pay√©e.${demandeUuid ? ` UUID: ${demandeUuid}.` : ""}${
+        const message = `Une demande est maintenant approuvÈe et peut Ítre payÈe.${demandeUuid ? ` UUID: ${demandeUuid}.` : ""}${
           demande?.motif ? ` Motif: ${String(demande.motif)}` : ""
-        }${labelMontant ? ` ‚Äî Montant: ${labelMontant}${devise ? ` ${devise}` : ""}` : ""}`;
+        }${labelMontant ? ` ó Montant: ${labelMontant}${devise ? ` ${devise}` : ""}` : ""}`;
 
         for (const uid of payeurUserIds) {
           if (uid === result.demandeurUserId) continue;
@@ -938,16 +938,16 @@ async function rejectStep(stepId, userId, commentaire) {
       },
     });
 
-    if (!step || step.status !== "en_attente") throw new Error("√âtape invalide");
+    if (!step || step.status !== "en_attente") throw new Error("…tape invalide");
 
     const agent = await tx.agents.findFirst({
       where: { user_id: Number(userId), deleted_at: null },
       include: { roles: true, users: true },
     });
-    if (!agent || !agent.roles?.name) throw new Error("Non autoris√©");
+    if (!agent || !agent.roles?.name) throw new Error("Non autorisÈ");
 
     const ok = await canActByDelegation(tx, step, agent);
-    if (!ok) throw new Error("Non autoris√©");
+    if (!ok) throw new Error("Non autorisÈ");
 
     await tx.validation_steps.update({
       where: { id: step.id },
@@ -1011,7 +1011,7 @@ async function rejectStep(stepId, userId, commentaire) {
         user_id: result.demandeurUserId,
         type: "validation_rejected",
         demande_id: result.demandeId,
-        message: `Votre demande a √©t√© rejet√©e par ${result.role}. Motif: ${result.commentaire}`,
+        message: `Votre demande a ÈtÈ rejetÈe par ${result.role}. Motif: ${result.commentaire}`,
         meta: { stepId: result.stepId, role: result.role, demandeUuid: result.demandeUuid, validationUuid: result.validationUuid },
         sendEmailNow: true,
       });
@@ -1045,20 +1045,20 @@ async function returnForModification(stepId, userId, commentaire) {
       },
     });
 
-    if (!step || step.status !== "en_attente") throw withStatusCode(new Error("√âtape invalide"), 400);
+    if (!step || step.status !== "en_attente") throw withStatusCode(new Error("…tape invalide"), 400);
     const stepLevel = Number(step.level || 0);
     if (!stepLevel) {
-      throw withStatusCode(new Error("√âtape invalide"), 400);
+      throw withStatusCode(new Error("…tape invalide"), 400);
     }
 
     const agent = await tx.agents.findFirst({
       where: { user_id: Number(userId), deleted_at: null },
       include: { roles: true, users: true },
     });
-    if (!agent || !agent.roles?.name) throw withStatusCode(new Error("Non autoris√©"), 403);
+    if (!agent || !agent.roles?.name) throw withStatusCode(new Error("Non autorisÈ"), 403);
 
     const ok = await canActByDelegation(tx, step, agent);
-    if (!ok) throw withStatusCode(new Error("Non autoris√©"), 403);
+    if (!ok) throw withStatusCode(new Error("Non autorisÈ"), 403);
 
     const previous =
       stepLevel > 1
@@ -1066,9 +1066,9 @@ async function returnForModification(stepId, userId, commentaire) {
             where: { demande_id: Number(step.demande_id), level: stepLevel - 1 },
           })
         : null;
-    if (stepLevel > 1 && !previous) throw withStatusCode(new Error("√âtape pr√©c√©dente introuvable"), 400);
+    if (stepLevel > 1 && !previous) throw withStatusCode(new Error("…tape prÈcÈdente introuvable"), 400);
 
-    // 1) Marquer l'√©tape courante comme "retour_modification" (on garde le motif)
+    // 1) Marquer l'Ètape courante comme "retour_modification" (on garde le motif)
     await tx.validation_steps.update({
       where: { id: step.id },
       data: {
@@ -1078,7 +1078,7 @@ async function returnForModification(stepId, userId, commentaire) {
       },
     });
 
-    // 2) Forcer la re-validation de l'√©tape N-1 (elle sera rouverte apr√®s correction)
+    // 2) Forcer la re-validation de l'Ètape N-1 (elle sera rouverte aprËs correction)
     if (previous) {
       await tx.validation_steps.update({
         where: { id: previous.id },
@@ -1093,13 +1093,13 @@ async function returnForModification(stepId, userId, commentaire) {
       });
     }
 
-    // 3) Bloquer les √©tapes suivantes (s√©curit√©)
+    // 3) Bloquer les Ètapes suivantes (sÈcuritÈ)
     await tx.validation_steps.updateMany({
       where: { demande_id: Number(step.demande_id), level: { gt: Number(step.level) } },
       data: { status: "bloque", updated_at: new Date() },
     });
 
-    // 4) Passer la demande en "a_modifier" (√©ditable par le demandeur)
+    // 4) Passer la demande en "a_modifier" (Èditable par le demandeur)
     await tx.demandes_paiement.update({
       where: { id: Number(step.demande_id) },
       data: { statut: "a_modifier", updated_at: new Date() },
@@ -1153,7 +1153,7 @@ async function returnForModification(stepId, userId, commentaire) {
         user_id: result.demandeurUserId,
         type: "demande_returned_for_modification",
         demande_id: result.demandeId,
-        message: `Votre demande a √©t√© retourn√©e pour modification (${result.role}). Motif: ${result.commentaire}`,
+        message: `Votre demande a ÈtÈ retournÈe pour modification (${result.role}). Motif: ${result.commentaire}`,
         meta: {
           demandeUuid: result.demandeUuid,
           fromRole: result.role,
@@ -1769,13 +1769,13 @@ async function startSignature(stepId, userId, payload = {}) {
     },
   });
 
-  if (!step || step.status !== "en_attente") throw new Error("√âtape invalide");
+  if (!step || step.status !== "en_attente") throw new Error("…tape invalide");
 
   const agent = await getAgentFromUserId(userId);
-  if (!agent || !agent.roles?.name) throw new Error("Non autoris√©");
+  if (!agent || !agent.roles?.name) throw new Error("Non autorisÈ");
 
   const ok = await canActByDelegation(prisma, step, agent);
-  if (!ok) throw new Error("Non autoris√©");
+  if (!ok) throw new Error("Non autorisÈ");
 
   const roleUpper = String(step.role_name || "").toUpperCase();
   const commentaireTrimmed = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
@@ -1848,7 +1848,7 @@ async function startSignature(stepId, userId, payload = {}) {
     const existingPayload = step.signature_payload || {};
     const existingUserId = existingPayload?.signer_user_id;
     if (existingUserId && Number(existingUserId) !== Number(userId)) {
-      throw withStatusCode(new Error("Signature d√É¬©j√É¬† initi√É¬©e par un autre utilisateur"), 409);
+      throw withStatusCode(new Error("Signature d√©j√† initi√©e par un autre utilisateur"), 409);
     }
 
     if (step.signature_request_user_id) {
@@ -1970,21 +1970,21 @@ async function completeSignature(stepId, userId) {
   const step = await prisma.validation_steps.findUnique({
     where: { id: Number(stepId) },
   });
-  if (!step) throw new Error("√âtape introuvable");
+  if (!step) throw new Error("…tape introuvable");
 
   if (step.status === "valide") {
     return { alreadyValidated: true };
   }
 
   if (!step.signature_request_id) {
-    throw new Error("Signature non initialis√©e");
+    throw new Error("Signature non initialisÈe");
   }
 
   const agent = await getAgentFromUserId(userId);
-  if (!agent || !agent.roles?.name) throw new Error("Non autoris√©");
+  if (!agent || !agent.roles?.name) throw new Error("Non autorisÈ");
 
   const ok = await canActByDelegation(prisma, step, agent);
-  if (!ok) throw new Error("Non autoris√©");
+  if (!ok) throw new Error("Non autorisÈ");
 
   const fallbackEmail = agent?.users?.email ? String(agent.users.email).trim() : "";
   const waitResult = await firma.waitForSignerFinished(step.signature_request_id, {
@@ -1994,7 +1994,7 @@ async function completeSignature(stepId, userId) {
   const signerUser = waitResult.signerUser;
   if (!signerUser) throw new Error("Signature introuvable");
   if (!firma.isSignerFinished(signerUser) && !waitResult.requestFinished) {
-    throw withStatusCode(new Error("Signature non termin√©e"), 409);
+    throw withStatusCode(new Error("Signature non terminÈe"), 409);
   }
 
   const signerUserId = firma.extractUserId(signerUser);
@@ -2057,3 +2057,4 @@ module.exports = {
   startSignature,
   completeSignature,
 };
+

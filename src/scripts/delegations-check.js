@@ -1,6 +1,6 @@
 require("dotenv").config();
 
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const prisma = require("../config/prisma");
 const requireRole = require("../middlewares/requireRole.middleware");
 
@@ -128,3 +128,4 @@ function runMiddleware(mw, req) {
   if (data) console.error("[delegations-check] response:", data);
   process.exitCode = 1;
 });
+

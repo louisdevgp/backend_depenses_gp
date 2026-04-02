@@ -1,7 +1,7 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const notifications = require("../services/notifications.services");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 
 // Délégations autorisées uniquement entre rôles validateurs.
 // Le délégué peut aussi être COMPTABLE (ex: DAF -> COMPTABLE).
@@ -654,3 +654,4 @@ exports.listAgentsForDelegation = async (req, res) => {
 
   res.json({ success: true, data: rows });
 };
+

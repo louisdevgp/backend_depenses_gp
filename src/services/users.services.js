@@ -1,6 +1,6 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const { hashPassword } = require("../utils/password");
 const { sendMail } = require("../config/mailer");
 const { resolveFrontendBaseUrl } = require("../utils/frontendUrl");
@@ -389,3 +389,4 @@ async function adminResetPassword(idOrUuid, performedByUserId) {
 }
 
 module.exports = { me, list, create, getById, update, adminResetPassword, softDelete };
+

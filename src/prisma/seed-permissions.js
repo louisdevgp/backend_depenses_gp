@@ -1,5 +1,5 @@
 const { PrismaClient } = require("@prisma/client");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 
 const prisma = new PrismaClient();
 
@@ -101,3 +101,4 @@ main()
     prisma.$disconnect();
     process.exit(1);
   });
+

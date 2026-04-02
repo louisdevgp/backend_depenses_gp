@@ -45,7 +45,8 @@ exports.create = async (req, res) => {
   if (!nom || !directionIdOrUuid) {
     return res.status(400).json({ success: false, message: "nom, directionIdOrUuid required" });
   }
-    const uuid = require("uuid").v4();
+  
+  const uuid = require("crypto").randomUUID();
 
   const direction_id = await resolveDirectionId(directionIdOrUuid);
   console.table({"Data": { directionIdOrUuid, direction_id , nom, code }});
@@ -100,3 +101,4 @@ exports.remove = async (req, res) => {
 
   res.json({ success: true, message: "Deleted" });
 };
+

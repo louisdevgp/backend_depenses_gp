@@ -11,7 +11,7 @@ process.env.NODEMAILER_USER = "";
 process.env.NODEMAILER_PASSWORD = "";
 
 const prisma = require("../config/prisma");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const paiementsService = require("../services/paiements.services");
 
 function round2(v) {
@@ -326,3 +326,4 @@ main().catch(async (e) => {
   }
   process.exitCode = 1;
 });
+

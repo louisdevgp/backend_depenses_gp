@@ -1,5 +1,5 @@
 const { PrismaClient } = require("@prisma/client");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const { hashPassword } = require("../utils/password");
 
 function getArgValue(name) {
@@ -148,3 +148,4 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
+

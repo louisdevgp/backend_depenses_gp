@@ -1,5 +1,5 @@
-Ôªøconst prisma = require("../config/prisma");
-const { v4: uuidv4 } = require("uuid");
+const prisma = require("../config/prisma");
+const { randomUUID: uuidv4 } = require("crypto");
 const notifications = require("./notifications.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
 const realtime = require("../realtime");
@@ -203,7 +203,7 @@ function hasPermission(user, code) {
 async function receptionScopeWhereForUser(user) {
   const agent = await getAgentFromAuthUser(user);
   if (!agent) {
-    const err = new Error("Acc√®s interdit");
+    const err = new Error("AccËs interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -230,7 +230,7 @@ async function receptionScopeWhereForUser(user) {
   }
 
   if (!filters.length) {
-    const err = new Error("Acc√®s interdit");
+    const err = new Error("AccËs interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -504,7 +504,7 @@ async function createReception(payload, userAgentId, options = {}) {
 
   const requestedPhase = normalizeReceptionPhase(phaseRaw);
   if (phaseRaw != null && !requestedPhase) {
-    const err = new Error("Phase de r√©ception invalide");
+    const err = new Error("Phase de rÈception invalide");
     err.statusCode = 400;
     throw err;
   }
@@ -546,7 +546,7 @@ async function createReception(payload, userAgentId, options = {}) {
       }
     } else {
       if (!demande_id) {
-        const err = new Error("demande_id obligatoire pour une r√©ception avant paiement");
+        const err = new Error("demande_id obligatoire pour une rÈception avant paiement");
         err.statusCode = 400;
         throw err;
       }
@@ -572,7 +572,7 @@ async function createReception(payload, userAgentId, options = {}) {
     const canDirector = await canActAsDirectorForDemande(tx, userAgentId, demandeOrg);
     const canResponsable = await canActAsResponsableForDemande(tx, userAgentId, demandeOrg);
     if (!isOwner && !canDirector && !canResponsable) {
-      const err = new Error("Seul le Directeur de la direction, le responsable ou le demandeur peut cr√©er une r√©ception");
+      const err = new Error("Seul le Directeur de la direction, le responsable ou le demandeur peut crÈer une rÈception");
       err.statusCode = 403;
       throw err;
     }
@@ -584,7 +584,7 @@ async function createReception(payload, userAgentId, options = {}) {
         },
       });
       if (pending > 0) {
-        const err = new Error("Demande non eligible: validations incompl√®tes");
+        const err = new Error("Demande non eligible: validations incomplËtes");
         err.statusCode = 409;
         throw err;
       }
@@ -592,7 +592,7 @@ async function createReception(payload, userAgentId, options = {}) {
       const statut = String(demande?.statut || "").toLowerCase();
       const allowedStatuts = new Set(["approuvee", "en_attente_paiement", "paye", "payee"]);
       if (!allowedStatuts.has(statut)) {
-        const err = new Error("Demande non eligible pour r√©ception");
+        const err = new Error("Demande non eligible pour rÈception");
         err.statusCode = 409;
         throw err;
       }
@@ -607,13 +607,13 @@ async function createReception(payload, userAgentId, options = {}) {
     }
 
     if (phase === "APRES_PAIEMENT" && !hasPaiement) {
-      const err = new Error("Aucun paiement enregistr√© pour cette demande");
+      const err = new Error("Aucun paiement enregistrÈ pour cette demande");
       err.statusCode = 400;
       throw err;
     }
 
     if (phase === "AVANT_PAIEMENT" && hasPaiement) {
-      const err = new Error("Paiement d√©j√† effectu√© pour cette demande");
+      const err = new Error("Paiement dÈj‡ effectuÈ pour cette demande");
       err.statusCode = 400;
       throw err;
     }
@@ -626,7 +626,7 @@ async function createReception(payload, userAgentId, options = {}) {
         select: { id: true },
       });
       if (anyReception) {
-        const err = new Error("R√©ception d√©j√† cr√©√©e pour cette demande");
+        const err = new Error("RÈception dÈj‡ crÈÈe pour cette demande");
         err.statusCode = 409;
         throw err;
       }
@@ -637,7 +637,7 @@ async function createReception(payload, userAgentId, options = {}) {
       select: { id: true },
     });
     if (existingReception) {
-      const err = new Error("R√©ception d√©j√† cr√©√©e pour cette phase");
+      const err = new Error("RÈception dÈj‡ crÈÈe pour cette phase");
       err.statusCode = 409;
       throw err;
     }
@@ -668,7 +668,7 @@ async function createReception(payload, userAgentId, options = {}) {
       include: { demandes_paiement: true },
     });
 
-    // ‚úÖ statut demande:
+    // ? statut demande:
     // - si en attente paiement, on conserve
     // - sinon -> receptionnee (la cloture est manuelle)
     const currentStatut = String(demande?.statut || "").toLowerCase();
@@ -698,7 +698,7 @@ async function createReception(payload, userAgentId, options = {}) {
         user_id: result.demandeurUserId,
         type: "reception_creee",
         demande_id: result.demandeId,
-        message: `R√©ception cr√©√©e pour votre demande. Statut: ${result.nextStatut}.`,
+        message: `RÈception crÈÈe pour votre demande. Statut: ${result.nextStatut}.`,
         meta: {
           receptionId: result.reception.id,
           receptionUuid: result.reception.uuid,
@@ -715,7 +715,7 @@ async function createReception(payload, userAgentId, options = {}) {
           user_id: dafUserId,
           type: "reception_visa_pending",
           demande_id: result.demandeId,
-          message: "Une r√©ception attend votre Visa DAF.",
+          message: "Une rÈception attend votre Visa DAF.",
           meta: {
             receptionId: result.reception.id,
             receptionUuid: result.reception.uuid,
@@ -1317,7 +1317,7 @@ async function getReceptionByIdOrUuid(idOrUuid, authUser = null) {
 async function assertCanReadReception(idOrUuid, authUser = null) {
   const row = await getReceptionByIdOrUuid(idOrUuid, authUser);
   if (!row) {
-    const err = new Error("R√©ception introuvable");
+    const err = new Error("RÈception introuvable");
     err.statusCode = 404;
     throw err;
   }
@@ -1327,9 +1327,9 @@ async function assertCanReadReception(idOrUuid, authUser = null) {
 async function updateReception(id, payload, actorAgentId) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) return null;
-  if (existing.visa_directeur_id) throw new Error("R√©ception d√©j√† vis√©e par le Directeur");
+  if (existing.visa_directeur_id) throw new Error("RÈception dÈj‡ visÈe par le Directeur");
 
-  // Autorisation: le receveur ou r√¥les privil√©gi√©s
+  // Autorisation: le receveur ou rÙles privilÈgiÈs
   const actor = await prisma.agents.findUnique({
     where: { id: Number(actorAgentId) },
     include: { roles: true },
@@ -1337,7 +1337,7 @@ async function updateReception(id, payload, actorAgentId) {
   const role = String(actor?.roles?.name || "").toUpperCase();
   const privileged = new Set(["ADMIN"]);
   const isOwner = Number(existing.recu_par_id) === Number(actorAgentId);
-  if (!isOwner && !privileged.has(role)) throw new Error("Modification non autoris√©e");
+  if (!isOwner && !privileged.has(role)) throw new Error("Modification non autorisÈe");
 
   const updated = await prisma.receptions.update({
     where: { id: Number(id) },
@@ -1361,7 +1361,7 @@ async function updateReception(id, payload, actorAgentId) {
         user_id: demandeurUserId,
         type: "reception_updated",
         demande_id: existing.demande_id,
-        message: "Une r√©ception li√©e √† votre demande a √©t√© modifi√©e.",
+        message: "Une rÈception liÈe ‡ votre demande a ÈtÈ modifiÈe.",
         meta: { receptionId: updated.id, receptionUuid: updated.uuid },
         sendEmailNow: true,
       });
@@ -1390,7 +1390,7 @@ async function visaDirecteur(
 ) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) throw new Error("Reception introuvable");
-  if (existing.visa_directeur_id) throw new Error("R√©ception d√©j√† vis√©e par le Directeur");
+  if (existing.visa_directeur_id) throw new Error("RÈception dÈj‡ visÈe par le Directeur");
 
   const demandeOrg = await prisma.demandes_paiement.findUnique({
     where: { id: Number(existing.demande_id) },
@@ -1399,12 +1399,12 @@ async function visaDirecteur(
 
   const canVisa = await canActAsDirectorForDemande(prisma, directeurAgentId, demandeOrg);
   if (!canVisa) {
-    const err = new Error("Visa Directeur non autoris√© pour cette direction");
+    const err = new Error("Visa Directeur non autorisÈ pour cette direction");
     err.statusCode = 403;
     throw err;
   }
 
-  // On ignore les signatures car on ne les g√®re plus
+  // On ignore les signatures car on ne les gËre plus
   const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
 
   const updated = await prisma.receptions.update({
@@ -1428,7 +1428,7 @@ async function visaDirecteur(
         user_id: demandeurUserId,
         type: "reception_visa_directeur",
         demande_id: existing.demande_id,
-        message: "La r√©ception a √©t√© vis√©e par le Directeur.",
+        message: "La rÈception a ÈtÈ visÈe par le Directeur.",
         meta: { receptionId: updated.id, receptionUuid: updated.uuid },
         sendEmailNow: true,
       });
@@ -1440,7 +1440,7 @@ async function visaDirecteur(
           user_id: dafUserId,
           type: "reception_visa_pending",
           demande_id: existing.demande_id,
-          message: "Une r√©ception attend votre Visa DAF.",
+          message: "Une rÈception attend votre Visa DAF.",
           meta: { receptionId: updated.id, receptionUuid: updated.uuid },
           sendEmailNow: true,
         });
@@ -1466,9 +1466,9 @@ async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire 
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) throw new Error("Reception introuvable");
   if (!existing.visa_directeur_id) throw new Error("Visa Directeur requis avant le Visa DAF");
-  if (existing.visa_daf_id) throw new Error("R√©ception d√©j√† vis√©e par le DAF");
+  if (existing.visa_daf_id) throw new Error("RÈception dÈj‡ visÈe par le DAF");
 
-  // On ignore les signatures car on ne les g√®re plus
+  // On ignore les signatures car on ne les gËre plus
   const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
 
   const updated = await prisma.receptions.update({
@@ -1490,7 +1490,7 @@ async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire 
         user_id: demandeurUserId,
         type: "reception_visa_daf",
         demande_id: existing.demande_id,
-        message: "La r√©ception a √©t√© vis√©e par le DAF. Tous les visas sont faits, vous pouvez cl√¥turer votre demande.",
+        message: "La rÈception a ÈtÈ visÈe par le DAF. Tous les visas sont faits, vous pouvez clÙturer votre demande.",
         meta: { receptionId: updated.id, receptionUuid: updated.uuid },
         sendEmailNow: true,
       });
@@ -1522,12 +1522,12 @@ async function deleteReception(id, actorAgentId) {
     throw err;
   }
   if (existing.visa_directeur_id) {
-    const err = new Error("R√©ception d√©j√† vis√©e par le Directeur");
+    const err = new Error("RÈception dÈj‡ visÈe par le Directeur");
     err.statusCode = 409;
     throw err;
   }
 
-  // Autorisation: le receveur ou r√¥les privil√©gi√©s
+  // Autorisation: le receveur ou rÙles privilÈgiÈs
   const actor = await prisma.agents.findUnique({
     where: { id: Number(actorAgentId) },
     include: { roles: true },
@@ -1536,7 +1536,7 @@ async function deleteReception(id, actorAgentId) {
   const privileged = new Set(["ADMIN"]);
   const isOwner = Number(existing.recu_par_id) === Number(actorAgentId);
   if (!isOwner && !privileged.has(role)) {
-    const err = new Error("Suppression non autoris√©e");
+    const err = new Error("Suppression non autorisÈe");
     err.statusCode = 403;
     throw err;
   }
@@ -1552,7 +1552,7 @@ async function deleteReception(id, actorAgentId) {
         user_id: demandeurUserId,
         type: "reception_deleted",
         demande_id: existing.demande_id,
-        message: "Une r√©ception li√©e √† votre demande a √©t√© supprim√©e.",
+        message: "Une rÈception liÈe ‡ votre demande a ÈtÈ supprimÈe.",
         meta: { receptionId: existing.id, receptionUuid: existing.uuid },
         sendEmailNow: true,
       });
@@ -1591,3 +1591,4 @@ module.exports = {
   visaDaf,
   deleteReception,
 };
+

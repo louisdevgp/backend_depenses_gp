@@ -175,7 +175,7 @@ async function buildValidationSteps(tx, flow, demande) {
 
     const row = await tx.validation_steps.create({
       data: {
-        uuid: require('uuid').v4(),
+        uuid: require("crypto").randomUUID(),
         demande_id: demande.id,
         level: s.step_order,
         role_name: s.role_name,
@@ -257,3 +257,4 @@ function isEngaged(steps) {
   console.log('Done', summary);
   await prisma.$disconnect();
 })();
+

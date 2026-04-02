@@ -46,7 +46,7 @@ exports.create = async (req, res) => {
     return res.status(400).json({ success: false, message: "nom, departementIdOrUuid required" });
   }
 
-  const uuid = require("uuid").v4();
+  const uuid = require("crypto").randomUUID();
 
   const departement_id = await resolveDepartementId(departementIdOrUuid);
   if (!departement_id) return res.status(400).json({ success: false, message: "Departement not found" });
@@ -100,3 +100,4 @@ exports.remove = async (req, res) => {
 
   res.json({ success: true, message: "Deleted" });
 };
+

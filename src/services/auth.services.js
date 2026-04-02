@@ -2,7 +2,7 @@ const prisma = require("../config/prisma")
 const crypto = require("crypto");
 const { hashPassword, comparePassword } = require("../utils/password");
 const { signAccessToken, signRefreshToken } = require("./token.services");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = crypto;
 const { sendMail, getTransporter } = require("../config/mailer");
 const { resolveFrontendBaseUrl } = require("../utils/frontendUrl");
 
@@ -279,3 +279,4 @@ async function resetPassword({ token, newPassword }) {
 }
 
 module.exports = { register, login, forgotPassword, resetPassword, changePassword };
+
