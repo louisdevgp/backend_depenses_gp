@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
 const requirePermission = require("../middlewares/requirePermission.middleware");
+const upload = require("../middlewares/upload.middleware");
 const ctrl = require("../controllers/demandes.controllers");
 const P = require("../constants/permissions");
 
@@ -26,6 +27,13 @@ router.get(
 );
 router.get("/:idOrUuid/acheteurs-candidats", auth, requirePermission(P.DEMANDE_ASSIGN_ACHETEUR), ctrl.listAcheteurCandidates);
 router.patch("/:idOrUuid/acheteur", auth, requirePermission(P.DEMANDE_ASSIGN_ACHETEUR), ctrl.assignAcheteur);
+router.post(
+  "/:idOrUuid/achat/confirm",
+  auth,
+  requirePermission(P.DEMANDE_LIST_ASSIGNED_ACHETEUR),
+  upload.array("files", 10),
+  ctrl.confirmAchat
+);
 router.get(
   "/:idOrUuid",
   auth,

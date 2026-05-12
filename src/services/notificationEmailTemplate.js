@@ -83,6 +83,12 @@ function subjectForType(type, meta) {
       return `${prefix}Paiement modifié`;
     case "paiement_deleted":
       return `${prefix}Paiement supprimé`;
+    case "achat_effectue":
+      return `${prefix}Achat effectue`;
+    case "demande_acheteur_assigne":
+      return `${prefix}Affectation achat`;
+    case "demande_acheteur_retire":
+      return `${prefix}Affectation achat retiree`;
     case "reception_creee":
       return `${prefix}Réception créée`;
     case "reception_updated":

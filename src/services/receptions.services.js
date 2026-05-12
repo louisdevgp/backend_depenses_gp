@@ -622,7 +622,7 @@ async function createReception(payload, userAgentId, options = {}) {
     }
 
     const statutLower = String(demande?.statut || "").toLowerCase();
-    if (demande?.acheteur_id != null && statutLower !== "achat_effectue") {
+    if (["en_attente_paiement", "paye", "payee"].includes(statutLower)) {
       const err = new Error("Preuves d'achat requises avant la reception");
       err.statusCode = 409;
       throw err;

@@ -75,7 +75,7 @@ function buildScopeWhereForPermissions(user, permissionCodes = [], { wrap } = {}
 async function getAgentFromUserId(userId) {
   return prisma.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
-    select: { id: true },
+    select: { id: true, direction_id: true },
   });
 }
 
@@ -227,12 +227,12 @@ async function computeAchatPendingCount(userId) {
   if (!hasPermission(userPerms, "DEMANDE_LIST_ASSIGNED_ACHETEUR")) return 0;
 
   const agent = await getAgentFromUserId(userId);
-  if (!agent?.id) return 0;
+  if (!agent?.id || agent?.direction_id == null) return 0;
 
   return prisma.demandes_paiement.count({
     where: {
       deleted_at: null,
-      acheteur_id: Number(agent.id),
+      direction_id: Number(agent.direction_id),
       statut: { in: ["en_attente_paiement", "paye", "payee"] },
     },
   });

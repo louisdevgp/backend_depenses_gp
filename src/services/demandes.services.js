@@ -122,6 +122,25 @@ function normalizeValidationStopRole(value) {
   return null;
 }
 
+const ACHAT_PENDING_STATUTS = new Set(["en_attente_paiement", "paye", "payee"]);
+const ACHAT_VISIBLE_STATUTS = new Set([
+  ...Array.from(ACHAT_PENDING_STATUTS),
+  "achat_effectue",
+  "receptionnee",
+  "cloture",
+  "cloturee",
+]);
+const ACHAT_ALLOWED_TYPES = new Set(["preuve_achat", "facture", "bon_livraison"]);
+
+function isTruthyFlag(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "oui";
+}
+
+function normalizeAchatDocType(type) {
+  return String(type || "").trim().toLowerCase();
+}
+
 function candidateScopesForDemandeOrg(org) {
   const scopes = ["GLOBAL"];
   if (!org) return scopes;
@@ -340,6 +359,18 @@ function assertCanReadDemande({ demande, user, agent }) {
     agentUserId != null && Number(demande.demandeur_id) === Number(agentUserId);
 
   if (isOwnerByAgentId || isOwnerByUserId || isOwnerByUserIdFallback) return true;
+
+  const roles = userEffectiveRoles(user, agent);
+  const statut = String(demande?.statut || "").toLowerCase();
+  const canReadAsAcheteurPool =
+    hasPermission(user, "DEMANDE_LIST_ASSIGNED_ACHETEUR") &&
+    hasAnyRole(roles, ["ACHETEUR"]) &&
+    agent?.direction_id != null &&
+    demande?.direction_id != null &&
+    Number(agent.direction_id) === Number(demande.direction_id) &&
+    ACHAT_VISIBLE_STATUTS.has(statut);
+
+  if (canReadAsAcheteurPool) return true;
 
   const accessWhere = buildDemandeAccessWhere({ user, agent });
   if (accessWhere == null) return true;
@@ -1265,15 +1296,32 @@ exports.listDemandes = async (user, query) => {
   const agent = await getAgentFromUser(user);
   const roles = userEffectiveRoles(user, agent);
   const canViewDirectionByEntity = hasPermission(user, "VIEW_GLOBAL_DASH_BY_ENTITY");
-  const accessWhere = buildDemandeAccessWhere({ user, agent });
-  const where = accessWhere ? { AND: [whereBase, accessWhere] } : whereBase;
+  const achatPoolView = isTruthyFlag(query?.achat_pool ?? query?.achatPool ?? query?.achat_view ?? query?.achatView);
+  const canUseAchatPool = achatPoolView && hasPermission(user, "DEMANDE_LIST_ASSIGNED_ACHETEUR");
 
-  if (query.statut) {
-    const raw = Array.isArray(query.statut) ? query.statut : String(query.statut).split(",");
-    const list = raw.map((s) => String(s || "").trim()).filter(Boolean);
-    if (list.length === 1) where.statut = list[0];
-    else if (list.length > 1) where.statut = { in: list };
+  let where = null;
+  if (canUseAchatPool) {
+    if (!agent?.direction_id) return [];
+    where = { AND: [whereBase, { direction_id: Number(agent.direction_id) }] };
+  } else {
+    const accessWhere = buildDemandeAccessWhere({ user, agent });
+    where = accessWhere ? { AND: [whereBase, accessWhere] } : whereBase;
   }
+
+  const rawStatuts = query.statut ? (Array.isArray(query.statut) ? query.statut : String(query.statut).split(",")) : [];
+  let requestedStatuts = rawStatuts.map((s) => String(s || "").trim()).filter(Boolean);
+  if (canUseAchatPool) {
+    const allowed = new Set(Array.from(ACHAT_VISIBLE_STATUTS));
+    if (requestedStatuts.length === 0) {
+      requestedStatuts = Array.from(allowed);
+    } else {
+      requestedStatuts = requestedStatuts.filter((s) => allowed.has(String(s).toLowerCase()));
+    }
+    if (!requestedStatuts.length) return [];
+  }
+  if (requestedStatuts.length === 1) where.statut = requestedStatuts[0];
+  else if (requestedStatuts.length > 1) where.statut = { in: requestedStatuts };
+
   if (query.demandeur_id) where.demandeur_id = Number(query.demandeur_id);
   if (query.beneficiaire) {
     where.beneficiaire = { contains: String(query.beneficiaire), mode: "insensitive" };
@@ -1330,7 +1378,7 @@ exports.listDemandes = async (user, query) => {
     String(query?.assigned_acheteur ?? query?.assignedAcheteur ?? "")
       .trim()
       .toLowerCase() === "true";
-  if (assignedAcheteurOnly) {
+  if (assignedAcheteurOnly && !canUseAchatPool) {
     if (!agent?.id) return [];
     where.acheteur_id = Number(agent.id);
   }
@@ -1974,6 +2022,163 @@ exports.assignAcheteur = async (user, idOrUuid, payload = {}) => {
   }
 
   return updated;
+};
+
+exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
+  const actorUserId = getUserIdFromToken(user);
+  if (!actorUserId) throw withStatusCode(new Error("Unauthorized"), 401);
+  if (!Array.isArray(files) || files.length === 0) {
+    throw withStatusCode(new Error("Au moins une preuve d'achat est requise"), 400);
+  }
+
+  const actorAgent = await getAgentFromUser(user);
+  if (!hasRoleNamed({ agent: actorAgent }, "ACHETEUR")) {
+    throw withStatusCode(new Error("Action reservee au role ACHETEUR"), 403);
+  }
+
+  const typeDocument = normalizeAchatDocType(payload?.type_document || "preuve_achat");
+  if (!ACHAT_ALLOWED_TYPES.has(typeDocument)) {
+    throw withStatusCode(new Error("Type de document achat invalide"), 400);
+  }
+  const commentaire = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
+
+  const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
+  const now = new Date();
+  const result = await prisma.$transaction(async (tx) => {
+    const demande = await tx.demandes_paiement.findFirst({
+      where: { ...where, deleted_at: null },
+      include: {
+        agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+      },
+    });
+    if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+
+    if (
+      actorAgent?.direction_id == null ||
+      demande?.direction_id == null ||
+      Number(actorAgent.direction_id) !== Number(demande.direction_id)
+    ) {
+      throw withStatusCode(new Error("Action non autorisee sur cette direction"), 403);
+    }
+
+    const statut = String(demande?.statut || "").toLowerCase();
+    if (!ACHAT_PENDING_STATUTS.has(statut)) {
+      if (statut === "achat_effectue") {
+        throw withStatusCode(new Error("Achat deja confirme pour cette demande"), 409);
+      }
+      throw withStatusCode(new Error("La demande n'est pas dans une phase d'achat"), 409);
+    }
+
+    if (demande?.acheteur_id != null && Number(demande.acheteur_id) !== Number(actorAgent.id)) {
+      throw withStatusCode(
+        new Error("Un autre acheteur a deja pris en charge cette demande"),
+        409
+      );
+    }
+
+    const createdDocuments = [];
+    for (const f of files) {
+      const created = await tx.documents.create({
+        data: {
+          uuid: uuidv4(),
+          demande_id: Number(demande.id),
+          reception_id: null,
+          paiement_id: null,
+          type_document: typeDocument,
+          url: `/uploads/${f.filename}`,
+          nom_fichier: f.originalname || f.filename || "preuve_achat",
+          format: f.mimetype || null,
+          taille: f.size != null ? BigInt(f.size) : null,
+          upload_by_id: Number(actorAgent.id),
+          created_at: now,
+          updated_at: now,
+        },
+      });
+      createdDocuments.push(created);
+    }
+
+    const updated = await tx.demandes_paiement.update({
+      where: { id: Number(demande.id) },
+      data: {
+        acheteur_id: Number(actorAgent.id),
+        statut: "achat_effectue",
+        updated_at: new Date(),
+      },
+      include: {
+        agents_demandes_paiement_acheteur_idToagents: {
+          include: { users: true, roles: true, directions: true, departements: true, services: true },
+        },
+      },
+    });
+
+    return { demande, updated, createdDocuments };
+  });
+
+  try {
+    const actorDisplay = [actorAgent?.prenom, actorAgent?.nom].filter(Boolean).join(" ").trim() || "Acheteur";
+    const ctx = await resolveStakeholderUserIds({
+      demandeId: result.updated.id,
+      demande: result.demande,
+      excludeUserId: actorUserId,
+    });
+
+    const directionAcheteurs = await prisma.agents.findMany({
+      where: {
+        deleted_at: null,
+        direction_id: result?.demande?.direction_id != null ? Number(result.demande.direction_id) : -1,
+        OR: [
+          { roles: { is: { name: "ACHETEUR" } } },
+          { users: { user_roles: { some: { roles: { name: "ACHETEUR" } } } } },
+        ],
+      },
+      select: { users: { select: { id: true } } },
+    });
+
+    const achatRecipientIds = Array.from(
+      new Set(
+        directionAcheteurs
+          .map((a) => a?.users?.id)
+          .filter((id) => id != null && Number(id) !== Number(actorUserId))
+      )
+    );
+
+    const recipients = Array.from(
+      new Set([...(ctx?.recipients || []), ...achatRecipientIds].filter(Boolean))
+    );
+
+    if (recipients.length > 0) {
+      await Promise.allSettled(
+        recipients.map((uid) =>
+          notifications.createNotification({
+            user_id: Number(uid),
+            type: "achat_effectue",
+            demande_id: Number(result.updated.id),
+            message: `Achat confirme sur la demande ${result.updated.uuid || result.updated.id} par ${actorDisplay}.`,
+            meta: {
+              demandeUuid: result.updated.uuid || null,
+              acheteurId: Number(actorAgent.id),
+              acheteurNom: actorDisplay,
+              documentsCount: result.createdDocuments.length,
+              commentaire: commentaire || null,
+            },
+            sendEmailNow: true,
+          })
+        )
+      );
+    }
+  } catch {
+    // ignore notification errors
+  }
+
+  return {
+    demande: result.updated,
+    documents: result.createdDocuments,
+    confirmed_by: {
+      id: Number(actorAgent.id),
+      nom: actorAgent?.nom || null,
+      prenom: actorAgent?.prenom || null,
+    },
+  };
 };
 
 exports.closeDemande = async (user, idOrUuid) => {

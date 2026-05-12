@@ -365,39 +365,6 @@ async function withPaiementDelegationFlags(paiement) {
   };
 }
 
-async function findDefaultAcheteurForDirection(tx, directionId) {
-  if (directionId == null) return null;
-  const row = await tx.agents.findFirst({
-    where: {
-      deleted_at: null,
-      direction_id: Number(directionId),
-      OR: [
-        { roles: { is: { name: "ACHETEUR" } } },
-        { users: { user_roles: { some: { roles: { name: "ACHETEUR" } } } } },
-      ],
-    },
-    orderBy: [{ id: "asc" }],
-    select: { id: true },
-  });
-  return row?.id ? Number(row.id) : null;
-}
-
-async function ensureAcheteurAssignment(tx, demande) {
-  if (!demande?.id) return { acheteurId: null, autoAssigned: false };
-  if (demande?.acheteur_id) {
-    return { acheteurId: Number(demande.acheteur_id), autoAssigned: false };
-  }
-
-  const acheteurId = await findDefaultAcheteurForDirection(tx, demande?.direction_id ?? null);
-  if (!acheteurId) return { acheteurId: null, autoAssigned: false };
-
-  await tx.demandes_paiement.update({
-    where: { id: Number(demande.id) },
-    data: { acheteur_id: Number(acheteurId), updated_at: new Date() },
-  });
-  return { acheteurId: Number(acheteurId), autoAssigned: true };
-}
-
 function hasPermission(user, code) {
   const perm = normalizePermissionCode(code);
   if (!perm) return false;
@@ -548,7 +515,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
   const result = await prisma.$transaction(async (tx) => {
     const demande = await tx.demandes_paiement.findUnique({
       where: { id: Number(demande_id) },
-      select: { id: true, uuid: true, montant: true, statut: true, direction_id: true, acheteur_id: true },
+      select: { id: true, uuid: true, montant: true, statut: true },
     });
     if (!demande) {
       const err = new Error("Demande introuvable");
@@ -717,11 +684,8 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       data: { statut: nextStatut, updated_at: new Date() },
     });
 
-    const assignment = await ensureAcheteurAssignment(tx, demande);
     return {
       ...paiement,
-      auto_assigned_acheteur_id: assignment.acheteurId,
-      auto_assigned_acheteur: assignment.autoAssigned,
       demande_statut_after_paiement: nextStatut,
     };
   });
@@ -754,27 +718,6 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       });
     }
 
-    if (result?.auto_assigned_acheteur && result?.auto_assigned_acheteur_id) {
-      const acheteurUser = await prisma.agents.findUnique({
-        where: { id: Number(result.auto_assigned_acheteur_id) },
-        select: { users: { select: { id: true } } },
-      });
-      const acheteurUserId = acheteurUser?.users?.id || null;
-      if (acheteurUserId) {
-        await notifications.createNotification({
-          user_id: Number(acheteurUserId),
-          type: "demande_acheteur_assigne",
-          demande_id: Number(demande_id),
-          message: `Vous etes assigne comme acheteur pour la demande ${result?.demandes_paiement?.uuid || demande_id}.`,
-          meta: {
-            demandeUuid: result?.demandes_paiement?.uuid || null,
-            acheteurId: Number(result.auto_assigned_acheteur_id),
-            autoAssigned: true,
-          },
-          sendEmailNow: true,
-        });
-      }
-    }
   } catch {
     // ignore email errors
   }
