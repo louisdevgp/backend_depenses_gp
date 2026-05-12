@@ -103,6 +103,7 @@ async function main() {
   const profiles = [
     { roleName: "ADMIN", email: "admin@gp.local", nom: "Admin", prenom: "GP" },
     { roleName: "DEMANDEUR", email: "demandeur@gp.local", nom: "Demandeur", prenom: "GP" },
+    { roleName: "ACHETEUR", email: "acheteur@gp.local", nom: "Acheteur", prenom: "GP" },
     { roleName: "ASSISTANTE_TECHNIQUE", email: "assistante.tech@gp.local", nom: "Assistante", prenom: "Technique" },
     { roleName: "RESPONSABLE", email: "responsable@gp.local", nom: "Responsable", prenom: "GP" },
     { roleName: "DIRECTEUR", email: "directeur@gp.local", nom: "Directeur", prenom: "GP" },

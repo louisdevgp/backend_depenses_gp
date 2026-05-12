@@ -3,6 +3,7 @@ const prisma = require("../config/prisma");
 // const { serializeBigInt } = require("../utils/jsonBigInt.utils");
 const { jsonSafe } = require("../utils/jsonSafe");
 const notifications = require("../services/notifications.services");
+const realtime = require("../realtime");
 const path = require("path");
 const fs = require("fs");
 
@@ -70,6 +71,18 @@ function hasAnyRole(roleNames, allowed) {
 }
 
 const DOCUMENT_UPLOAD_ROLES = ["DAF", "COMPTABLE", "CAISSE", "DG", "DGA", "DIRECTEUR"];
+const PURCHASE_EVIDENCE_TYPES = new Set(["preuve_achat", "facture", "bon_livraison"]);
+
+function normalizeDocType(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isPurchaseEvidenceType(typeDocument) {
+  const normalized = normalizeDocType(typeDocument);
+  if (!normalized) return false;
+  if (PURCHASE_EVIDENCE_TYPES.has(normalized)) return true;
+  return normalized.startsWith("preuve_achat:") || normalized.startsWith("autre:preuve_achat");
+}
 
 function candidateScopesForDemandeOrg(org) {
   const scopes = ["GLOBAL"];
@@ -111,11 +124,20 @@ async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId
 
   if (await isAdminUserId(userId)) return { ok: true };
 
+  if (!agentId) {
+    const a = await prisma.agents.findFirst({
+      where: { user_id: Number(userId), deleted_at: null },
+      select: { id: true },
+    });
+    agentId = a?.id || null;
+  }
+
   const demande = await prisma.demandes_paiement.findUnique({
     where: { id: Number(demandeId) },
     select: {
       id: true,
       demandeur_id: true,
+      acheteur_id: true,
       direction_id: true,
       departement_id: true,
       service_id: true,
@@ -127,13 +149,12 @@ async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId
   const effectiveRoles = await getEffectiveRoleNames(userId, agentId);
   if (hasAnyRole(effectiveRoles, DOCUMENT_UPLOAD_ROLES)) return { ok: true };
 
-  if (!agentId) {
-    const a = await prisma.agents.findFirst({
-      where: { user_id: Number(userId), deleted_at: null },
-      select: { id: true },
-    });
-    agentId = a?.id || null;
-  }
+  const isAssignedAcheteur =
+    agentId != null &&
+    demande?.acheteur_id != null &&
+    Number(demande.acheteur_id) === Number(agentId) &&
+    hasAnyRole(effectiveRoles, ["ACHETEUR"]);
+  if (isAssignedAcheteur) return { ok: true, asAcheteur: true };
 
   if (
     await hasDelegatedRoleForDemande({
@@ -154,7 +175,7 @@ async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId
 
   if (agentId != null && Number(demande.demandeur_id) === Number(agentId)) return { ok: true };
 
-  return { ok: false, status: 403, message: `${actionLabel || "Action"} non autorisée` };
+  return { ok: false, status: 403, message: `${actionLabel || "Action"} non autorisee` };
 }
 
 async function resolveDemandeIdFromBody(body) {
@@ -248,7 +269,7 @@ exports.uploadMany = async (req, res) => {
     if (!agent) {
       return res.status(400).json({
         success: false,
-        message: "Agent non trouvé pour l'utilisateur connecté",
+        message: "Agent non trouvÃƒÂ© pour l'utilisateur connectÃƒÂ©",
       });
     }
 
@@ -262,13 +283,44 @@ exports.uploadMany = async (req, res) => {
     if (!authz.ok) return res.status(authz.status).json({ success: false, message: authz.message });
 
     const files = req.files || [];
-    if (!files.length) throw new Error("Aucun fichier reçu (champ 'files')");
+    if (!files.length) throw new Error("Aucun fichier reÃƒÂ§u (champ 'files')");
+
+    const uploadTypeDoc = req.body?.type_document;
+    if (authz?.asAcheteur && !isPurchaseEvidenceType(uploadTypeDoc)) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "En tant qu'acheteur assigne, vous ne pouvez uploader que des preuves d'achat (preuve_achat, facture, bon_livraison).",
+      });
+    }
 
     const docs = await documentsService.createDocumentsFromUploads({
       files,
       body: req.body,
       upload_by_id: agent.id,
     });
+
+    // Etape achat: l'acheteur assigne depose les preuves d'achat
+    // -> statut demande = achat_effectue (avant reception)
+    try {
+      const typeDoc = req.body?.type_document;
+      if (authz?.asAcheteur && demandeIdForAuth && isPurchaseEvidenceType(typeDoc)) {
+        const statusUpdate = await prisma.demandes_paiement.updateMany({
+          where: {
+            id: Number(demandeIdForAuth),
+            deleted_at: null,
+            acheteur_id: Number(agent.id),
+            statut: { in: ["en_attente_paiement", "paye", "payee"] },
+          },
+          data: { statut: "achat_effectue", updated_at: new Date() },
+        });
+        if (Number(statusUpdate?.count || 0) > 0 && userId) {
+          await realtime.emitAchatPendingStatus(Number(userId));
+        }
+      }
+    } catch {
+      // ignore status update errors
+    }
 
     // Notifications after commit (emails non-bloquants)
     try {
@@ -293,7 +345,7 @@ exports.uploadMany = async (req, res) => {
               user_id: uid,
               type: "document_uploaded",
               demande_id: demandeId,
-              message: `${count} document(s) ajouté(s) à la demande (${typeDoc}).`,
+              message: `${count} document(s) ajoutÃƒÂ©(s) ÃƒÂ  la demande (${typeDoc}).`,
               meta: {
                 demandeUuid: ctx?.demande?.uuid,
                 type_document: typeDoc,
@@ -363,7 +415,7 @@ exports.download = async (req, res) => {
 
     const contentType = doc.format || "application/octet-stream";
     res.setHeader("Content-Type", contentType);
-    // inline => preview dans le navigateur, mais téléchargeable
+    // inline => preview dans le navigateur, mais tÃƒÂ©lÃƒÂ©chargeable
     res.setHeader(
       "Content-Disposition",
       `inline; filename="${String(doc.nom_fichier || filename).replace(/\"/g, "")}"`
@@ -420,7 +472,7 @@ exports.remove = async (req, res) => {
                 user_id: uid,
                 type: "document_deleted",
                 demande_id: demandeId,
-                message: `Un document a été supprimé de la demande (${doc.type_document || "document"}).`,
+                message: `Un document a ÃƒÂ©tÃƒÂ© supprimÃƒÂ© de la demande (${doc.type_document || "document"}).`,
                 meta: {
                   demandeUuid: ctx?.demande?.uuid,
                   documentId: doc.id,

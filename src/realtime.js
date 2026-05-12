@@ -156,7 +156,7 @@ async function computePaiementPendingCount(userId) {
 
   const baseWhere = {
     deleted_at: null,
-    statut: { in: ["approuvee", "en_attente_paiement", "receptionnee"] },
+    statut: { in: ["approuvee", "en_attente_paiement", "achat_effectue", "receptionnee"] },
   };
 
   const and = [
@@ -222,6 +222,22 @@ async function computeReceptionPendingCount(userId) {
   });
 }
 
+async function computeAchatPendingCount(userId) {
+  const userPerms = await getPermissionContext(userId);
+  if (!hasPermission(userPerms, "DEMANDE_LIST_ASSIGNED_ACHETEUR")) return 0;
+
+  const agent = await getAgentFromUserId(userId);
+  if (!agent?.id) return 0;
+
+  return prisma.demandes_paiement.count({
+    where: {
+      deleted_at: null,
+      acheteur_id: Number(agent.id),
+      statut: { in: ["en_attente_paiement", "paye", "payee"] },
+    },
+  });
+}
+
 function initRealtime(httpServer) {
   if (io) return io;
 
@@ -274,6 +290,12 @@ function initRealtime(httpServer) {
             hasPending: count > 0,
           });
         }),
+        computeAchatPendingCount(userId).then((count) => {
+          emitToUser(userId, "achat:pending_status", {
+            count,
+            hasPending: count > 0,
+          });
+        }),
       ]).catch(() => {
         // ignore
       });
@@ -308,10 +330,17 @@ async function emitReceptionPendingStatus(userId) {
   return count;
 }
 
+async function emitAchatPendingStatus(userId) {
+  const count = await computeAchatPendingCount(userId);
+  emitToUser(userId, "achat:pending_status", { count, hasPending: count > 0 });
+  return count;
+}
+
 module.exports = {
   initRealtime,
   emitToUser,
   emitPendingStatus,
   emitPaiementPendingStatus,
   emitReceptionPendingStatus,
+  emitAchatPendingStatus,
 };

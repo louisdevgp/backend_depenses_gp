@@ -365,6 +365,39 @@ async function withPaiementDelegationFlags(paiement) {
   };
 }
 
+async function findDefaultAcheteurForDirection(tx, directionId) {
+  if (directionId == null) return null;
+  const row = await tx.agents.findFirst({
+    where: {
+      deleted_at: null,
+      direction_id: Number(directionId),
+      OR: [
+        { roles: { is: { name: "ACHETEUR" } } },
+        { users: { user_roles: { some: { roles: { name: "ACHETEUR" } } } } },
+      ],
+    },
+    orderBy: [{ id: "asc" }],
+    select: { id: true },
+  });
+  return row?.id ? Number(row.id) : null;
+}
+
+async function ensureAcheteurAssignment(tx, demande) {
+  if (!demande?.id) return { acheteurId: null, autoAssigned: false };
+  if (demande?.acheteur_id) {
+    return { acheteurId: Number(demande.acheteur_id), autoAssigned: false };
+  }
+
+  const acheteurId = await findDefaultAcheteurForDirection(tx, demande?.direction_id ?? null);
+  if (!acheteurId) return { acheteurId: null, autoAssigned: false };
+
+  await tx.demandes_paiement.update({
+    where: { id: Number(demande.id) },
+    data: { acheteur_id: Number(acheteurId), updated_at: new Date() },
+  });
+  return { acheteurId: Number(acheteurId), autoAssigned: true };
+}
+
 function hasPermission(user, code) {
   const perm = normalizePermissionCode(code);
   if (!perm) return false;
@@ -374,7 +407,7 @@ function hasPermission(user, code) {
 
 function paiementScopeWhereForUser(user, permissionCodes = []) {
   if (!user) {
-    const err = new Error("Accès interdit");
+    const err = new Error("AccÃ¨s interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -388,7 +421,7 @@ function paiementScopeWhereForUser(user, permissionCodes = []) {
   }
 
   if (!scopes.length) {
-    const err = new Error("Accès interdit");
+    const err = new Error("AccÃ¨s interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -400,7 +433,7 @@ function paiementScopeWhereForUser(user, permissionCodes = []) {
   if (scopeWhere === null) return null;
   if (scopeWhere && scopeWhere.id !== -1) return scopeWhere;
 
-  const err = new Error("Accès interdit");
+  const err = new Error("AccÃ¨s interdit");
   err.statusCode = 403;
   throw err;
 }
@@ -442,7 +475,7 @@ async function assertDemandePayable(demandeId) {
   });
 
   if (pending > 0) {
-    const err = new Error("Demande non payable : validations incomplètes ou rejetée");
+    const err = new Error("Demande non payable : validations incomplÃ¨tes ou rejetÃ©e");
     err.statusCode = 400;
     throw err;
   }
@@ -461,10 +494,10 @@ async function ensureConditionsForDemande(tx, demandeId, source) {
 
   if (src !== "DEMANDEUR") return [];
 
-  // Compat: anciennes demandes sans échéancier -> créer 100/100
+  // Compat: anciennes demandes sans Ã©chÃ©ancier -> crÃ©er 100/100
   const d = await tx.demandes_paiement.findUnique({
     where: { id: Number(demandeId) },
-    select: { id: true, montant: true },
+    select: { id: true, montant: true, montant_net: true },
   });
   if (!d) {
     const err = new Error("Demande introuvable");
@@ -472,6 +505,7 @@ async function ensureConditionsForDemande(tx, demandeId, source) {
     throw err;
   }
 
+  const montantReference = d.montant_net != null ? d.montant_net : d.montant;
   await tx.conditions_paiement.create({
     data: {
       uuid: uuidv4(),
@@ -479,7 +513,7 @@ async function ensureConditionsForDemande(tx, demandeId, source) {
       source: "DEMANDEUR",
       label: "Tranche 1",
       pourcentage: 100,
-      montant_prevu: round2(d.montant),
+      montant_prevu: round2(montantReference),
       date_echeance: null,
       condition_texte: "100/100",
       statut: "prevu",
@@ -514,7 +548,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
   const result = await prisma.$transaction(async (tx) => {
     const demande = await tx.demandes_paiement.findUnique({
       where: { id: Number(demande_id) },
-      select: { id: true, uuid: true, montant: true },
+      select: { id: true, uuid: true, montant: true, statut: true, direction_id: true, acheteur_id: true },
     });
     if (!demande) {
       const err = new Error("Demande introuvable");
@@ -546,7 +580,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
 
     const unpaid = conditions.filter((c) => !c.paiement_id && String(c.statut || "").toLowerCase() !== "paye");
     if (unpaid.length === 0) {
-      const err = new Error("Demande déjà payée");
+      const err = new Error("Demande dÃ©jÃ  payÃ©e");
       err.statusCode = 409;
       throw err;
     }
@@ -567,14 +601,14 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         throw err;
       }
 
-      // Règle: une seule fois par tranche, et ordre imposé (montant le plus élevé en premier)
+      // RÃ¨gle: une seule fois par tranche, et ordre imposÃ© (montant le plus Ã©levÃ© en premier)
       const nextTranche = [...unpaid].sort((a, b) => {
         const diff = Number(b.montant_prevu || 0) - Number(a.montant_prevu || 0);
         if (diff !== 0) return diff;
         return Number(a.id || 0) - Number(b.id || 0);
       })[0];
       if (!nextTranche) {
-        const err = new Error("Aucune tranche à payer");
+        const err = new Error("Aucune tranche Ã  payer");
         err.statusCode = 400;
         throw err;
       }
@@ -645,7 +679,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         return Number(a.id || 0) - Number(b.id || 0);
       })[0];
       if (!nextTranche) {
-        const err = new Error("Aucune tranche à payer");
+        const err = new Error("Aucune tranche Ã  payer");
         err.statusCode = 400;
         throw err;
       }
@@ -655,7 +689,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         data: { paiement_id: paiement.id, statut: "paye", updated_at: new Date() },
       });
     } else {
-      // total: marque toutes les tranches restantes comme payées par ce paiement
+      // total: marque toutes les tranches restantes comme payÃ©es par ce paiement
       await tx.conditions_paiement.updateMany({
         where: { demande_id: Number(demande_id), source: effectiveSource, paiement_id: null },
         data: { paiement_id: paiement.id, statut: "paye", updated_at: new Date() },
@@ -663,20 +697,33 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     }
 
     const stillUnpaid = await tx.conditions_paiement.count({
-      where: { demande_id: Number(demande_id), source: effectiveSource, paiement_id: null },
+      where: {
+        demande_id: Number(demande_id),
+        source: effectiveSource,
+        paiement_id: null,
+        statut: { notIn: ["paye", "payee", "regle", "reglee"] },
+      },
     });
     const fullyPaid = stillUnpaid === 0;
 
-    // Règle: un paiement partiel ne doit jamais "bloquer" la capacité à payer.
-    // Donc tant que ce n'est pas totalement payé => en_attente_paiement (même si réception existe).
-    const nextStatut = fullyPaid ? "paye" : "en_attente_paiement";
+    // RÃ¨gle: un paiement partiel ne doit jamais "bloquer" la capacitÃ© Ã  payer.
+    // Donc tant que ce n'est pas totalement payÃ© => en_attente_paiement (mÃªme si rÃ©ception existe).
+    const currentDemandeStatut = String(demande?.statut || "").toLowerCase();
+    const keepAchatStatut = currentDemandeStatut === "achat_effectue";
+    const nextStatut = keepAchatStatut ? "achat_effectue" : (fullyPaid ? "paye" : "en_attente_paiement");
 
     await tx.demandes_paiement.update({
       where: { id: Number(demande_id) },
       data: { statut: nextStatut, updated_at: new Date() },
     });
 
-    return paiement;
+    const assignment = await ensureAcheteurAssignment(tx, demande);
+    return {
+      ...paiement,
+      auto_assigned_acheteur_id: assignment.acheteurId,
+      auto_assigned_acheteur: assignment.autoAssigned,
+      demande_statut_after_paiement: nextStatut,
+    };
   });
 
   // notif demandeur after commit (safe for email)
@@ -685,21 +732,48 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     if (demandeurUser?.id) {
       const source = normalizeConditionsSource(result?.conditions_source) || "DEMANDEUR";
       const stillUnpaid = await prisma.conditions_paiement.count({
-        where: { demande_id: Number(demande_id), source, paiement_id: null },
+        where: {
+          demande_id: Number(demande_id),
+          source,
+          paiement_id: null,
+          statut: { notIn: ["paye", "payee", "regle", "reglee"] },
+        },
       });
       const fullyPaid = stillUnpaid === 0;
-      const nextStatut = fullyPaid ? "paye" : "en_attente_paiement";
+      const nextStatut = result?.demande_statut_after_paiement || (fullyPaid ? "paye" : "en_attente_paiement");
 
       await notifications.createNotification({
         user_id: demandeurUser.id,
         type: "paiement_effectue",
         demande_id: Number(demande_id),
         message: fullyPaid
-          ? `Votre demande a été payée. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
-          : `Un paiement partiel a été enregistré. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
+          ? `Votre demande a Ã©tÃ© payÃ©e. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
+          : `Un paiement partiel a Ã©tÃ© enregistrÃ©. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
         meta: { paiementId: result.id, paiementUuid: result.uuid },
         sendEmailNow: false,
       });
+    }
+
+    if (result?.auto_assigned_acheteur && result?.auto_assigned_acheteur_id) {
+      const acheteurUser = await prisma.agents.findUnique({
+        where: { id: Number(result.auto_assigned_acheteur_id) },
+        select: { users: { select: { id: true } } },
+      });
+      const acheteurUserId = acheteurUser?.users?.id || null;
+      if (acheteurUserId) {
+        await notifications.createNotification({
+          user_id: Number(acheteurUserId),
+          type: "demande_acheteur_assigne",
+          demande_id: Number(demande_id),
+          message: `Vous etes assigne comme acheteur pour la demande ${result?.demandes_paiement?.uuid || demande_id}.`,
+          meta: {
+            demandeUuid: result?.demandes_paiement?.uuid || null,
+            acheteurId: Number(result.auto_assigned_acheteur_id),
+            autoAssigned: true,
+          },
+          sendEmailNow: true,
+        });
+      }
     }
   } catch {
     // ignore email errors
@@ -714,7 +788,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     // ignore realtime errors
   }
 
-  // ? Email récap paiement + pièces jointes: documents de la demande
+  // ? Email rÃ©cap paiement + piÃ¨ces jointes: documents de la demande
   try {
     const demande = await prisma.demandes_paiement.findUnique({
       where: { id: Number(demande_id) },
@@ -752,7 +826,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       )
     ).filter(Boolean);
 
-    // docs liés à la demande
+    // docs liÃ©s Ã  la demande
     const docs = await prisma.documents.findMany({
       where: { demande_id: Number(demande_id) },
       orderBy: { created_at: "asc" },
@@ -767,7 +841,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     const uniqueRecipients = Array.from(new Set(recipients.map((x) => String(x).trim()).filter(Boolean)));
 
     if (uniqueRecipients.length > 0) {
-      const subject = `E-Dépenses — Paiement effectué (Demande ${demande?.uuid || Number(demande_id)})`;
+      const subject = `E-DÃ©penses â€” Paiement effectuÃ© (Demande ${demande?.uuid || Number(demande_id)})`;
 
       const validatorsLine = (steps || [])
         .map((s) => (s?.role_name ? String(s.role_name) : null))
@@ -782,30 +856,30 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
           const n = safeFilename(d);
           const u = d?.url ? String(d.url) : "";
           const t = d?.type_document ? String(d.type_document) : "document";
-          return `<li><b>${t}</b> — ${n}${u ? ` <span style=\"color:#666\">(${u})</span>` : ""}</li>`;
+          return `<li><b>${t}</b> â€” ${n}${u ? ` <span style=\"color:#666\">(${u})</span>` : ""}</li>`;
         })
         .join("");
 
       const skippedHtml = skipped.length
         ? `
-          <p style="margin-top:12px;color:#b45309"><b>Note:</b> certains documents n'ont pas pu être joints (taille/URL). Ils sont listés ci-dessus avec leurs liens.</p>
+          <p style="margin-top:12px;color:#b45309"><b>Note:</b> certains documents n'ont pas pu Ãªtre joints (taille/URL). Ils sont listÃ©s ci-dessus avec leurs liens.</p>
           <p style="margin-top:6px;color:#666;font-size:12px">Taille jointe: ${(totalBytes / 1024 / 1024).toFixed(1)}MB / ${(maxTotalBytes / 1024 / 1024).toFixed(1)}MB</p>
         `
         : "";
 
       const html = `
         <div style="font-family:Arial,sans-serif;line-height:1.5">
-          <h2 style="margin:0 0 8px">Paiement effectué</h2>
-          <p style="margin:0 0 12px">Un paiement a été enregistré pour la demande <b>${demande?.uuid || Number(demande_id)}</b>.</p>
+          <h2 style="margin:0 0 8px">Paiement effectuÃ©</h2>
+          <p style="margin:0 0 12px">Un paiement a Ã©tÃ© enregistrÃ© pour la demande <b>${demande?.uuid || Number(demande_id)}</b>.</p>
           <ul style="margin:0 0 12px;padding-left:18px">
             <li><b>Motif:</b> ${demande?.motif ? String(demande.motif) : "-"}</li>
-            <li><b>Bénéficiaire:</b> ${demande?.beneficiaire ? String(demande.beneficiaire) : "-"}</li>
+            <li><b>BÃ©nÃ©ficiaire:</b> ${demande?.beneficiaire ? String(demande.beneficiaire) : "-"}</li>
             <li><b>Montant demande:</b> ${montantLabel ? `${montantLabel} ${devise}` : "-"}</li>
             <li><b>Type paiement:</b> ${payload?.type_paiement ? String(payload.type_paiement) : "-"}</li>
-            <li><b>Montant payé:</b> ${payload?.montant != null ? String(payload.montant) : "-"}</li>
+            <li><b>Montant payÃ©:</b> ${payload?.montant != null ? String(payload.montant) : "-"}</li>
             <li><b>Moyen:</b> ${payload?.moyen_paiement ? String(payload.moyen_paiement) : "-"}</li>
           </ul>
-          ${validatorsLine ? `<p style="margin:0 0 12px;color:#111"><b>Chaîne de validation:</b> ${validatorsLine}</p>` : ""}
+          ${validatorsLine ? `<p style="margin:0 0 12px;color:#111"><b>ChaÃ®ne de validation:</b> ${validatorsLine}</p>` : ""}
 
           <div style="margin-top:14px">
             <div style="font-weight:700;margin-bottom:6px">Documents de la demande</div>
@@ -813,7 +887,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
             ${skippedHtml}
           </div>
 
-          <p style="margin-top:16px;color:#777">— E-Dépenses</p>
+          <p style="margin-top:16px;color:#777">â€” E-DÃ©penses</p>
         </div>
       `;
 
@@ -824,7 +898,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         to,
         ...(ccList.length ? { cc: ccList.join(",") } : {}),
         subject,
-        text: `Paiement effectué pour la demande ${demande?.uuid || Number(demande_id)}.`,
+        text: `Paiement effectuÃ© pour la demande ${demande?.uuid || Number(demande_id)}.`,
         html,
         attachments,
       });
@@ -1178,7 +1252,7 @@ async function updatePaiement(id, payload, actorAgentId) {
         user_id: demandeurUser.id,
         type: "paiement_updated",
         demande_id: Number(existing.demande_id),
-        message: "Un paiement lié à votre demande a été modifié.",
+        message: "Un paiement liÃ© Ã  votre demande a Ã©tÃ© modifiÃ©.",
         meta: {
           paiementId: updated.id,
           paiementUuid: updated.uuid,
@@ -1228,7 +1302,7 @@ async function deletePaiement(id, actorAgentId) {
   }
 
   await prisma.$transaction(async (tx) => {
-    // 1) Détacher les tranches liées à ce paiement
+    // 1) DÃ©tacher les tranches liÃ©es Ã  ce paiement
     await tx.conditions_paiement.updateMany({
       where: { paiement_id: Number(id) },
       data: { paiement_id: null, statut: "prevu", updated_at: new Date() },
@@ -1248,14 +1322,22 @@ async function deletePaiement(id, actorAgentId) {
     const activeSource =
       normalizeConditionsSource(remainingPayments.find((p) => p.conditions_source)?.conditions_source) || "DEMANDEUR";
     const stillUnpaid = await tx.conditions_paiement.count({
-      where: { demande_id: demandeId, source: activeSource, paiement_id: null },
+      where: {
+        demande_id: demandeId,
+        source: activeSource,
+        paiement_id: null,
+        statut: { notIn: ["paye", "payee", "regle", "reglee"] },
+      },
     });
     const fullyPaid = stillUnpaid === 0;
     const hasAnyPaiement = await tx.paiements.count({ where: { demande_id: demandeId } });
-
-    const nextStatut = fullyPaid
-      ? "paye"
-      : (hasAnyPaiement > 0 ? "en_attente_paiement" : "approuvee");
+    const currentStatut = String(snapshot?.demandes_paiement?.statut || "").toLowerCase();
+    const keepAchatStatut = currentStatut === "achat_effectue" && hasAnyPaiement > 0;
+    const nextStatut = keepAchatStatut
+      ? "achat_effectue"
+      : fullyPaid
+        ? "paye"
+        : (hasAnyPaiement > 0 ? "en_attente_paiement" : "approuvee");
 
     await tx.demandes_paiement.update({
       where: { id: demandeId },
@@ -1272,7 +1354,7 @@ async function deletePaiement(id, actorAgentId) {
         user_id: demandeurUser.id,
         type: "paiement_deleted",
         demande_id: Number(snapshot.demande_id),
-        message: "Un paiement lié à votre demande a été supprimé.",
+        message: "Un paiement liÃ© Ã  votre demande a Ã©tÃ© supprimÃ©.",
         meta: { paiementId: snapshot.id, paiementUuid: snapshot.uuid },
         sendEmailNow: true,
       });

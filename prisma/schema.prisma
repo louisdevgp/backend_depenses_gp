@@ -56,6 +56,7 @@ model agents {
   delegations_delegations_delegate_idToagents                       delegations[]           @relation("delegations_delegate_idToagents")
   delegations_delegations_principal_idToagents                      delegations[]           @relation("delegations_principal_idToagents")
   demandes_paiement_demandes_paiement_ajournee_par_idToagents       demandes_paiement[]     @relation("demandes_paiement_ajournee_par_idToagents")
+  demandes_paiement_demandes_paiement_acheteur_idToagents           demandes_paiement[]     @relation("demandes_paiement_acheteur_idToagents")
   demandes_paiement_demandes_paiement_demandeur_idToagents          demandes_paiement[]     @relation("demandes_paiement_demandeur_idToagents")
   documents                                                         documents[]
   paiements                                                         paiements[]
@@ -201,6 +202,7 @@ model demandes_paiement {
   fournisseur_id                                   Int?                  @db.UnsignedInt
   remarque                                         String?               @db.Text
   demandeur_id                                     Int                   @db.UnsignedInt
+  acheteur_id                                      Int?                  @db.UnsignedInt
   direction_id                                     Int?                  @db.UnsignedInt
   departement_id                                   Int?                  @db.UnsignedInt
   service_id                                       Int?                  @db.UnsignedInt
@@ -226,6 +228,7 @@ model demandes_paiement {
   conditions_paiement                              conditions_paiement[]
   demande_items                                    demande_items[]
   agents_demandes_paiement_ajournee_par_idToagents agents?               @relation("demandes_paiement_ajournee_par_idToagents", fields: [ajournee_par_id], references: [id], map: "fk_demande_ajournee_par")
+  agents_demandes_paiement_acheteur_idToagents     agents?               @relation("demandes_paiement_acheteur_idToagents", fields: [acheteur_id], references: [id], onDelete: SetNull, map: "fk_demande_acheteur")
   agents_demandes_paiement_demandeur_idToagents    agents                @relation("demandes_paiement_demandeur_idToagents", fields: [demandeur_id], references: [id], map: "fk_demande_demandeur")
   departements                                     departements?         @relation(fields: [departement_id], references: [id], map: "fk_demande_departement")
   directions                                       directions?           @relation(fields: [direction_id], references: [id], map: "fk_demande_direction")
@@ -239,6 +242,7 @@ model demandes_paiement {
   validation_steps                                 validation_steps[]
 
   @@index([ajournee_par_id], map: "fk_demande_ajournee_par")
+  @@index([acheteur_id], map: "idx_demande_acheteur")
   @@index([departement_id], map: "fk_demande_departement")
   @@index([deleted_at], map: "idx_demande_deleted")
   @@index([demandeur_id], map: "idx_demande_demandeur")

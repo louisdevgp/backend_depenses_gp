@@ -52,10 +52,12 @@ module.exports = {
   [P.DEMANDE_LIST]: { module: "Demandes", appliesTo: ["menu", "action"] },
   [P.DEMANDE_LIST_SELF]: { module: "Demandes", appliesTo: ["menu", "action"] },
   [P.DEMANDE_LIST_ALL]: { module: "Demandes", appliesTo: ["menu", "action"] },
+  [P.DEMANDE_LIST_ASSIGNED_ACHETEUR]: { module: "Demandes", appliesTo: ["menu", "action"] },
   [P.DEMANDE_PDF]: { module: "Demandes", appliesTo: ["action"] },
   [P.DEMANDE_UPDATE]: { module: "Demandes", appliesTo: ["action"] },
   [P.DEMANDE_DELETE]: { module: "Demandes", appliesTo: ["action"] },
   [P.DEMANDE_LIST_BY_DEMANDEUR]: { module: "Demandes", appliesTo: ["action"] },
+  [P.DEMANDE_ASSIGN_ACHETEUR]: { module: "Demandes", appliesTo: ["action"] },
   [P.DEMANDE_CLOSE]: { module: "Demandes", appliesTo: ["action"] },
   [P.DEMANDE_REOPEN]: { module: "Demandes", appliesTo: ["action"] },
 

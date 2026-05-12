@@ -24,7 +24,7 @@ async function main() {
   const dryRun = isDryRun();
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const eligibleStatuts = ["approuvee", "en_attente_paiement", "paye", "payee"];
+  const eligibleStatuts = ["approuvee", "en_attente_paiement", "paye", "payee", "achat_effectue"];
 
   const candidates = await prisma.demandes_paiement.findMany({
     where: {

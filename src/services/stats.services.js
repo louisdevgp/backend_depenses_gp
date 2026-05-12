@@ -62,6 +62,37 @@ function computeAgingBuckets(items, now = new Date()) {
   return buckets;
 }
 
+function effectiveDemandeMontant(row) {
+  if (!row) return 0;
+  if (row.montant_net != null) return toNumber(row.montant_net);
+  return toNumber(row.montant);
+}
+
+function buildDemandesByStatut(rows = []) {
+  const map = new Map();
+  for (const row of rows) {
+    const statut = String(row?.statut || "");
+    if (!statut) continue;
+    const current = map.get(statut) || { statut, count: 0, montant: 0 };
+    current.count += 1;
+    current.montant += effectiveDemandeMontant(row);
+    map.set(statut, current);
+  }
+  return Array.from(map.values()).sort((a, b) => (b.count || 0) - (a.count || 0));
+}
+
+function buildDemandesByBeneficiaire(rows = []) {
+  const map = new Map();
+  for (const row of rows) {
+    const beneficiaire = String(row?.beneficiaire || "").trim() || "(inconnu)";
+    const current = map.get(beneficiaire) || { beneficiaire, count: 0, montant: 0 };
+    current.count += 1;
+    current.montant += effectiveDemandeMontant(row);
+    map.set(beneficiaire, current);
+  }
+  return Array.from(map.values()).sort((a, b) => (b.montant || 0) - (a.montant || 0));
+}
+
 async function getAgentByUserId(userId) {
   return prisma.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
@@ -132,26 +163,13 @@ async function dashboard(userId, query = {}) {
   };
 
   // ---------------- GLOBAL (léger, utile à tous) ----------------
-  const globalDemandesAgg = await prisma.demandes_paiement.aggregate({
+  const globalDemandesRows = await prisma.demandes_paiement.findMany({
     where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
-    _count: { _all: true },
-    _sum: { montant: true },
+    select: { statut: true, montant: true, montant_net: true },
   });
 
-  const globalByStatutRaw = await prisma.demandes_paiement.groupBy({
-    by: ["statut"],
-    where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
-    _count: { _all: true },
-    _sum: { montant: true },
-  });
-
-  const globalByStatut = [...globalByStatutRaw]
-    .sort((a, b) => (b._count?._all || 0) - (a._count?._all || 0))
-    .map((r) => ({
-      statut: r.statut,
-      count: r._count?._all || 0,
-      montant: toNumber(r._sum?.montant),
-    }));
+  const globalByStatut = buildDemandesByStatut(globalDemandesRows);
+  const globalDemandesTotal = globalDemandesRows.reduce((acc, row) => acc + effectiveDemandeMontant(row), 0);
 
   // validations en attente (global) via SQL join pour éviter de charger des lignes
   const pendingValidationsGlobal = denyAll
@@ -160,7 +178,7 @@ async function dashboard(userId, query = {}) {
       ? await prisma.$queryRaw`
         SELECT
           COUNT(*) AS count,
-          COALESCE(SUM(dp.montant), 0) AS montant
+          COALESCE(SUM(COALESCE(dp.montant_net, dp.montant)), 0) AS montant
         FROM validation_steps vs
         JOIN demandes_paiement dp ON dp.id = vs.demande_id
         WHERE vs.status = 'en_attente'
@@ -170,7 +188,7 @@ async function dashboard(userId, query = {}) {
       : await prisma.$queryRaw`
         SELECT
           COUNT(*) AS count,
-          COALESCE(SUM(dp.montant), 0) AS montant
+          COALESCE(SUM(COALESCE(dp.montant_net, dp.montant)), 0) AS montant
         FROM validation_steps vs
         JOIN demandes_paiement dp ON dp.id = vs.demande_id
         WHERE vs.status = 'en_attente'
@@ -180,8 +198,8 @@ async function dashboard(userId, query = {}) {
   const pendingGlobalRow = Array.isArray(pendingValidationsGlobal) ? pendingValidationsGlobal[0] : null;
   const global = {
     demandes: {
-      count: globalDemandesAgg._count?._all || 0,
-      montant: toNumber(globalDemandesAgg._sum?.montant),
+      count: globalDemandesRows.length,
+      montant: toNumber(globalDemandesTotal),
     },
     demandesByStatut: globalByStatut,
     validationsPending: {
@@ -200,7 +218,7 @@ async function dashboard(userId, query = {}) {
           SELECT
             COALESCE(r.name, 'SANS_ROLE') AS role,
             COUNT(*) AS count,
-            COALESCE(SUM(dp.montant), 0) AS montant
+            COALESCE(SUM(COALESCE(dp.montant_net, dp.montant)), 0) AS montant
           FROM demandes_paiement dp
           JOIN agents a ON a.id = dp.demandeur_id
           LEFT JOIN roles r ON r.id = a.role_id
@@ -215,7 +233,7 @@ async function dashboard(userId, query = {}) {
           SELECT
             COALESCE(r.name, 'SANS_ROLE') AS role,
             COUNT(*) AS count,
-            COALESCE(SUM(dp.montant), 0) AS montant
+            COALESCE(SUM(COALESCE(dp.montant_net, dp.montant)), 0) AS montant
           FROM demandes_paiement dp
           JOIN agents a ON a.id = dp.demandeur_id
           LEFT JOIN roles r ON r.id = a.role_id
@@ -237,40 +255,30 @@ async function dashboard(userId, query = {}) {
 
   // ---------------- DEMANDEUR ----------------
   if (role === "DEMANDEUR") {
-    const rowsRaw = await prisma.demandes_paiement.groupBy({
-      by: ["statut"],
+    const demandeurRows = await prisma.demandes_paiement.findMany({
       where: {
         deleted_at: null,
         demandeur_id: Number(agent.id),
         created_at: { gte: period.from, lte: period.to },
       },
-      _count: { _all: true },
-      _sum: { montant: true },
+      select: { statut: true, montant: true, montant_net: true },
     });
 
     // Prisma ne supporte pas forcément orderBy: { _count: { _all } } selon versions.
     // On trie donc côté JS.
-    const rows = [...rowsRaw].sort((a, b) => (b._count?._all || 0) - (a._count?._all || 0));
+    const demandeurByStatut = buildDemandesByStatut(demandeurRows);
 
-    const total = rows.reduce(
-      (acc, r) => {
-        acc.count += r._count?._all || 0;
-        acc.montant += toNumber(r._sum?.montant);
-        return acc;
-      },
-      { count: 0, montant: 0 }
-    );
+    const total = {
+      count: demandeurRows.length,
+      montant: demandeurRows.reduce((acc, row) => acc + effectiveDemandeMontant(row), 0),
+    };
 
     return {
       ...base,
       global,
       admin,
       demandeur: {
-        demandesByStatut: rows.map((r) => ({
-          statut: r.statut,
-          count: r._count?._all || 0,
-          montant: toNumber(r._sum?.montant),
-        })),
+        demandesByStatut: demandeurByStatut,
         total,
       },
     };
@@ -309,7 +317,9 @@ async function dashboard(userId, query = {}) {
       where,
       select: {
         id: true,
-        demandes_paiement: { select: { id: true, uuid: true, montant: true, created_at: true, statut: true } },
+        demandes_paiement: {
+          select: { id: true, uuid: true, montant: true, montant_net: true, created_at: true, statut: true },
+        },
       },
       orderBy: { id: "desc" },
     });
@@ -321,7 +331,7 @@ async function dashboard(userId, query = {}) {
 
   const pending = {
     count: pendingDemandes.length,
-    montant: pendingDemandes.reduce((acc, d) => acc + toNumber(d?.montant), 0),
+    montant: pendingDemandes.reduce((acc, d) => acc + effectiveDemandeMontant(d), 0),
     aging: computeAgingBuckets(pendingDemandes),
   };
 
@@ -332,7 +342,7 @@ async function dashboard(userId, query = {}) {
   if (isCompta) {
     const payableWhere = {
       deleted_at: null,
-      statut: { in: ["approuvee", "receptionnee"] },
+      statut: { in: ["approuvee", "en_attente_paiement", "achat_effectue", "receptionnee"] },
       paiements: { none: {} },
       validation_steps: {
         none: {
@@ -342,10 +352,9 @@ async function dashboard(userId, query = {}) {
       ...directionScopeWhere,
     };
 
-    const payableAgg = await prisma.demandes_paiement.aggregate({
+    const payableRows = await prisma.demandes_paiement.findMany({
       where: payableWhere,
-      _count: { _all: true },
-      _sum: { montant: true },
+      select: { montant: true, montant_net: true },
     });
 
     const paiementsByMoyen = await prisma.paiements.groupBy({
@@ -358,8 +367,8 @@ async function dashboard(userId, query = {}) {
 
     compta = {
       payable: {
-        count: payableAgg._count?._all || 0,
-        montant: toNumber(payableAgg._sum?.montant),
+        count: payableRows.length,
+        montant: payableRows.reduce((acc, row) => acc + effectiveDemandeMontant(row), 0),
       },
       paiementsByMoyen: paiementsByMoyen.map((r) => ({
         moyen_paiement: r.moyen_paiement || "(inconnu)",
@@ -368,7 +377,7 @@ async function dashboard(userId, query = {}) {
       })),
       exceptions: {
         payeSansReception: await prisma.demandes_paiement.count({
-          where: { deleted_at: null, statut: "paye", ...directionScopeWhere },
+          where: { deleted_at: null, statut: { in: ["paye", "payee", "achat_effectue"] }, ...directionScopeWhere },
         }),
         receptionSansPaiement: await prisma.demandes_paiement.count({
           where: { deleted_at: null, statut: "receptionnee", ...directionScopeWhere },
@@ -381,10 +390,9 @@ async function dashboard(userId, query = {}) {
   const isExec = ["DG", "DGA", "ADMIN"].includes(role);
   let exec = null;
   if (isExec) {
-    const demandesAgg = await prisma.demandes_paiement.aggregate({
+    const execDemandesRows = await prisma.demandes_paiement.findMany({
       where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
-      _count: { _all: true },
-      _sum: { montant: true },
+      select: { beneficiaire: true, montant: true, montant_net: true },
     });
 
     const paiementsAgg = await prisma.paiements.aggregate({
@@ -393,29 +401,18 @@ async function dashboard(userId, query = {}) {
       _sum: { montant: true },
     });
 
-    const topBeneficiaires = await prisma.demandes_paiement.groupBy({
-      by: ["beneficiaire"],
-      where: { deleted_at: null, created_at: { gte: period.from, lte: period.to }, ...directionScopeWhere },
-      _count: { _all: true },
-      _sum: { montant: true },
-      orderBy: { _sum: { montant: "desc" } },
-      take: 10,
-    });
+    const topBeneficiaires = buildDemandesByBeneficiaire(execDemandesRows).slice(0, 10);
 
     exec = {
       demandes: {
-        count: demandesAgg._count?._all || 0,
-        montant: toNumber(demandesAgg._sum?.montant),
+        count: execDemandesRows.length,
+        montant: execDemandesRows.reduce((acc, row) => acc + effectiveDemandeMontant(row), 0),
       },
       paiements: {
         count: paiementsAgg._count?._all || 0,
         montant: toNumber(paiementsAgg._sum?.montant),
       },
-      topBeneficiaires: topBeneficiaires.map((r) => ({
-        beneficiaire: r.beneficiaire,
-        count: r._count?._all || 0,
-        montant: toNumber(r._sum?.montant),
-      })),
+      topBeneficiaires,
     };
   }
 

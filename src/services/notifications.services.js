@@ -134,6 +134,9 @@ async function createNotification(
     ) {
       await realtime.emitReceptionPendingStatus(user_id);
     }
+    if (["demande_acheteur_assigne", "demande_acheteur_retire"].includes(typeLower)) {
+      await realtime.emitAchatPendingStatus(user_id);
+    }
   } catch {
     // ignore realtime errors
   }

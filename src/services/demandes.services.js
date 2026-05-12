@@ -102,6 +102,19 @@ function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
 }
 
+function hasRoleNamed({ agent, userRoles = [] }, roleName) {
+  const target = normalizeRoleName(roleName);
+  if (!target) return false;
+  const set = new Set((userRoles || []).map(normalizeRoleName).filter(Boolean));
+  const primary = normalizeRoleName(agent?.roles?.name);
+  if (primary) set.add(primary);
+  const secondary = (agent?.users?.user_roles || [])
+    .map((ur) => normalizeRoleName(ur?.roles?.name))
+    .filter(Boolean);
+  secondary.forEach((r) => set.add(r));
+  return set.has(target);
+}
+
 function normalizeValidationStopRole(value) {
   if (!value) return null;
   const v = String(value).trim().toUpperCase();
@@ -199,6 +212,40 @@ function hasPermission(user, code) {
   return list.map(normalizePermissionCode).includes(perm);
 }
 
+async function canAssignAcheteurForDemande({ user, agent, demande }) {
+  if (!user || !agent || !demande) return false;
+  if (isAdminUser({ tokenRoles: user?.roles, agentRoleName: agent?.roles?.name })) return true;
+
+  const actorRoles = userEffectiveRoles(user, agent);
+  if (actorRoles.includes("DIRECTEUR")) {
+    const sameDirection =
+      agent?.direction_id != null &&
+      demande?.direction_id != null &&
+      Number(agent.direction_id) === Number(demande.direction_id);
+    if (sameDirection) return true;
+  }
+
+  const candidateScopes = candidateScopesForDemandeOrg({
+    direction_id: demande?.direction_id ?? null,
+    departement_id: demande?.departement_id ?? null,
+    service_id: demande?.service_id ?? null,
+  });
+
+  const now = new Date();
+  const delegation = await prisma.delegations.findFirst({
+    where: {
+      delegate_id: Number(agent.id),
+      role_name: "DIRECTEUR",
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    },
+    select: { id: true },
+  });
+  return Boolean(delegation);
+}
+
 function buildDemandeAccessWhere({ user, agent }) {
   const filters = [];
 
@@ -222,6 +269,9 @@ function buildDemandeAccessWhere({ user, agent }) {
 
   if (hasPermission(user, "DEMANDE_LIST_SELF") && agent?.id) {
     filters.push({ demandeur_id: Number(agent.id) });
+  }
+  if (hasPermission(user, "DEMANDE_LIST_ASSIGNED_ACHETEUR") && agent?.id) {
+    filters.push({ acheteur_id: Number(agent.id) });
   }
 
   if (!filters.length) return { id: -1 };
@@ -313,6 +363,7 @@ function assertCanReadDemande({ demande, user, agent }) {
     if (accessWhere?.OR && Array.isArray(accessWhere.OR)) {
       return accessWhere.OR.some((cond) => {
         if (cond?.demandeur_id != null) return Number(cond.demandeur_id) === Number(demande.demandeur_id);
+        if (cond?.acheteur_id != null) return Number(cond.acheteur_id) === Number(demande.acheteur_id);
         if (cond?.direction_id?.in) return cond.direction_id.in.includes(Number(demande.direction_id));
         if (cond?.departement_id?.in) return cond.departement_id.in.includes(Number(demande.departement_id));
         if (cond?.service_id?.in) return cond.service_id.in.includes(Number(demande.service_id));
@@ -320,6 +371,7 @@ function assertCanReadDemande({ demande, user, agent }) {
       });
     }
     if (accessWhere?.demandeur_id != null) return Number(accessWhere.demandeur_id) === Number(demande.demandeur_id);
+    if (accessWhere?.acheteur_id != null) return Number(accessWhere.acheteur_id) === Number(demande.acheteur_id);
     return false;
   })();
 
@@ -335,7 +387,15 @@ exports.assertCanReadDemandeByIdOrUuid = async (user, idOrUuid) => {
 
   const demande = await prisma.demandes_paiement.findFirst({
     where: { ...where, deleted_at: null },
-    select: { id: true, uuid: true, demandeur_id: true, direction_id: true },
+    select: {
+      id: true,
+      uuid: true,
+      demandeur_id: true,
+      acheteur_id: true,
+      direction_id: true,
+      departement_id: true,
+      service_id: true,
+    },
   });
 
   const agent = await getAgentFromUser(user);
@@ -348,7 +408,15 @@ exports.getDemandeHeader = async (user, idOrUuid) => {
 
   const demande = await prisma.demandes_paiement.findFirst({
     where: { ...where, deleted_at: null },
-    select: { id: true, uuid: true, demandeur_id: true, direction_id: true },
+    select: {
+      id: true,
+      uuid: true,
+      demandeur_id: true,
+      acheteur_id: true,
+      direction_id: true,
+      departement_id: true,
+      service_id: true,
+    },
   });
 
   const agent = await getAgentFromUser(user);
@@ -979,9 +1047,9 @@ async function resolveValidatorForRole(tx, roleName, demandeOrg) {
   const baseWhere = {
     deleted_at: null,
     OR: [
-      // rôle principal (agents.role_id -> roles.name)
+      // rÃ´le principal (agents.role_id -> roles.name)
       { roles: { is: { name: role } } },
-      // rôle secondaire (users.user_roles)
+      // rÃ´le secondaire (users.user_roles)
       { users: { user_roles: { some: { roles: { name: role } } } } },
     ],
   };
@@ -1040,7 +1108,7 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
       throw new Error(`Aucun validateur trouve pour le role ${role}`);
     }
 
-    // Ne pas dédupliquer: un même agent peut valider plusieurs rôles (ex: DIRECTEUR + DAF)
+    // Ne pas dÃ©dupliquer: un mÃªme agent peut valider plusieurs rÃ´les (ex: DIRECTEUR + DAF)
     const row = await tx.validation_steps.create({
       data: {
         uuid: uuidv4(),
@@ -1228,6 +1296,10 @@ exports.listDemandes = async (user, query) => {
           // full global view
           break;
         }
+        if (hasPermission(user, "DEMANDE_LIST_ASSIGNED_ACHETEUR") && agent?.id) {
+          where.acheteur_id = Number(agent.id);
+          break;
+        }
         if (hasAnyRole(roles, ["DIRECTEUR"]) && agent?.direction_id) {
           where.direction_id = Number(agent.direction_id);
           break;
@@ -1251,10 +1323,25 @@ exports.listDemandes = async (user, query) => {
     }
   }
 
+  const assignedAcheteurOnly =
+    String(query?.assigned_acheteur ?? query?.assignedAcheteur ?? "")
+      .trim()
+      .toLowerCase() === "1" ||
+    String(query?.assigned_acheteur ?? query?.assignedAcheteur ?? "")
+      .trim()
+      .toLowerCase() === "true";
+  if (assignedAcheteurOnly) {
+    if (!agent?.id) return [];
+    where.acheteur_id = Number(agent.id);
+  }
+
   return prisma.demandes_paiement.findMany({
     where,
     orderBy: { created_at: "desc" },
     include: {
+      agents_demandes_paiement_acheteur_idToagents: {
+        include: { users: true, directions: true, departements: true, services: true, roles: true },
+      },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       documents: true,
@@ -1268,6 +1355,7 @@ exports.listMyDemandes = async (user) => {
     where: { deleted_at: null, demandeur_id: agent.id },
     orderBy: { created_at: "desc" },
     include: {
+      agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
@@ -1281,6 +1369,7 @@ exports.listByDemandeur = async (demandeurId) => {
     where: { deleted_at: null, demandeur_id: Number(demandeurId) },
     orderBy: { created_at: "desc" },
     include: {
+      agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
@@ -1295,6 +1384,9 @@ exports.getOne = async (user, idOrUuid) => {
     where: { ...where, deleted_at: null },
     include: {
       agents_demandes_paiement_demandeur_idToagents: {
+        include: { users: true, directions: true, departements: true, services: true, roles: true },
+      },
+      agents_demandes_paiement_acheteur_idToagents: {
         include: { users: true, directions: true, departements: true, services: true, roles: true },
       },
       demande_items: true,
@@ -1633,7 +1725,7 @@ exports.update = async (user, idOrUuid, payload) => {
             user_id: uid,
             type: "demande_updated",
             demande_id: updated.id,
-            message: `La demande${label} a été modifiée.`,
+            message: `La demande${label} a Ã©tÃ© modifiÃ©e.`,
             meta: { demandeUuid, action: "updated" },
             sendEmailNow: true,
           })
@@ -1682,7 +1774,7 @@ exports.softDelete = async (user, idOrUuid) => {
             user_id: uid,
             type: "demande_cancelled",
             demande_id: demande.id,
-            message: `La demande${label} a été annulée.`,
+            message: `La demande${label} a Ã©tÃ© annulÃ©e.`,
             meta: { demandeUuid, action: "cancelled" },
             sendEmailNow: true,
           })
@@ -1694,6 +1786,194 @@ exports.softDelete = async (user, idOrUuid) => {
   }
 
   return true;
+};
+
+exports.listAcheteurCandidates = async (user, idOrUuid) => {
+  const actorUserId = getUserIdFromToken(user);
+  if (!actorUserId) throw withStatusCode(new Error("Unauthorized"), 401);
+
+  const actorAgent = await getAgentFromUser(user);
+  const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
+  const demande = await prisma.demandes_paiement.findFirst({
+    where: { ...where, deleted_at: null },
+    select: { id: true, uuid: true, direction_id: true, acheteur_id: true },
+  });
+  if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+
+  const canAssign = await canAssignAcheteurForDemande({ user, agent: actorAgent, demande });
+  if (!canAssign) throw withStatusCode(new Error("Affectation acheteur non autorisee"), 403);
+
+  if (!demande.direction_id) {
+    return { demande_id: demande.id, demande_uuid: demande.uuid, direction_id: null, acheteurs: [] };
+  }
+
+  const rows = await prisma.agents.findMany({
+    where: {
+      deleted_at: null,
+      direction_id: Number(demande.direction_id),
+      OR: [
+        { roles: { is: { name: "ACHETEUR" } } },
+        { users: { user_roles: { some: { roles: { name: "ACHETEUR" } } } } },
+      ],
+    },
+    select: {
+      id: true,
+      nom: true,
+      prenom: true,
+      matricule: true,
+      direction_id: true,
+      roles: { select: { name: true } },
+      users: {
+        select: {
+          id: true,
+          email: true,
+          user_roles: { select: { roles: { select: { name: true } } } },
+        },
+      },
+    },
+    orderBy: [{ nom: "asc" }, { prenom: "asc" }, { id: "asc" }],
+  });
+
+  return {
+    demande_id: demande.id,
+    demande_uuid: demande.uuid,
+    direction_id: Number(demande.direction_id),
+    acheteurs: rows.map((a) => {
+      const roles = Array.from(
+        new Set(
+          [
+            a?.roles?.name,
+            ...(a?.users?.user_roles || []).map((ur) => ur?.roles?.name).filter(Boolean),
+          ]
+            .map(normalizeRoleName)
+            .filter(Boolean)
+        )
+      );
+      return {
+        id: a.id,
+        nom: a.nom,
+        prenom: a.prenom,
+        matricule: a.matricule,
+        email: a?.users?.email || null,
+        roles,
+        is_assigned: Number(demande.acheteur_id || 0) === Number(a.id),
+      };
+    }),
+  };
+};
+
+exports.assignAcheteur = async (user, idOrUuid, payload = {}) => {
+  const actorUserId = getUserIdFromToken(user);
+  if (!actorUserId) throw withStatusCode(new Error("Unauthorized"), 401);
+
+  const actorAgent = await getAgentFromUser(user);
+  const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
+  const demande = await prisma.demandes_paiement.findFirst({
+    where: { ...where, deleted_at: null },
+    include: {
+      agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
+      agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+    },
+  });
+  if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+
+  const canAssign = await canAssignAcheteurForDemande({ user, agent: actorAgent, demande });
+  if (!canAssign) throw withStatusCode(new Error("Affectation acheteur non autorisee"), 403);
+
+  const hasPaiement = await prisma.paiements.count({ where: { demande_id: Number(demande.id) } });
+  if (hasPaiement <= 0) {
+    throw withStatusCode(new Error("Affectation acheteur possible uniquement apres paiement"), 409);
+  }
+
+  const acheteurIdRaw = payload?.acheteur_id;
+  const clearRequested =
+    acheteurIdRaw == null ||
+    acheteurIdRaw === "" ||
+    String(acheteurIdRaw).trim().toLowerCase() === "null";
+
+  let acheteurId = null;
+  let acheteurAgent = null;
+  if (!clearRequested) {
+    acheteurId = Number(acheteurIdRaw);
+    if (!Number.isFinite(acheteurId) || acheteurId <= 0) {
+      throw withStatusCode(new Error("acheteur_id invalide"), 400);
+    }
+    acheteurAgent = await prisma.agents.findFirst({
+      where: { id: Number(acheteurId), deleted_at: null },
+      include: {
+        roles: true,
+        users: { include: { user_roles: { include: { roles: true } } } },
+      },
+    });
+    if (!acheteurAgent) throw withStatusCode(new Error("Acheteur introuvable"), 404);
+    if (
+      demande.direction_id != null &&
+      acheteurAgent.direction_id != null &&
+      Number(acheteurAgent.direction_id) !== Number(demande.direction_id)
+    ) {
+      throw withStatusCode(new Error("L'acheteur doit appartenir a la meme direction"), 400);
+    }
+    if (!hasRoleNamed({ agent: acheteurAgent }, "ACHETEUR")) {
+      throw withStatusCode(new Error("Le profil selectionne n'a pas le role ACHETEUR"), 400);
+    }
+  }
+
+  const updated = await prisma.demandes_paiement.update({
+    where: { id: Number(demande.id) },
+    data: {
+      acheteur_id: clearRequested ? null : Number(acheteurId),
+      updated_at: new Date(),
+    },
+    include: {
+      agents_demandes_paiement_acheteur_idToagents: {
+        include: { users: true, roles: true, directions: true, departements: true, services: true },
+      },
+    },
+  });
+
+  try {
+    const actorAgentUserId = actorAgent?.users?.id || null;
+    const prevAcheteurUserId = demande?.agents_demandes_paiement_acheteur_idToagents?.users?.id || null;
+    const nextAcheteurUserId = updated?.agents_demandes_paiement_acheteur_idToagents?.users?.id || null;
+    const prevAcheteurId = demande?.acheteur_id != null ? Number(demande.acheteur_id) : null;
+    const nextAcheteurId = updated?.acheteur_id != null ? Number(updated.acheteur_id) : null;
+    const hasChanged = prevAcheteurId !== nextAcheteurId;
+
+    if (
+      hasChanged &&
+      prevAcheteurUserId &&
+      Number(prevAcheteurUserId) !== Number(actorAgentUserId) &&
+      Number(prevAcheteurUserId) !== Number(nextAcheteurUserId || 0)
+    ) {
+      await notifications.createNotification({
+        user_id: Number(prevAcheteurUserId),
+        type: "demande_acheteur_retire",
+        demande_id: Number(updated.id),
+        message: `Vous n'etes plus acheteur assigne pour la demande ${updated.uuid || updated.id}.`,
+        meta: { demandeUuid: updated.uuid || null, acheteurId: prevAcheteurId },
+        sendEmailNow: true,
+      });
+    }
+
+    if (
+      hasChanged &&
+      nextAcheteurUserId &&
+      Number(nextAcheteurUserId) !== Number(actorAgentUserId)
+    ) {
+      await notifications.createNotification({
+        user_id: Number(nextAcheteurUserId),
+        type: "demande_acheteur_assigne",
+        demande_id: Number(updated.id),
+        message: `Vous etes desormais acheteur assigne pour la demande ${updated.uuid || updated.id}.`,
+        meta: { demandeUuid: updated.uuid || null, acheteurId: updated.acheteur_id || null },
+        sendEmailNow: true,
+      });
+    }
+  } catch {
+    // ignore notification errors
+  }
+
+  return updated;
 };
 
 exports.closeDemande = async (user, idOrUuid) => {
@@ -1733,7 +2013,7 @@ exports.closeDemande = async (user, idOrUuid) => {
             user_id: uid,
             type: "demande_closed",
             demande_id: demande.id,
-            message: `La demande${label} a été clôturée.`,
+            message: `La demande${label} a Ã©tÃ© clÃ´turÃ©e.`,
             meta: { demandeUuid, action: "closed" },
             sendEmailNow: true,
           })
