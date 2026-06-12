@@ -1071,7 +1071,10 @@ async function listPaiements({ demande_id, from, to, moyen_paiement }, authUser 
   return prisma.paiements.findMany({
     where,
     orderBy: { id: "desc" },
-    include: { documents: true },
+    include: {
+      documents: true,
+      demandes_paiement: { select: { id: true, uuid: true, beneficiaire: true } },
+    },
   });
 }
 

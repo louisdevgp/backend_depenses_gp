@@ -250,27 +250,49 @@ async function resetPassword({ token, newPassword }) {
       used_at: null,
       expires_at: { gt: now },
     },
-    include: { users: true },
   });
 
-  if (!prt || !prt.users || prt.users.deleted_at) {
+  if (!prt) {
     throw new Error("INVALID_RESET_TOKEN");
   }
 
   const password_hash = await hashPassword(newPassword);
 
   await prisma.$transaction(async (tx) => {
-    await tx.password_reset_tokens.update({
-      where: { id: prt.id },
+    const claimedToken = await tx.password_reset_tokens.updateMany({
+      where: {
+        id: prt.id,
+        used_at: null,
+        expires_at: { gt: new Date() },
+      },
       data: { used_at: now },
     });
 
+    if (claimedToken.count !== 1) {
+      throw new Error("INVALID_RESET_TOKEN");
+    }
+
+    const user = await tx.users.findFirst({
+      where: {
+        id: prt.user_id,
+        deleted_at: null,
+      },
+      select: {
+        id: true,
+        last_login_at: true,
+      },
+    });
+
+    if (!user) {
+      throw new Error("INVALID_RESET_TOKEN");
+    }
+
     await tx.users.update({
-      where: { id: prt.user_id },
+      where: { id: user.id },
       data: {
         password_hash,
         // If the user never logged in, we don't want first-login to force another password change.
-        last_login_at: prt.users.last_login_at ?? now,
+        last_login_at: user.last_login_at ?? now,
       },
     });
   });

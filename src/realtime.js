@@ -164,7 +164,25 @@ async function computePaiementPendingCount(userId) {
     {
       OR: [
         { conditions_paiement: { none: {} } },
-        { conditions_paiement: { some: unpaidCondition } },
+        {
+          AND: [
+            { conditions_paiement: { some: { source: "DAF" } } },
+            { conditions_paiement: { some: { source: "DAF", ...unpaidCondition } } },
+          ],
+        },
+        {
+          AND: [
+            { conditions_paiement: { none: { source: "DAF" } } },
+            { conditions_paiement: { some: { source: "DEMANDEUR", ...unpaidCondition } } },
+          ],
+        },
+        {
+          AND: [
+            { conditions_paiement: { none: { source: "DAF" } } },
+            { conditions_paiement: { none: { source: "DEMANDEUR" } } },
+            { conditions_paiement: { some: unpaidCondition } },
+          ],
+        },
       ],
     },
   ];
@@ -211,7 +229,7 @@ async function computeReceptionPendingCount(userId) {
 
   const or = [];
   if (wantsDirector) or.push({ visa_directeur_id: null });
-  if (wantsDaf) or.push({ visa_directeur_id: { not: null }, visa_daf_id: null });
+  if (wantsDaf) or.push({ visa_directeur_id: { not: null }, visa_daf_id: null, visa_daf_requis: true });
   if (!or.length) return 0;
 
   const and = [{ OR: or }];

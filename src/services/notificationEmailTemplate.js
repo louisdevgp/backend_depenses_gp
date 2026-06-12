@@ -1,6 +1,6 @@
 const { resolveFrontendBaseUrl } = require("../utils/frontendUrl");
 
-const APP_NAME = "E-Dépenses";
+const APP_NAME = "E-Depenses";
 const BRAND_PRIMARY = "#16a34a";
 const BRAND_DARK = "#166534";
 const BRAND_LIGHT = "#ecfdf3";
@@ -24,6 +24,74 @@ function joinUrl(base, path) {
   return `${b}${p.startsWith("/") ? "" : "/"}${p}`;
 }
 
+function demandeRef(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  const raw =
+    m.numero ??
+    m.demandeNumero ??
+    m.demandeUuid ??
+    m.demande_uuid ??
+    m.demandeId ??
+    m.demande_id ??
+    m.demande ??
+    null;
+  if (raw == null || String(raw).trim() === "") return null;
+  return `#${String(raw).trim()}`;
+}
+
+function titleForType(type, meta) {
+  const t = String(type || "notification").toLowerCase();
+  const ref = demandeRef(meta);
+  const withDemande = (prefix) => (ref ? `${prefix} ${ref}` : prefix);
+
+  switch (t) {
+    case "achat_effectue":
+    case "demande_acheteur_assigne":
+    case "demande_acheteur_retire":
+      return withDemande("ACHAT");
+
+    case "demande_updated":
+    case "demande_returned_for_modification":
+      return withDemande("MODIFICATION ACHAT");
+
+    case "demande_created":
+    case "demande_deleted":
+    case "demande_cancelled":
+    case "demande_closed":
+      return withDemande("DEMANDE ACHAT");
+
+    case "validation_pending":
+    case "validation_step_approved":
+    case "validation_rejected":
+    case "validation_cancelled":
+      return withDemande("VALIDATION ACHAT");
+
+    case "paiement_pending":
+    case "paiement_effectue":
+    case "paiement_updated":
+    case "paiement_deleted":
+      return withDemande("PAIEMENT ACHAT");
+
+    case "reception_creee":
+    case "reception_updated":
+    case "reception_deleted":
+    case "reception_reminder":
+    case "reception_visa_pending":
+    case "reception_visa_directeur":
+    case "reception_visa_daf":
+      return withDemande("RECEPTION ACHAT");
+
+    case "delegation_created":
+    case "delegation_updated":
+    case "delegation_toggled":
+    case "delegation_deleted":
+      return "DELEGATION";
+
+    default:
+      return String(type || "NOTIFICATION").toUpperCase();
+  }
+}
+
 function inferCta(type, meta) {
   const front = resolveFrontendBaseUrl();
   const m = meta && typeof meta === "object" ? meta : {};
@@ -33,7 +101,7 @@ function inferCta(type, meta) {
   }
 
   if (m.receptionUuid) {
-    return { label: "Ouvrir la réception", url: joinUrl(front, `/receptions/${m.receptionUuid}`) };
+    return { label: "Ouvrir la reception", url: joinUrl(front, `/receptions/${m.receptionUuid}`) };
   }
 
   if (m.validationUuid) {
@@ -44,76 +112,24 @@ function inferCta(type, meta) {
     return { label: "Ouvrir la demande", url: joinUrl(front, `/demandes/${m.demandeUuid}`) };
   }
 
-  if (String(type).toLowerCase() === "validation_pending") {
+  const t = String(type || "").toLowerCase();
+  if (t === "validation_pending") {
     return { label: "Voir les validations", url: joinUrl(front, "/validations/pending") };
   }
-
-  if (String(type).toLowerCase().startsWith("delegation_")) {
-    return { label: "Ouvrir les délégations", url: joinUrl(front, "/delegations") };
+  if (t.startsWith("delegation_")) {
+    return { label: "Ouvrir les delegations", url: joinUrl(front, "/delegations") };
+  }
+  if (t.startsWith("reception_")) {
+    return { label: "Voir les receptions", url: joinUrl(front, "/receptions") };
+  }
+  if (t.startsWith("paiement_")) {
+    return { label: "Voir les paiements", url: joinUrl(front, "/paiements/pending") };
+  }
+  if (t.includes("achat")) {
+    return { label: "Voir les achats", url: joinUrl(front, "/achats/pending") };
   }
 
   return { label: "Ouvrir l'application", url: joinUrl(front, "/") };
-}
-
-function subjectForType(type, meta) {
-  const t = String(type || "notification");
-  const m = meta && typeof meta === "object" ? meta : {};
-  const prefix = `${APP_NAME} — `;
-
-  switch (t) {
-    case "demande_created":
-      return `${prefix}Demande soumise`;
-    case "demande_updated":
-      return `${prefix}Demande mise à jour`;
-    case "demande_deleted":
-      return `${prefix}Demande supprimée`;
-    case "validation_pending":
-      return `${prefix}Validation en attente${m.role ? ` (${m.role})` : ""}`;
-    case "validation_step_approved":
-      return `${prefix}Demande validée${m.role ? ` (${m.role})` : ""}`;
-    case "validation_rejected":
-      return `${prefix}Demande rejetée${m.role ? ` (${m.role})` : ""}`;
-    case "demande_returned_for_modification":
-      return `${prefix}Demande retournée pour modification${m.fromRole ? ` (${m.fromRole})` : ""}`;
-    case "paiement_effectue":
-      return `${prefix}Paiement effectué`;
-    case "paiement_pending":
-      return `${prefix}Paiement à effectuer`;
-    case "paiement_updated":
-      return `${prefix}Paiement modifié`;
-    case "paiement_deleted":
-      return `${prefix}Paiement supprimé`;
-    case "achat_effectue":
-      return `${prefix}Achat effectue`;
-    case "demande_acheteur_assigne":
-      return `${prefix}Affectation achat`;
-    case "demande_acheteur_retire":
-      return `${prefix}Affectation achat retiree`;
-    case "reception_creee":
-      return `${prefix}Réception créée`;
-    case "reception_updated":
-      return `${prefix}Réception modifiée`;
-    case "reception_deleted":
-      return `${prefix}Réception supprimée`;
-    case "reception_reminder":
-      return `${prefix}Réception en attente`;
-    case "reception_visa_pending":
-      return `${prefix}Visa DAF requis`;
-    case "reception_visa_directeur":
-      return `${prefix}Visa Directeur effectué`;
-    case "reception_visa_daf":
-      return `${prefix}Visa DAF effectué`;
-    case "delegation_created":
-      return `${prefix}Délégation créée`;
-    case "delegation_updated":
-      return `${prefix}Délégation modifiée`;
-    case "delegation_toggled":
-      return `${prefix}Délégation mise à jour`;
-    case "delegation_deleted":
-      return `${prefix}Délégation supprimée`;
-    default:
-      return `${prefix}${t}`;
-  }
 }
 
 function pickHighlights(type, meta) {
@@ -121,39 +137,42 @@ function pickHighlights(type, meta) {
   const m = meta && typeof meta === "object" ? meta : {};
   const items = [];
 
-  if (m.numero) items.push({ label: "Numéro", value: String(m.numero) });
+  const ref = demandeRef(m);
+  if (ref) items.push({ label: "Demande", value: ref });
+  if (m.numero) items.push({ label: "Numero", value: String(m.numero) });
 
-  if (m.role) items.push({ label: "Rôle", value: String(m.role) });
+  if (m.role) items.push({ label: "Role", value: String(m.role) });
   if (m.level != null) items.push({ label: "Niveau", value: String(m.level) });
-  if (m.currentRole) items.push({ label: "Étape actuelle", value: String(m.currentRole) });
+  if (m.currentRole) items.push({ label: "Etape actuelle", value: String(m.currentRole) });
   if (m.currentLevel != null) items.push({ label: "Niveau actuel", value: String(m.currentLevel) });
 
   if (t.startsWith("delegation_")) {
-    if (m.role_name) items.push({ label: "Rôle délégué", value: String(m.role_name) });
-    if (m.period) items.push({ label: "Période", value: String(m.period) });
+    if (m.role_name) items.push({ label: "Role delegue", value: String(m.role_name) });
+    if (m.period) items.push({ label: "Periode", value: String(m.period) });
     if (typeof m.is_active === "boolean") items.push({ label: "Active", value: m.is_active ? "Oui" : "Non" });
     if (m.actor) items.push({ label: "Action par", value: String(m.actor) });
   }
 
   if (t === "demande_returned_for_modification") {
-    if (m.fromRole) items.push({ label: "Rôle validateur", value: String(m.fromRole) });
-    if (m.previousRole) items.push({ label: "Étape précédente", value: String(m.previousRole) });
-    if (m.previousLevel != null) items.push({ label: "Niveau précédent", value: String(m.previousLevel) });
+    if (m.fromRole) items.push({ label: "Role validateur", value: String(m.fromRole) });
+    if (m.previousRole) items.push({ label: "Etape precedente", value: String(m.previousRole) });
+    if (m.previousLevel != null) items.push({ label: "Niveau precedent", value: String(m.previousLevel) });
     if (m.commentaire) items.push({ label: "Motif", value: String(m.commentaire) });
   }
 
-  return items.slice(0, 6);
+  return items.slice(0, 7);
 }
 
 function buildNotificationEmail({ type, message, meta }) {
   const safeMessage = message ? String(message) : "";
   const safeMeta = meta && typeof meta === "object" ? meta : null;
 
-  const subject = subjectForType(type, safeMeta);
+  const title = titleForType(type, safeMeta);
+  const subject = title;
   const { label: ctaLabel, url: ctaUrl } = inferCta(type, safeMeta);
   const highlights = pickHighlights(type, safeMeta);
 
-  const textLines = [safeMessage];
+  const textLines = [title, "", safeMessage];
   if (ctaUrl) {
     textLines.push("", `${ctaLabel} : ${ctaUrl}`);
   }
@@ -168,7 +187,7 @@ function buildNotificationEmail({ type, message, meta }) {
             (h) => `
           <tr>
             <td style="padding:6px 0; color:#475467; width:180px;">${escapeHtml(h.label)}</td>
-            <td style="padding:6px 0; color:${BRAND_TEXT}; font-weight:600;">${escapeHtml(h.value)}</td>
+            <td style="padding:6px 0; color:${BRAND_TEXT}; font-weight:700;">${escapeHtml(h.value)}</td>
           </tr>`
           )
           .join("")}
@@ -182,10 +201,11 @@ function buildNotificationEmail({ type, message, meta }) {
         <div style="background:#ffffff; border-radius:14px; overflow:hidden; border:1px solid #e5e7eb;">
           <div style="background:${BRAND_PRIMARY}; color:#ffffff; padding:16px 18px;">
             <div style="font-size:13px; opacity:0.9; letter-spacing:.2px;">${escapeHtml(APP_NAME)}</div>
-            <div style="font-size:20px; font-weight:700; margin-top:4px;">${escapeHtml(subject)}</div>
+            <div style="font-size:20px; font-weight:800; margin-top:4px;"><strong>${escapeHtml(subject)}</strong></div>
           </div>
 
           <div style="padding:18px;">
+            <div style="font-size:16px; font-weight:800; margin-bottom:10px;"><strong>${escapeHtml(subject)}</strong></div>
             <div style="font-size:15px; line-height:1.6; white-space:pre-wrap;">${escapeHtml(safeMessage)}</div>
 
             ${
@@ -210,7 +230,7 @@ function buildNotificationEmail({ type, message, meta }) {
         </div>
 
         <div style="text-align:center; font-size:12px; color:#9ca3af; margin-top:12px;">
-          — ${escapeHtml(APP_NAME)}
+          - ${escapeHtml(APP_NAME)}
         </div>
       </div>
     </div>

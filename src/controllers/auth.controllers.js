@@ -52,6 +52,7 @@ async function resetPassword(req, res) {
     if (e.message === "INVALID_RESET_TOKEN") {
       return res.status(400).json({ success: false, message: "Lien invalide ou expiré" });
     }
+    console.error("Error in resetPassword:", e);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 }

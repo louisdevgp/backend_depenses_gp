@@ -2,6 +2,7 @@
 const prisma = require("../config/prisma");
 const { randomUUID: uuidv4 } = require("crypto");
 const notifications = require("./notifications.services");
+const realtime = require("../realtime");
 const PDFDocument = require("pdfkit");
 const firma = require("./firma.services");
 const signatureSessions = require("./signatureSessions.services");
@@ -46,7 +47,7 @@ async function getAgentFromUser(user) {
 
   const agent = await prisma.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
-    include: { roles: true, users: true },
+    include: { roles: true, users: { include: { user_roles: { include: { roles: true } } } } },
   });
 
   if (!agent) throw new Error("Agent introuvable pour cet utilisateur");
@@ -130,6 +131,7 @@ const ACHAT_VISIBLE_STATUTS = new Set([
   "cloture",
   "cloturee",
 ]);
+const ACHAT_ASSIGNMENT_LOCKED_STATUTS = new Set(["achat_effectue", "receptionnee", "cloture", "cloturee"]);
 const ACHAT_ALLOWED_TYPES = new Set(["preuve_achat", "facture", "bon_livraison"]);
 
 function isTruthyFlag(value) {
@@ -139,6 +141,31 @@ function isTruthyFlag(value) {
 
 function normalizeAchatDocType(type) {
   return String(type || "").trim().toLowerCase();
+}
+
+function isAllowedAchatDocType(typeDocument) {
+  if (!typeDocument) return false;
+  if (ACHAT_ALLOWED_TYPES.has(typeDocument)) return true;
+  if (typeDocument.startsWith("preuve_achat:")) {
+    const details = String(typeDocument).slice("preuve_achat:".length).trim();
+    return details.length > 0;
+  }
+  return false;
+}
+
+function normalizeAchatDocTypeList(value) {
+  if (value == null) return [];
+  const rawList = Array.isArray(value) ? value : [value];
+  const out = [];
+  for (const raw of rawList) {
+    const t = normalizeAchatDocType(raw);
+    if (t) out.push(t);
+  }
+  return out;
+}
+
+function isAchatAssignmentLocked(statut) {
+  return ACHAT_ASSIGNMENT_LOCKED_STATUTS.has(String(statut || "").trim().toLowerCase());
 }
 
 function candidateScopesForDemandeOrg(org) {
@@ -216,6 +243,10 @@ function userEffectiveRoles(user, agent) {
   const tokenRoles = Array.isArray(user?.roles) ? user.roles : [];
   const out = new Set(tokenRoles.map(normalizeRoleName).filter(Boolean));
   if (agent?.roles?.name) out.add(normalizeRoleName(agent.roles.name));
+  const secondary = (agent?.users?.user_roles || [])
+    .map((ur) => normalizeRoleName(ur?.roles?.name))
+    .filter(Boolean);
+  secondary.forEach((r) => out.add(r));
   return Array.from(out);
 }
 
@@ -1844,9 +1875,12 @@ exports.listAcheteurCandidates = async (user, idOrUuid) => {
   const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
   const demande = await prisma.demandes_paiement.findFirst({
     where: { ...where, deleted_at: null },
-    select: { id: true, uuid: true, direction_id: true, acheteur_id: true },
+    select: { id: true, uuid: true, direction_id: true, acheteur_id: true, statut: true },
   });
   if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+  if (isAchatAssignmentLocked(demande?.statut)) {
+    throw withStatusCode(new Error("Affectation acheteur verrouillee: achat deja effectue"), 409);
+  }
 
   const canAssign = await canAssignAcheteurForDemande({ user, agent: actorAgent, demande });
   if (!canAssign) throw withStatusCode(new Error("Affectation acheteur non autorisee"), 403);
@@ -1924,6 +1958,9 @@ exports.assignAcheteur = async (user, idOrUuid, payload = {}) => {
     },
   });
   if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+  if (isAchatAssignmentLocked(demande?.statut)) {
+    throw withStatusCode(new Error("Affectation acheteur verrouillee: achat deja effectue"), 409);
+  }
 
   const canAssign = await canAssignAcheteurForDemande({ user, agent: actorAgent, demande });
   if (!canAssign) throw withStatusCode(new Error("Affectation acheteur non autorisee"), 403);
@@ -2036,9 +2073,18 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
     throw withStatusCode(new Error("Action reservee au role ACHETEUR"), 403);
   }
 
-  const typeDocument = normalizeAchatDocType(payload?.type_document || "preuve_achat");
-  if (!ACHAT_ALLOWED_TYPES.has(typeDocument)) {
+  const fallbackTypeDocument = normalizeAchatDocType(payload?.type_document || "preuve_achat");
+  const typeDocumentList = normalizeAchatDocTypeList(
+    payload?.type_documents ?? payload?.["type_documents[]"]
+  );
+  if (!typeDocumentList.length && !isAllowedAchatDocType(fallbackTypeDocument)) {
     throw withStatusCode(new Error("Type de document achat invalide"), 400);
+  }
+  if (typeDocumentList.length && typeDocumentList.length !== files.length) {
+    throw withStatusCode(
+      new Error("Nombre de types de documents invalide par rapport aux fichiers envoyes"),
+      400
+    );
   }
   const commentaire = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
 
@@ -2077,7 +2123,11 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
     }
 
     const createdDocuments = [];
-    for (const f of files) {
+    for (const [idx, f] of files.entries()) {
+      const typeDocument = typeDocumentList[idx] || fallbackTypeDocument;
+      if (!isAllowedAchatDocType(typeDocument)) {
+        throw withStatusCode(new Error("Type de document achat invalide"), 400);
+      }
       const created = await tx.documents.create({
         data: {
           uuid: uuidv4(),
@@ -2091,7 +2141,6 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
           taille: f.size != null ? BigInt(f.size) : null,
           upload_by_id: Number(actorAgent.id),
           created_at: now,
-          updated_at: now,
         },
       });
       createdDocuments.push(created);
@@ -2170,6 +2219,14 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
     // ignore notification errors
   }
 
+  try {
+    if (actorUserId) {
+      await realtime.emitAchatPendingStatus(Number(actorUserId));
+    }
+  } catch {
+    // ignore realtime errors
+  }
+
   return {
     demande: result.updated,
     documents: result.createdDocuments,
@@ -2188,12 +2245,14 @@ exports.closeDemande = async (user, idOrUuid) => {
   const statut = String(demande?.statut || "").toLowerCase();
   if (["cloture", "cloturee"].includes(statut)) return demande;
 
-  const hasVisaDaf =
+  const hasFinalReception =
     Array.isArray(demande?.receptions) &&
-    demande.receptions.some((r) => r?.visa_daf_id);
+    demande.receptions.some(
+      (r) => Boolean(r?.visa_directeur_id) && (r?.visa_daf_requis === false || Boolean(r?.visa_daf_id))
+    );
 
-  if (!hasVisaDaf) {
-    throw withStatusCode(new Error("Cloture interdite: visa DAF requis"), 409);
+  if (!hasFinalReception) {
+    throw withStatusCode(new Error("Cloture interdite: reception finale non atteinte"), 409);
   }
 
   const updated = await prisma.demandes_paiement.update({

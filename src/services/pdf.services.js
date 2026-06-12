@@ -178,7 +178,7 @@ function isDemandeFullyValidated(d) {
 }
 
 function isReceptionFullyVised(r) {
-  return Boolean(r?.visa_directeur_id) && Boolean(r?.visa_daf_id);
+  return Boolean(r?.visa_directeur_id) && (r?.visa_daf_requis === false || Boolean(r?.visa_daf_id));
 }
 
 function hmacSignature(text) {
@@ -1031,6 +1031,9 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
 async function streamReceptionPdf(res, idOrUuid, { req } = {}) {
   const r = await getReceptionData(idOrUuid);
   if (!isReceptionFullyVised(r)) {
+    if (r?.visa_daf_requis === false) {
+      throw new Error("PDF indisponible: la reception doit etre visee par le Directeur");
+    }
     throw new Error("PDF indisponible: la réception doit être visée par le Directeur et le DAF");
   }
   return streamReceptionPdfFromData(res, r, { req });

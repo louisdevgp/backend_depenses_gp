@@ -54,7 +54,7 @@ function isDemandeFullyValidated(d) {
 }
 
 function isReceptionFullyVised(r) {
-  return Boolean(r?.visa_directeur_id) && Boolean(r?.visa_daf_id);
+  return Boolean(r?.visa_directeur_id) && (r?.visa_daf_requis === false || Boolean(r?.visa_daf_id));
 }
 
 function parseQrToken(token) {
@@ -275,6 +275,7 @@ async function verifyToken({ token, user = null }) {
   const visasPublic = {
     visa_directeur: Boolean(reception.visa_directeur_id),
     visa_daf: Boolean(reception.visa_daf_id),
+    visa_daf_requis: reception.visa_daf_requis !== false,
   };
 
   const visas = showDetails
@@ -295,6 +296,7 @@ async function verifyToken({ token, user = null }) {
               email: reception.agents_receptions_visa_daf_idToagents?.users?.email || null,
             }
           : null,
+        visa_daf_requis: reception.visa_daf_requis !== false,
         recu_par: reception.recu_par_id
           ? {
               id: reception.recu_par_id,

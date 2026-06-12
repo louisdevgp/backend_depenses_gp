@@ -25,6 +25,22 @@ function normalizeReceptionPhase(value) {
   return null;
 }
 
+function parseOptionalBoolean(value) {
+  if (value == null) return null;
+  if (typeof value === "boolean") return value;
+  const v = String(value).trim().toLowerCase();
+  if (!v) return null;
+  if (["true", "1", "yes", "oui", "y"].includes(v)) return true;
+  if (["false", "0", "no", "non", "n"].includes(v)) return false;
+  return null;
+}
+
+function resolveVisaDafRequired(value, fallback = true) {
+  const parsed = parseOptionalBoolean(value);
+  if (parsed == null) return Boolean(fallback);
+  return parsed;
+}
+
 function candidateScopesForDemandeOrg(org) {
   const scopes = ["GLOBAL"];
   if (!org) return scopes;
@@ -1030,6 +1046,11 @@ async function startVisaSignature(kind, receptionId, payload, agentId, userId) {
       err.statusCode = 409;
       throw err;
     }
+    if (reception.visa_daf_requis === false) {
+      const err = new Error("Visa DAF non requis pour cette reception");
+      err.statusCode = 409;
+      throw err;
+    }
     if (reception.visa_daf_id) {
       const err = new Error("Reception deja visee par le DAF");
       err.statusCode = 409;
@@ -1118,6 +1139,11 @@ async function startVisaSignature(kind, receptionId, payload, agentId, userId) {
     kind,
   };
 
+  const sessionPayload = { commentaire: commentaireTrimmed || null };
+  if (kind === "directeur") {
+    sessionPayload.visa_daf_requis = resolveVisaDafRequired(payload?.visa_daf_requis, reception.visa_daf_requis);
+  }
+
   const session = await signatureSessions.createSignatureSession({
     entity_type: "reception",
     action: kind === "daf" ? "visa_daf" : "visa_directeur",
@@ -1128,7 +1154,7 @@ async function startVisaSignature(kind, receptionId, payload, agentId, userId) {
     signature_request_id: String(signingRequestId),
     signature_request_user_id: firmaSignerUserId != null ? String(firmaSignerUserId) : null,
     signature_status: "pending",
-    payload: { commentaire: commentaireTrimmed || null },
+    payload: sessionPayload,
     signature_payload: signaturePayload,
   });
 
@@ -1413,7 +1439,7 @@ async function updateReception(id, payload, actorAgentId) {
 
 async function visaDirecteur(
   id,
-  { signature_directeur_url, signature_data_url, commentaire } = {},
+  { signature_directeur_url, signature_data_url, commentaire, visa_daf_requis } = {},
   directeurAgentId,
   options = {}
 ) {
@@ -1435,22 +1461,46 @@ async function visaDirecteur(
 
   // On ignore les signatures car on ne les gère plus
   const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
+  const visaDafRequis = resolveVisaDafRequired(visa_daf_requis, existing.visa_daf_requis);
+  const now = new Date();
 
-  const updated = await prisma.receptions.update({
-    where: { id: Number(id) },
-    data: {
-      visa_directeur_id: Number(directeurAgentId),
-      // Plus de signature_directeur_url
-      visa_directeur_commentaire: commentaireTrimmed ? commentaireTrimmed : null,
-      updated_at: new Date(),
-    },
+  const { updated, demandeStatusChangedToReceptionnee } = await prisma.$transaction(async (tx) => {
+    const receptionUpdated = await tx.receptions.update({
+      where: { id: Number(id) },
+      data: {
+        visa_directeur_id: Number(directeurAgentId),
+        visa_daf_requis: visaDafRequis,
+        // Plus de signature_directeur_url
+        visa_directeur_commentaire: commentaireTrimmed ? commentaireTrimmed : null,
+        updated_at: now,
+      },
+    });
+
+    let demandeStatusChanged = false;
+    if (!visaDafRequis) {
+      const demandeRow = await tx.demandes_paiement.findUnique({
+        where: { id: Number(existing.demande_id) },
+        select: { statut: true },
+      });
+      const currentStatut = String(demandeRow?.statut || "").toLowerCase();
+      if (!["cloture", "cloturee"].includes(currentStatut)) {
+        await tx.demandes_paiement.update({
+          where: { id: Number(existing.demande_id) },
+          data: { statut: "receptionnee", updated_at: now },
+        });
+        demandeStatusChanged = true;
+      }
+    }
+
+    return { updated: receptionUpdated, demandeStatusChangedToReceptionnee: demandeStatusChanged };
   });
 
   // Notifications after commit (emails non-bloquants)
+  const notifiedDafUserIds = [];
   try {
     const actorUserId = await findUserIdByAgentId(directeurAgentId);
     const demandeurUserId = await resolveDemandeurUserIdByDemandeId(existing.demande_id);
-    const dafUserIds = await resolveRoleUserIds("DAF");
+    const dafUserIds = visaDafRequis ? await resolveRoleUserIds("DAF") : [];
 
     if (demandeurUserId && Number(demandeurUserId) !== Number(actorUserId)) {
       await notifications.createNotification({
@@ -1473,6 +1523,7 @@ async function visaDirecteur(
           meta: { receptionId: updated.id, receptionUuid: updated.uuid },
           sendEmailNow: true,
         });
+        notifiedDafUserIds.push(Number(dafUserId));
       }
     }
   } catch {
@@ -1484,17 +1535,21 @@ async function visaDirecteur(
     if (actorUserId) {
       await realtime.emitReceptionPendingStatus(actorUserId);
     }
+    for (const dafUserId of notifiedDafUserIds) {
+      await realtime.emitReceptionPendingStatus(dafUserId);
+    }
   } catch {
     // ignore realtime errors
   }
 
-  return updated;
+  return { ...updated, demande_status_changed_to_receptionnee: demandeStatusChangedToReceptionnee };
 }
 
 async function visaDaf(id, { signature_daf_url, signature_data_url, commentaire } = {}, dafAgentId, options = {}) {
   const existing = await prisma.receptions.findUnique({ where: { id: Number(id) } });
   if (!existing) throw new Error("Reception introuvable");
   if (!existing.visa_directeur_id) throw new Error("Visa Directeur requis avant le Visa DAF");
+  if (existing.visa_daf_requis === false) throw new Error("Visa DAF non requis pour cette reception");
   if (existing.visa_daf_id) throw new Error("Réception déjà visée par le DAF");
 
   // On ignore les signatures car on ne les gère plus
