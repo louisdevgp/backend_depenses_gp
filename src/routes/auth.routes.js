@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const validate = require("../middlewares/validate.middleware");
 const ctrl = require("../controllers/auth.controllers");
+const otpCtrl = require("../controllers/otp.controllers");
 const v = require("../validators/auth.validators");
 const auth = require("../middlewares/auth.middleware");
 
@@ -14,6 +15,8 @@ router.post("/reset-password", validate(v.resetPasswordSchema), ctrl.resetPasswo
 // Authenticated password change (used for first-login enforcement too)
 router.patch("/change-password", auth, validate(v.changePasswordSchema), ctrl.changePassword);
 
-
+// OTP hebdomadaire (requis avant toute signature Firma)
+router.post("/otp/request", auth, otpCtrl.requestOtp);
+router.post("/otp/verify", auth, otpCtrl.verifyOtp);
 
 module.exports = router;

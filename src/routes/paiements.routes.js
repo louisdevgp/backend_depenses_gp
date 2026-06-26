@@ -2,10 +2,11 @@ const router = require("express").Router();
 const requireAuth = require("../middlewares/auth.middleware");
 const ctrl = require("../controllers/paiements.controllers");
 const requirePermission = require("../middlewares/requirePermission.middleware");
+const requireWeeklyOtp = require("../middlewares/requireWeeklyOtp.middleware");
 const P = require("../constants/permissions");
 
 router.post("/pay", requireAuth, requirePermission(P.PAIEMENT_CREATE), ctrl.create);
-router.post("/signature/start", requireAuth, requirePermission(P.PAIEMENT_CREATE), ctrl.startSignature);
+router.post("/signature/start", requireAuth, requirePermission(P.PAIEMENT_CREATE), requireWeeklyOtp, ctrl.startSignature);
 router.post("/signature/complete", requireAuth, requirePermission(P.PAIEMENT_CREATE), ctrl.completeSignature);
 router.get("/", requireAuth, requirePermission(P.PAIEMENT_LIST), ctrl.list);
 

@@ -1,12 +1,13 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
 const requirePermission = require("../middlewares/requirePermission.middleware");
+const requireWeeklyOtp = require("../middlewares/requireWeeklyOtp.middleware");
 const c = require("../controllers/receptions.controllers");
 const P = require("../constants/permissions");
 
 // CRUD
 router.post("/", auth, requirePermission(P.RECEPTION_CREATE), c.create);
-router.post("/signature/start", auth, requirePermission(P.RECEPTION_CREATE), c.startSignature);
+router.post("/signature/start", auth, requirePermission(P.RECEPTION_CREATE), requireWeeklyOtp, c.startSignature);
 router.post("/signature/complete", auth, requirePermission(P.RECEPTION_CREATE), c.completeSignature);
 router.get("/", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL, P.RECEPTION_LIST]), c.list);
 router.get("/:idOrUuid/pdf", auth, requirePermission([P.RECEPTION_LIST_SELF, P.RECEPTION_LIST_ALL, P.RECEPTION_LIST]), c.pdf);
@@ -22,6 +23,7 @@ router.post(
   "/:id/visa-directeur/signature/start",
   auth,
   requirePermission(P.RECEPTION_VISA_DIRECTEUR),
+  requireWeeklyOtp,
   c.startVisaDirecteurSignature
 );
 router.post(
@@ -34,6 +36,7 @@ router.post(
   "/:id/visa-daf/signature/start",
   auth,
   requirePermission(P.RECEPTION_VISA_DAF),
+  requireWeeklyOtp,
   c.startVisaDafSignature
 );
 router.post(

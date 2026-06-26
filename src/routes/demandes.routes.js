@@ -1,13 +1,14 @@
 const router = require("express").Router();
 const auth = require("../middlewares/auth.middleware");
 const requirePermission = require("../middlewares/requirePermission.middleware");
+const requireWeeklyOtp = require("../middlewares/requireWeeklyOtp.middleware");
 const upload = require("../middlewares/upload.middleware");
 const ctrl = require("../controllers/demandes.controllers");
 const P = require("../constants/permissions");
 
 // CRUD
 router.post("/", auth, requirePermission(P.DEMANDE_CREATE), ctrl.create);
-router.post("/signature/start", auth, requirePermission(P.DEMANDE_CREATE), ctrl.startSignature);
+router.post("/signature/start", auth, requirePermission(P.DEMANDE_CREATE), requireWeeklyOtp, ctrl.startSignature);
 router.post("/signature/complete", auth, requirePermission(P.DEMANDE_CREATE), ctrl.completeSignature);
 // Liste globale (encadrement): rôles de validation + compta + admin
 router.get("/", auth, requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_ALL, P.DEMANDE_LIST_ASSIGNED_ACHETEUR]), ctrl.list);
