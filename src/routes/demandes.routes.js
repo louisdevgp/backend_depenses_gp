@@ -16,7 +16,13 @@ router.get("/by-demandeur/:demandeurId", auth, requirePermission(P.DEMANDE_LIST_
 router.get(
   "/:idOrUuid/pdf",
   auth,
-  requirePermission([P.DEMANDE_PDF, P.DEMANDE_LIST_ASSIGNED_ACHETEUR, P.VALIDATION_LIST_PENDING, P.VALIDATION_LIST_DONE]),
+  requirePermission([
+    P.DEMANDE_PDF,
+    P.DEMANDE_LIST_ASSIGNED_ACHETEUR,
+    P.VALIDATION_LIST_PENDING,
+    P.VALIDATION_LIST_DONE,
+    P.PAIEMENT_GET,
+  ]),
   ctrl.pdf
 );
 router.get(
@@ -34,14 +40,34 @@ router.post(
   upload.array("files", 10),
   ctrl.confirmAchat
 );
+router.post(
+  "/:idOrUuid/achat/not-required",
+  auth,
+  requirePermission([
+    P.DEMANDE_LIST_ASSIGNED_ACHETEUR,
+    P.DEMANDE_ASSIGN_ACHETEUR,
+    P.DEMANDE_CLOSE,
+  ]),
+  ctrl.confirmAchatNotRequired
+);
 router.get(
   "/:idOrUuid",
   auth,
   requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_SELF, P.DEMANDE_LIST_ASSIGNED_ACHETEUR, P.VALIDATION_LIST_PENDING, P.VALIDATION_LIST_DONE]),
   ctrl.getOne
 );
-router.put("/:idOrUuid", auth, requirePermission(P.DEMANDE_UPDATE), ctrl.update);
-router.delete("/:idOrUuid", auth, requirePermission(P.DEMANDE_DELETE), ctrl.softDelete);
+router.put(
+  "/:idOrUuid",
+  auth,
+  requirePermission([P.DEMANDE_UPDATE, P.VALIDATION_APPROVE]),
+  ctrl.update
+);
+router.delete(
+  "/:idOrUuid",
+  auth,
+  requirePermission([P.DEMANDE_DELETE, P.VALIDATION_APPROVE]),
+  ctrl.softDelete
+);
 router.patch("/:idOrUuid/close", auth, requirePermission(P.DEMANDE_CLOSE), ctrl.close);
 
 module.exports = router;

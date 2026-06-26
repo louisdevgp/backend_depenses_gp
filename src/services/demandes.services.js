@@ -3,14 +3,19 @@ const prisma = require("../config/prisma");
 const { randomUUID: uuidv4 } = require("crypto");
 const notifications = require("./notifications.services");
 const realtime = require("../realtime");
-const PDFDocument = require("pdfkit");
 const firma = require("./firma.services");
 const signatureSessions = require("./signatureSessions.services");
+const signaturePdfTemplate = require("./signaturePdfTemplate");
 const {
   normalizePermissionCode,
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,
 } = require("../utils/permissionScopes");
+const {
+  findReturnStep,
+  resolveDirectionDirectorAgent,
+  resolveReturnTarget,
+} = require("../utils/returnWorkflow");
 
 function withStatusCode(err, statusCode) {
   err.statusCode = statusCode;
@@ -61,7 +66,33 @@ async function assertCanEditDemande({ user, demande, action = "Modification", al
 
   const agent = await getAgentFromUser(user);
   const isAdmin = isAdminUser({ tokenRoles: user?.roles, agentRoleName: agent?.roles?.name });
-  if (isAdmin) return { agent, isAdmin: true, isOwner: false, canEditAsDirector: false };
+  if (isAdmin) {
+    return {
+      agent,
+      isAdmin: true,
+      isOwner: false,
+      canEditAsDirector: false,
+      canEditAsReturnTarget: false,
+    };
+  }
+
+  const demandeStatut = String(demande?.statut || "").toLowerCase();
+  if (demandeStatut === "a_modifier") {
+    const returnWorkflow = await buildReturnWorkflowContext({ user, agent, demande });
+    if (returnWorkflow?.active) {
+      if (returnWorkflow.can_edit) {
+        return {
+          agent,
+          isAdmin: false,
+          isOwner: Number(demande.demandeur_id) === Number(agent.id),
+          canEditAsDirector: false,
+          canEditAsReturnTarget: true,
+          returnWorkflow,
+        };
+      }
+      throw withStatusCode(new Error(`${action} reservee au destinataire du retour`), 403);
+    }
+  }
 
   const demandeurUserId = await getDemandeurUserId(demande.id);
   if (demandeurUserId != null) {
@@ -69,12 +100,26 @@ async function assertCanEditDemande({ user, demande, action = "Modification", al
     const isOwnerByAgentId = Number(demande.demandeur_id) === Number(agent.id);
     const isOwnerByUserIdFallback = Number(demande.demandeur_id) === Number(actorUserId);
     if (isOwnerByUserId || isOwnerByAgentId || isOwnerByUserIdFallback) {
-      return { agent, isAdmin: false, isOwner: true, canEditAsDirector: false };
+      return {
+        agent,
+        isAdmin: false,
+        isOwner: true,
+        canEditAsDirector: false,
+        canEditAsReturnTarget: false,
+      };
     }
 
     if (allowDirectorStage && action === "Modification") {
       const canEditAsDirector = await canEditAtDirectorStage({ user, demande, agent });
-      if (canEditAsDirector) return { agent, isAdmin: false, isOwner: false, canEditAsDirector: true };
+      if (canEditAsDirector) {
+        return {
+          agent,
+          isAdmin: false,
+          isOwner: false,
+          canEditAsDirector: true,
+          canEditAsReturnTarget: false,
+        };
+      }
     }
 
     throw withStatusCode(new Error(`${action} non autorisee`), 403);
@@ -84,12 +129,26 @@ async function assertCanEditDemande({ user, demande, action = "Modification", al
   const isOwnerByAgentId = Number.isFinite(demandeurId) && demandeurId === Number(agent.id);
   const isOwnerByUserId = Number.isFinite(demandeurId) && demandeurId === Number(actorUserId);
   if (isOwnerByAgentId || isOwnerByUserId) {
-    return { agent, isAdmin: false, isOwner: true, canEditAsDirector: false };
+    return {
+      agent,
+      isAdmin: false,
+      isOwner: true,
+      canEditAsDirector: false,
+      canEditAsReturnTarget: false,
+    };
   }
 
   if (allowDirectorStage && action === "Modification") {
     const canEditAsDirector = await canEditAtDirectorStage({ user, demande, agent });
-    if (canEditAsDirector) return { agent, isAdmin: false, isOwner: false, canEditAsDirector: true };
+    if (canEditAsDirector) {
+      return {
+        agent,
+        isAdmin: false,
+        isOwner: false,
+        canEditAsDirector: true,
+        canEditAsReturnTarget: false,
+      };
+    }
   }
 
   throw withStatusCode(new Error(`${action} non autorisee`), 403);
@@ -250,6 +309,99 @@ function userEffectiveRoles(user, agent) {
   return Array.from(out);
 }
 
+async function canActAsReturnTarget({ user, agent, demande, resolution, client = prisma }) {
+  if (!agent?.id || !resolution?.targetAgentId) return false;
+
+  const actorAgentId = Number(agent.id);
+  const targetAgentId = Number(resolution.targetAgentId);
+  if (actorAgentId === targetAgentId) return true;
+  if (resolution.kind !== "validation_step") return false;
+
+  const targetRole = normalizeRoleName(resolution.targetRole);
+  const demandeOrg = {
+    direction_id: demande?.direction_id ?? null,
+    departement_id: demande?.departement_id ?? null,
+    service_id: demande?.service_id ?? null,
+  };
+  const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
+  const now = new Date();
+
+  const delegation = await client.delegations.findFirst({
+    where: {
+      principal_id: targetAgentId,
+      delegate_id: actorAgentId,
+      role_name: targetRole,
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    },
+    select: { id: true },
+  });
+  if (delegation) return true;
+
+  const roles = userEffectiveRoles(user, agent);
+  return (
+    targetRole === "DIRECTEUR" &&
+    roles.includes("DIRECTEUR") &&
+    agent?.direction_id != null &&
+    demande?.direction_id != null &&
+    Number(agent.direction_id) === Number(demande.direction_id)
+  );
+}
+
+async function buildReturnWorkflowContext({ user, agent, demande, client = prisma }) {
+  if (String(demande?.statut || "").toLowerCase() !== "a_modifier") return null;
+
+  const steps = Array.isArray(demande?.validation_steps)
+    ? demande.validation_steps
+    : await client.validation_steps.findMany({
+        where: { demande_id: Number(demande.id) },
+        orderBy: { level: "asc" },
+      });
+  const returnStep = findReturnStep(steps);
+  const directionDirector =
+    normalizeRoleName(returnStep?.role_name) === "DAF"
+      ? await resolveDirectionDirectorAgent(client, demande?.direction_id)
+      : null;
+  const resolution = resolveReturnTarget({
+    steps,
+    returnStep,
+    demandeurId: demande?.demandeur_id,
+    directionDirectorAgentId: directionDirector?.id,
+  });
+  if (!resolution) return null;
+
+  const targetAgentId = resolution.targetAgentId;
+  let targetUserId = null;
+  if (targetAgentId != null) {
+    const targetAgent = await client.agents.findUnique({
+      where: { id: Number(targetAgentId) },
+      select: { user_id: true },
+    });
+    targetUserId = targetAgent?.user_id != null ? Number(targetAgent.user_id) : null;
+  }
+
+  const isAdmin = isAdminUser({ tokenRoles: user?.roles, agentRoleName: agent?.roles?.name });
+  const canAct = isAdmin
+    ? true
+    : await canActAsReturnTarget({ user, agent, demande, resolution, client });
+
+  return {
+    active: true,
+    source_step_id: Number(returnStep.id),
+    source_role: normalizeRoleName(returnStep.role_name) || null,
+    target_kind: resolution.kind,
+    target_step_id: resolution.targetStep?.id != null ? Number(resolution.targetStep.id) : null,
+    target_role: resolution.targetRole,
+    target_agent_id: targetAgentId,
+    target_user_id: targetUserId,
+    restart_level: resolution.restartLevel,
+    can_edit: canAct,
+    can_cancel: canAct,
+  };
+}
+
 function hasAnyRole(roles = [], list = []) {
   const roleSet = new Set((roles || []).map(normalizeRoleName).filter(Boolean));
   return (list || []).some((r) => roleSet.has(normalizeRoleName(r)));
@@ -374,6 +526,29 @@ async function resolveStakeholderUserIds({ demandeId, demande = null, excludeUse
 
   return { demande: demandeRow, demandeurUserId, recipients };
 }
+
+async function resolveDirectionAcheteurUserIds(directionId, excludeUserId = null) {
+  if (directionId == null) return [];
+  const rows = await prisma.agents.findMany({
+    where: {
+      deleted_at: null,
+      direction_id: Number(directionId),
+      OR: [
+        { roles: { is: { name: "ACHETEUR" } } },
+        { users: { user_roles: { some: { roles: { name: "ACHETEUR" } } } } },
+      ],
+    },
+    select: { users: { select: { id: true } } },
+  });
+  return Array.from(
+    new Set(
+      rows
+        .map((row) => row?.users?.id)
+        .filter((id) => id != null && Number(id) !== Number(excludeUserId))
+        .map(Number)
+    )
+  );
+}
 function assertCanReadDemande({ demande, user, agent }) {
   if (!demande) {
     const err = new Error("Demande introuvable");
@@ -390,8 +565,26 @@ function assertCanReadDemande({ demande, user, agent }) {
     agentUserId != null && Number(demande.demandeur_id) === Number(agentUserId);
 
   if (isOwnerByAgentId || isOwnerByUserId || isOwnerByUserIdFallback) return true;
+  if (
+    demande?.return_workflow?.active &&
+    demande.return_workflow.can_edit === true &&
+    Number(demande.return_workflow.target_agent_id) === Number(agent?.id)
+  ) {
+    return true;
+  }
 
   const roles = userEffectiveRoles(user, agent);
+  const canReadAsValidator =
+    (hasPermission(user, "VALIDATION_LIST_PENDING") ||
+      hasPermission(user, "VALIDATION_LIST_DONE") ||
+      hasPermission(user, "VALIDATION_GET")) &&
+    (demande?.validation_steps || []).some(
+      (step) =>
+        Number(step?.validator_id) === Number(agent?.id) ||
+        Number(step?.validated_by_id) === Number(agent?.id)
+    );
+  if (canReadAsValidator) return true;
+
   const statut = String(demande?.statut || "").toLowerCase();
   const canReadAsAcheteurPool =
     hasPermission(user, "DEMANDE_LIST_ASSIGNED_ACHETEUR") &&
@@ -461,7 +654,17 @@ exports.assertCanReadDemandeByIdOrUuid = async (user, idOrUuid) => {
   });
 
   const agent = await getAgentFromUser(user);
-  assertCanReadDemande({ demande, user, agent });
+  try {
+    assertCanReadDemande({ demande, user, agent });
+  } catch (err) {
+    if (err?.statusCode === 403 && hasPermission(user, "PAIEMENT_GET") && demande?.id) {
+      const paiementCount = await prisma.paiements.count({
+        where: { demande_id: Number(demande.id) },
+      });
+      if (paiementCount > 0) return true;
+    }
+    throw err;
+  }
   return true;
 };
 
@@ -531,7 +734,7 @@ exports.startCreateSignature = async (user, payload = {}) => {
     },
   });
 
-  const signingRequestId = signingRequest?.id;
+  const signingRequestId = firma.extractSigningRequestId(signingRequest);
   if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
 
   try {
@@ -851,86 +1054,30 @@ function splitAgentName(agent) {
 }
 
 function buildSignatureFields({ recipientId }) {
-  const A4_WIDTH = 595.28;
-  const A4_HEIGHT = 841.89;
-  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
-
-  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
-  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
-
-  const toField = (type, rect) => ({
-    recipient_id: recipientId,
-    type,
-    page_number: 1,
-    position: {
-      x: toPct(rect.x, A4_WIDTH),
-      y: toPct(rect.y, A4_HEIGHT),
-      width: toPct(rect.width, A4_WIDTH),
-      height: toPct(rect.height, A4_HEIGHT),
-    },
-  });
-
-  return [
-    toField("signature", signatureRect),
-    toField("date", dateRect),
-  ];
+  return signaturePdfTemplate.buildSignatureFields({ recipientId });
 }
 
 function buildDemandeCreationSignaturePdf({ demandeUuid, payload, agent, montantAPayer, remiseCalc }) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
-    const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+  const devise = payload?.devise ? String(payload.devise) : "FCFA";
+  const montantNet = remiseCalc?.montant_net != null ? remiseCalc.montant_net : montantAPayer;
+  const itemsCount = Array.isArray(payload?.items) ? payload.items.filter((it) => it?.designation).length : 0;
 
-    doc.font("Helvetica-Bold").fontSize(16).text("Creation de demande", { align: "center" });
-    doc.moveDown(0.6);
-    doc.font("Helvetica").fontSize(10);
-
-    const devise = payload?.devise ? String(payload.devise) : "FCFA";
-    const montantNet = remiseCalc?.montant_net != null ? remiseCalc.montant_net : montantAPayer;
-    const itemsCount = Array.isArray(payload?.items) ? payload.items.filter((it) => it?.designation).length : 0;
-
-    const rows = [
-      ["Reference demande", demandeUuid || "-"],
-      ["Motif", payload?.motif || "-"],
-      ["Beneficiaire", payload?.beneficiaire || "-"],
-      [
-        "Montant brut",
-        montantAPayer != null ? `${formatMoneyValue(montantAPayer)} ${devise}` : "-",
-      ],
-      [
-        "Montant net",
-        montantNet != null ? `${formatMoneyValue(montantNet)} ${devise}` : "-",
-      ],
-      ["Demandeur", agentDisplayName(agent)],
-      ["Nb items", itemsCount ? String(itemsCount) : "-"],
-      ["Date", formatDateTime(new Date())],
-    ];
-
-    rows.forEach(([label, value]) => {
-      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
-      doc.font("Helvetica").text(String(value ?? "-"));
-    });
-
-    doc.moveDown(2);
-    doc.font("Helvetica").fontSize(9).text(
-      "Ce document sert uniquement de preuve de signature electronique pour la creation."
-    );
-
-    const pageHeight = doc.page.height;
-    const sigHeight = 50;
-    const sigY = 140;
-    const sigTop = pageHeight - sigY - sigHeight;
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
-    doc.rect(50, sigTop, 250, sigHeight).stroke();
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
-    doc.rect(320, sigTop, 120, sigHeight).stroke();
-
-    doc.end();
+  return signaturePdfTemplate.buildSignaturePdf({
+    title: "Creation de demande",
+    subtitle: "Validation electronique de la creation d'une demande de depense",
+    reference: demandeUuid || "-",
+    generatedAtText: formatDateTime(new Date()),
+    signerName: agentDisplayName(agent),
+    note: "Le signataire confirme la creation de cette demande et l'exactitude des informations renseignees.",
+    footer: "Ce document sert uniquement de preuve de signature electronique pour la creation.",
+    rows: [
+      { label: "Motif", value: payload?.motif || "-" },
+      { label: "Beneficiaire", value: payload?.beneficiaire || "-" },
+      { label: "Montant brut", value: montantAPayer != null ? `${formatMoneyValue(montantAPayer)} ${devise}` : "-" },
+      { label: "Montant net", value: montantNet != null ? `${formatMoneyValue(montantNet)} ${devise}` : "-" },
+      { label: "Demandeur", value: agentDisplayName(agent) },
+      { label: "Nombre d'articles", value: itemsCount ? String(itemsCount) : "-" },
+    ],
   });
 }
 
@@ -1309,7 +1456,7 @@ exports.createDemande = async (user, payload, options = {}) => {
           type: "validation_pending",
           demande_id: demande.id,
           message: `Une demande est en attente de votre validation (${first.role_name}).`,
-          meta: { demandeUuid: demande.uuid, level: 1 },
+          meta: { demandeUuid: demande.uuid, level: 1, role: first.role_name },
           sendEmailNow: true,
         });
       }
@@ -1352,6 +1499,27 @@ exports.listDemandes = async (user, query) => {
   }
   if (requestedStatuts.length === 1) where.statut = requestedStatuts[0];
   else if (requestedStatuts.length > 1) where.statut = { in: requestedStatuts };
+
+  if (canUseAchatPool) {
+    const achatDecision = String(query?.achat_decision ?? query?.achatDecision ?? "")
+      .trim()
+      .toLowerCase();
+    if (achatDecision === "pending") {
+      where = { AND: [where, { achat_requis: null }] };
+    } else if (achatDecision === "done") {
+      where = {
+        AND: [
+          where,
+          {
+            OR: [
+              { achat_requis: { not: null } },
+              { statut: { in: ["achat_effectue", "receptionnee", "cloture", "cloturee"] } },
+            ],
+          },
+        ],
+      };
+    }
+  }
 
   if (query.demandeur_id) where.demandeur_id = Number(query.demandeur_id);
   if (query.beneficiaire) {
@@ -1421,6 +1589,9 @@ exports.listDemandes = async (user, query) => {
       agents_demandes_paiement_acheteur_idToagents: {
         include: { users: true, directions: true, departements: true, services: true, roles: true },
       },
+      agents_demandes_paiement_achat_decision_par_idToagents: {
+        include: { users: true, roles: true },
+      },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       documents: true,
@@ -1435,6 +1606,7 @@ exports.listMyDemandes = async (user) => {
     orderBy: { created_at: "desc" },
     include: {
       agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
+      agents_demandes_paiement_achat_decision_par_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
@@ -1449,6 +1621,7 @@ exports.listByDemandeur = async (demandeurId) => {
     orderBy: { created_at: "desc" },
     include: {
       agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
+      agents_demandes_paiement_achat_decision_par_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
@@ -1468,6 +1641,9 @@ exports.getOne = async (user, idOrUuid) => {
       agents_demandes_paiement_acheteur_idToagents: {
         include: { users: true, directions: true, departements: true, services: true, roles: true },
       },
+      agents_demandes_paiement_achat_decision_par_idToagents: {
+        include: { users: true, roles: true },
+      },
       demande_items: true,
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: {
@@ -1484,15 +1660,25 @@ exports.getOne = async (user, idOrUuid) => {
   });
 
   const agent = await getAgentFromUser(user);
-  const roles = userEffectiveRoles(user, agent);
-  assertCanReadDemande({ demande, user, agent });
+  const returnWorkflow = await buildReturnWorkflowContext({ user, agent, demande });
+  assertCanReadDemande({
+    demande: { ...demande, return_workflow: returnWorkflow },
+    user,
+    agent,
+  });
 
-  return demande;
+  return {
+    ...demande,
+    return_workflow: returnWorkflow,
+  };
 };
 exports.update = async (user, idOrUuid, payload) => {
   const demande = await exports.getOne(user, idOrUuid);
 
-  const { canEditAsDirector = false } = await assertCanEditDemande({
+  const {
+    canEditAsDirector = false,
+    agent: actorAgent,
+  } = await assertCanEditDemande({
     user,
     demande,
     action: "Modification",
@@ -1620,57 +1806,55 @@ exports.update = async (user, idOrUuid, payload) => {
       }
     }
     if (statut === "a_modifier") {
-      const retourStep = await tx.validation_steps.findFirst({
-        where: { demande_id: demande.id, status: "retour_modification" },
-        orderBy: { level: "desc" },
+      const steps = await tx.validation_steps.findMany({
+        where: { demande_id: demande.id },
+        orderBy: { level: "asc" },
+      });
+      const retourStep = findReturnStep(steps);
+      const directionDirector =
+        normalizeRoleName(retourStep?.role_name) === "DAF"
+          ? await resolveDirectionDirectorAgent(tx, demande.direction_id)
+          : null;
+      const resolution = resolveReturnTarget({
+        steps,
+        returnStep: retourStep,
+        demandeurId: demande.demandeur_id,
+        directionDirectorAgentId: directionDirector?.id,
       });
 
-      if (retourStep?.level) {
+      if (retourStep?.level && resolution) {
         const retourLevel = Number(retourStep.level);
+        const target = resolution.targetStep;
 
-        if (retourLevel > 1) {
-          const retourRole = normalizeRoleName(retourStep.role_name);
-          const shouldReturnToDirector = ["DAF", "DGA", "DG"].includes(retourRole);
-          const directeurStep = shouldReturnToDirector
-            ? await tx.validation_steps.findFirst({
-                where: { demande_id: demande.id, role_name: "DIRECTEUR" },
-              })
-            : null;
-
-          const prev = await tx.validation_steps.findFirst({
-            where: { demande_id: demande.id, level: retourLevel - 1 },
+        if (target) {
+          const targetLevel = Number(target.level);
+          await tx.validation_steps.updateMany({
+            where: {
+              demande_id: demande.id,
+              level: { gte: targetLevel, lt: retourLevel },
+            },
+            data: {
+              status: "bloque",
+              validated_by_id: null,
+              validated_at: null,
+              signature_url: null,
+              signature_provider: null,
+              signature_request_id: null,
+              signature_request_user_id: null,
+              signature_status: null,
+              signature_payload: null,
+              commentaire: null,
+              updated_at: new Date(),
+            },
           });
 
-          const target = directeurStep || prev;
-
-          if (target) {
-            await tx.validation_steps.update({
-              where: { id: retourStep.id },
-              data: { status: "bloque", updated_at: new Date() },
-            });
-
-            await tx.validation_steps.update({
-              where: { id: target.id },
-              data: {
-                status: "en_attente",
-                validated_by_id: null,
-                validated_at: null,
-                signature_url: null,
-                commentaire: null,
-                updated_at: new Date(),
-              },
-            });
-
-            if (target.role_name) {
-              await tx.demandes_paiement.update({
-                where: { id: demande.id },
-                data: { statut: toStageStatus(target.role_name), updated_at: new Date() },
-              });
-            }
-          }
-        } else if (retourLevel === 1) {
           await tx.validation_steps.update({
             where: { id: retourStep.id },
+            data: { status: "bloque", updated_at: new Date() },
+          });
+
+          await tx.validation_steps.update({
+            where: { id: target.id },
             data: {
               status: "en_attente",
               validated_by_id: null,
@@ -1681,8 +1865,65 @@ exports.update = async (user, idOrUuid, payload) => {
             },
           });
 
+          if (target.role_name) {
+            await tx.demandes_paiement.update({
+              where: { id: demande.id },
+              data: { statut: toStageStatus(target.role_name), updated_at: new Date() },
+            });
+          }
+        } else {
+          const isDafReturn = normalizeRoleName(retourStep.role_name) === "DAF";
+          if (isDafReturn) {
+            const directorStep = steps
+              .filter(
+                (step) =>
+                  Number(step.level) < retourLevel &&
+                  normalizeRoleName(step.role_name) === "DIRECTEUR"
+              )
+              .sort((a, b) => Number(b.level) - Number(a.level))[0];
+
+            if (directorStep && String(directorStep.status || "").toLowerCase() !== "valide") {
+              await tx.validation_steps.update({
+                where: { id: directorStep.id },
+                data: {
+                  status: "valide",
+                  validated_by_id:
+                    directorStep.validated_by_id != null
+                      ? Number(directorStep.validated_by_id)
+                      : actorAgent?.id != null
+                        ? Number(actorAgent.id)
+                        : directorStep.validator_id != null
+                          ? Number(directorStep.validator_id)
+                          : null,
+                  validated_at: directorStep.validated_at || new Date(),
+                  commentaire:
+                    directorStep.commentaire ||
+                    "Validation maintenue apres correction du retour DAF",
+                  updated_at: new Date(),
+                },
+              });
+            }
+          }
+
+          await tx.validation_steps.update({
+            where: { id: retourStep.id },
+            data: {
+              status: "en_attente",
+              validated_by_id: null,
+              validated_at: null,
+              signature_url: null,
+              signature_provider: null,
+              signature_request_id: null,
+              signature_request_user_id: null,
+              signature_status: null,
+              signature_payload: null,
+              commentaire: null,
+              updated_at: new Date(),
+            },
+          });
+
           await tx.validation_steps.updateMany({
-            where: { demande_id: demande.id, level: { gt: 1 } },
+            where: { demande_id: demande.id, level: { gt: retourLevel } },
             data: { status: "bloque", updated_at: new Date() },
           });
 
@@ -1784,7 +2025,12 @@ exports.update = async (user, idOrUuid, payload) => {
       }
     }
 
-    return updatedDemande;
+    return tx.demandes_paiement.findUnique({
+      where: { id: updatedDemande.id },
+      include: {
+        validation_steps: { orderBy: { level: "asc" } },
+      },
+    });
   });
 
   try {
@@ -1815,11 +2061,38 @@ exports.update = async (user, idOrUuid, payload) => {
     // ignore notification errors
   }
 
+  try {
+    const actorUserId = getUserIdFromToken(user);
+    const pendingStep = (updated?.validation_steps || []).find(
+      (step) => String(step?.status || "").toLowerCase() === "en_attente"
+    );
+    const userIds = new Set([Number(actorUserId)]);
+
+    if (pendingStep?.validator_id) {
+      const validator = await prisma.agents.findUnique({
+        where: { id: Number(pendingStep.validator_id) },
+        select: { user_id: true },
+      });
+      if (validator?.user_id) userIds.add(Number(validator.user_id));
+    }
+
+    await Promise.allSettled(
+      Array.from(userIds)
+        .filter((id) => Number.isFinite(id) && id > 0)
+        .map((id) => realtime.emitPendingStatus(id))
+    );
+  } catch {
+    // ignore realtime errors
+  }
+
   return updated;
 };
 exports.softDelete = async (user, idOrUuid) => {
   const demande = await exports.getOne(user, idOrUuid);
-  await assertCanEditDemande({ user, demande, action: "Suppression" });
+  const editAccess = await assertCanEditDemande({ user, demande, action: "Annulation" });
+  const isReturnCancellation =
+    String(demande?.statut || "").toLowerCase() === "a_modifier" &&
+    (editAccess?.canEditAsReturnTarget || editAccess?.isAdmin);
 
   const engaged = await prisma.validation_steps.count({
     where: {
@@ -1827,7 +2100,7 @@ exports.softDelete = async (user, idOrUuid) => {
       status: { notIn: ["en_attente", "bloque"] },
     },
   });
-  if (engaged > 0) {
+  if (engaged > 0 && !isReturnCancellation) {
     throw withStatusCode(new Error("Suppression interdite: validation deja engagee"), 409);
   }
 
@@ -1860,6 +2133,16 @@ exports.softDelete = async (user, idOrUuid) => {
         )
       );
     }
+
+    const realtimeUserIds = new Set([
+      Number(actorUserId),
+      ...(ctx?.recipients || []).map(Number),
+    ]);
+    await Promise.allSettled(
+      Array.from(realtimeUserIds)
+        .filter((id) => Number.isFinite(id) && id > 0)
+        .map((id) => realtime.emitPendingStatus(id))
+    );
   } catch {
     // ignore notification errors
   }
@@ -1875,9 +2158,12 @@ exports.listAcheteurCandidates = async (user, idOrUuid) => {
   const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
   const demande = await prisma.demandes_paiement.findFirst({
     where: { ...where, deleted_at: null },
-    select: { id: true, uuid: true, direction_id: true, acheteur_id: true, statut: true },
+    select: { id: true, uuid: true, direction_id: true, acheteur_id: true, achat_requis: true, statut: true },
   });
   if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+  if (demande.achat_requis === false) {
+    throw withStatusCode(new Error("Affectation acheteur impossible: aucun achat necessaire"), 409);
+  }
   if (isAchatAssignmentLocked(demande?.statut)) {
     throw withStatusCode(new Error("Affectation acheteur verrouillee: achat deja effectue"), 409);
   }
@@ -1958,6 +2244,9 @@ exports.assignAcheteur = async (user, idOrUuid, payload = {}) => {
     },
   });
   if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+  if (demande.achat_requis === false) {
+    throw withStatusCode(new Error("Affectation acheteur impossible: aucun achat necessaire"), 409);
+  }
   if (isAchatAssignmentLocked(demande?.statut)) {
     throw withStatusCode(new Error("Affectation acheteur verrouillee: achat deja effectue"), 409);
   }
@@ -2099,6 +2388,10 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
     });
     if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
 
+    if (demande.achat_requis === false) {
+      throw withStatusCode(new Error("Cette demande a ete declaree sans achat necessaire"), 409);
+    }
+
     if (
       actorAgent?.direction_id == null ||
       demande?.direction_id == null ||
@@ -2120,6 +2413,27 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
         new Error("Un autre acheteur a deja pris en charge cette demande"),
         409
       );
+    }
+
+    const claimed = await tx.demandes_paiement.updateMany({
+      where: { id: Number(demande.id), achat_requis: null },
+      data: {
+        achat_requis: true,
+        achat_decision_par_id: Number(actorAgent.id),
+        achat_decision_at: now,
+        achat_decision_commentaire: commentaire || null,
+        updated_at: now,
+      },
+    });
+    if (claimed.count !== 1) {
+      const current = await tx.demandes_paiement.findUnique({
+        where: { id: Number(demande.id) },
+        select: { achat_requis: true },
+      });
+      if (current?.achat_requis === false) {
+        throw withStatusCode(new Error("Cette demande a ete declaree sans achat necessaire"), 409);
+      }
+      throw withStatusCode(new Error("Une decision d'achat a deja ete enregistree"), 409);
     }
 
     const createdDocuments = [];
@@ -2215,6 +2529,7 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
         )
       );
     }
+
   } catch {
     // ignore notification errors
   }
@@ -2238,6 +2553,138 @@ exports.confirmAchat = async (user, idOrUuid, payload = {}, files = []) => {
   };
 };
 
+exports.confirmAchatNotRequired = async (user, idOrUuid, payload = {}) => {
+  const actorUserId = getUserIdFromToken(user);
+  if (!actorUserId) throw withStatusCode(new Error("Unauthorized"), 401);
+
+  const actorAgent = await getAgentFromUser(user);
+  const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
+  const commentaire = payload?.commentaire != null ? String(payload.commentaire).trim() : "";
+
+  const result = await prisma.$transaction(async (tx) => {
+    const demande = await tx.demandes_paiement.findFirst({
+      where: { ...where, deleted_at: null },
+      include: {
+        agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+        agents_demandes_paiement_achat_decision_par_idToagents: { include: { users: true } },
+      },
+    });
+    if (!demande) throw withStatusCode(new Error("Demande introuvable"), 404);
+
+    const roles = userEffectiveRoles(user, actorAgent);
+    const isAdmin = isAdminUser({ tokenRoles: user?.roles, agentRoleName: actorAgent?.roles?.name });
+    const isOwner = Number(demande.demandeur_id) === Number(actorAgent.id);
+    const isAcheteurSameDirection =
+      roles.includes("ACHETEUR") &&
+      actorAgent?.direction_id != null &&
+      demande?.direction_id != null &&
+      Number(actorAgent.direction_id) === Number(demande.direction_id);
+    const canActAsDirector = await canAssignAcheteurForDemande({ user, agent: actorAgent, demande });
+
+    if (!isAdmin && !isOwner && !isAcheteurSameDirection && !canActAsDirector) {
+      throw withStatusCode(new Error("Decision d'achat non autorisee"), 403);
+    }
+
+    const statut = String(demande?.statut || "").toLowerCase();
+    if (["rejete", "rejetee", "cloture", "cloturee"].includes(statut)) {
+      throw withStatusCode(new Error("Decision d'achat impossible pour cette demande"), 409);
+    }
+    if (demande.achat_requis === true || statut === "achat_effectue") {
+      throw withStatusCode(new Error("Un achat a deja ete confirme pour cette demande"), 409);
+    }
+    const eligibleStatuts = new Set([
+      "approuvee",
+      "en_attente_paiement",
+      "paye",
+      "payee",
+      "receptionnee",
+    ]);
+    if (!eligibleStatuts.has(statut)) {
+      throw withStatusCode(new Error("Demande non eligible pour une decision d'achat"), 409);
+    }
+    if (demande.achat_requis === false) {
+      return { demande, alreadyConfirmed: true };
+    }
+
+    const pendingValidations = await tx.validation_steps.count({
+      where: { demande_id: Number(demande.id), status: { not: "valide" } },
+    });
+    if (pendingValidations > 0) {
+      throw withStatusCode(new Error("Demande non eligible: validations incompletes"), 409);
+    }
+
+    const now = new Date();
+    const claimed = await tx.demandes_paiement.updateMany({
+      where: { id: Number(demande.id), achat_requis: null },
+      data: {
+        achat_requis: false,
+        achat_decision_par_id: Number(actorAgent.id),
+        achat_decision_at: now,
+        achat_decision_commentaire: commentaire || null,
+        updated_at: now,
+      },
+    });
+    if (claimed.count !== 1) {
+      const current = await tx.demandes_paiement.findUnique({
+        where: { id: Number(demande.id) },
+        select: { achat_requis: true },
+      });
+      if (current?.achat_requis === true) {
+        throw withStatusCode(new Error("Un achat a deja ete confirme pour cette demande"), 409);
+      }
+      throw withStatusCode(new Error("Une decision d'achat a deja ete enregistree"), 409);
+    }
+
+    const updated = await tx.demandes_paiement.findUnique({
+      where: { id: Number(demande.id) },
+      include: {
+        agents_demandes_paiement_achat_decision_par_idToagents: {
+          include: { users: true, roles: true },
+        },
+      },
+    });
+    return { demande: updated, previous: demande, alreadyConfirmed: false };
+  });
+
+  if (result.alreadyConfirmed) return result.demande;
+
+  try {
+    const actorDisplay = [actorAgent?.prenom, actorAgent?.nom].filter(Boolean).join(" ").trim() || "Utilisateur";
+    const ctx = await resolveStakeholderUserIds({
+      demandeId: result.demande.id,
+      demande: result.previous,
+      excludeUserId: actorUserId,
+    });
+    const acheteurUserIds = await resolveDirectionAcheteurUserIds(result.demande.direction_id, actorUserId);
+    const recipients = Array.from(new Set([...(ctx?.recipients || []), ...acheteurUserIds]));
+    await Promise.allSettled(
+      recipients.map((uid) =>
+        notifications.createNotification({
+          user_id: Number(uid),
+          type: "achat_non_requis",
+          demande_id: Number(result.demande.id),
+          message: `Aucun achat n'est necessaire pour la demande ${result.demande.uuid || result.demande.id}. Decision par ${actorDisplay}.`,
+          meta: {
+            demandeUuid: result.demande.uuid || null,
+            achatRequis: false,
+            decisionParId: Number(actorAgent.id),
+            commentaire: commentaire || null,
+          },
+          sendEmailNow: true,
+        })
+      )
+    );
+    const realtimeUserIds = Array.from(new Set([Number(actorUserId), ...acheteurUserIds]));
+    await Promise.allSettled(
+      realtimeUserIds.map((uid) => realtime.emitAchatPendingStatus(Number(uid)))
+    );
+  } catch {
+    // ignore notification and realtime errors
+  }
+
+  return result.demande;
+};
+
 exports.closeDemande = async (user, idOrUuid) => {
   const demande = await exports.getOne(user, idOrUuid);
   await assertCanEditDemande({ user, demande, action: "Cloture" });
@@ -2253,6 +2700,15 @@ exports.closeDemande = async (user, idOrUuid) => {
 
   if (!hasFinalReception) {
     throw withStatusCode(new Error("Cloture interdite: reception finale non atteinte"), 409);
+  }
+
+  if (demande.achat_requis == null && statut !== "achat_effectue") {
+    const err = withStatusCode(
+      new Error("Veuillez confirmer que la demande ne necessite pas un achat"),
+      409
+    );
+    err.code = "ACHAT_DECISION_REQUIRED";
+    throw err;
   }
 
   const updated = await prisma.demandes_paiement.update({

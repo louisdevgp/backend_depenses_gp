@@ -236,6 +236,106 @@ function extractFinishedAt(user) {
   );
 }
 
+function normalizeFirmaDateValue(value) {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  // A date selected in Firma is returned as YYYY-MM-DD. Noon UTC keeps the
+  // calendar date stable when the value is formatted in another timezone.
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  const parsed = dateOnly
+    ? new Date(`${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}T12:00:00.000Z`)
+    : new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeFieldsResponse(fieldsRaw) {
+  if (Array.isArray(fieldsRaw)) return fieldsRaw;
+  if (Array.isArray(fieldsRaw?.results)) return fieldsRaw.results;
+  if (Array.isArray(fieldsRaw?.data)) return fieldsRaw.data;
+  if (Array.isArray(fieldsRaw?.data?.results)) return fieldsRaw.data.results;
+  if (Array.isArray(fieldsRaw?.items)) return fieldsRaw.items;
+  return [];
+}
+
+function extractSelectedDateFromFields(fieldsRaw, signerUserId = null) {
+  const fields = normalizeFieldsResponse(fieldsRaw);
+  const targetUserId = signerUserId != null ? String(signerUserId) : null;
+  const dateFields = fields.filter((field) => {
+    const type = String(field?.field_type ?? field?.type ?? "").trim().toLowerCase();
+    if (type !== "date") return false;
+    if (!targetUserId) return true;
+    const fieldUserId =
+      field?.companies_workspaces_signing_requests_users_id ??
+      field?.signing_request_user_id ??
+      field?.signingRequestUserId ??
+      field?.recipient_id ??
+      field?.recipientId ??
+      null;
+    return fieldUserId == null || String(fieldUserId) === targetUserId;
+  });
+
+  for (const field of dateFields) {
+    const rawValue =
+      field?.final_value ??
+      field?.finalValue ??
+      field?.value ??
+      field?.read_only_value ??
+      field?.readOnlyValue ??
+      null;
+    const date = normalizeFirmaDateValue(rawValue);
+    if (date) {
+      return { date, rawValue: String(rawValue), field };
+    }
+  }
+  return null;
+}
+
+function resolveSignatureDate({ fields, signerUser, request, signerUserId, fallback = new Date() } = {}) {
+  const selected = extractSelectedDateFromFields(fields, signerUserId || extractUserId(signerUser));
+  if (selected?.date) {
+    return {
+      date: selected.date,
+      source: "firma_date_field",
+      rawValue: selected.rawValue,
+    };
+  }
+
+  const signerFinishedAt = extractFinishedAt(signerUser);
+  const signerFinishedDate = normalizeFirmaDateValue(signerFinishedAt);
+  if (signerFinishedDate) {
+    return {
+      date: signerFinishedDate,
+      source: "firma_signer_finished_at",
+      rawValue: String(signerFinishedAt),
+    };
+  }
+
+  const requestFinishedAt =
+    extractFinishedAt(request) ??
+    request?.timestamps?.finished_on ??
+    request?.timestamps?.finished_at ??
+    request?.timestamps?.completed_on ??
+    request?.timestamps?.completed_at ??
+    null;
+  const requestFinishedDate = normalizeFirmaDateValue(requestFinishedAt);
+  if (requestFinishedDate) {
+    return {
+      date: requestFinishedDate,
+      source: "firma_request_finished_at",
+      rawValue: String(requestFinishedAt),
+    };
+  }
+
+  const fallbackDate = normalizeFirmaDateValue(fallback) || new Date();
+  return {
+    date: fallbackDate,
+    source: "server_fallback",
+    rawValue: fallbackDate.toISOString(),
+  };
+}
+
 function isSignerFinished(user) {
   if (!user) return false;
   if (extractFinishedAt(user)) return true;
@@ -279,6 +379,57 @@ function isRequestFinished(request) {
   return ["signed", "completed", "finished", "done", "validated"].includes(status);
 }
 
+function extractSigningRequestId(value, depth = 0) {
+  if (value == null) return null;
+  if (typeof value === "string" || typeof value === "number") {
+    const raw = String(value).trim();
+    return raw || null;
+  }
+  if (depth > 5 || typeof value !== "object") return null;
+
+  const direct =
+    value.id ??
+    value.uuid ??
+    value.request_id ??
+    value.requestId ??
+    value.signing_request_id ??
+    value.signingRequestId ??
+    value.signature_request_id ??
+    value.signatureRequestId ??
+    value.signing_request_uuid ??
+    value.signingRequestUuid ??
+    value.signature_request_uuid ??
+    value.signatureRequestUuid ??
+    null;
+  if (direct != null && String(direct).trim()) return String(direct).trim();
+
+  const nestedKeys = [
+    "data",
+    "result",
+    "request",
+    "signing_request",
+    "signingRequest",
+    "signature_request",
+    "signatureRequest",
+    "item",
+    "payload",
+  ];
+  for (const key of nestedKeys) {
+    const found = extractSigningRequestId(value[key], depth + 1);
+    if (found) return found;
+  }
+
+  const arrays = [value.results, value.items, value.data?.items, value.data?.results].filter(Array.isArray);
+  for (const arr of arrays) {
+    for (const item of arr) {
+      const found = extractSigningRequestId(item, depth + 1);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
 function summarizeSignerForDebug(user) {
   if (!user || typeof user !== "object") return null;
   return {
@@ -318,7 +469,7 @@ function summarizeRequestForDebug(request) {
         }
       : cert || null;
   return {
-    id: request.id ?? request.uuid ?? request.request_id ?? null,
+    id: extractSigningRequestId(request),
     status:
       request.status ??
       request.signature_status ??
@@ -564,7 +715,9 @@ async function firmaRequest(method, path, data) {
       maxBodyLength: Infinity,
     });
 
-    if (isFirmaDebugEnabled() && String(path).includes("/users")) {
+    if (isFirmaDebugEnabled() && method === "post" && String(path).includes("/signing-requests")) {
+      console.log("[firma] create response summary", summarizeRequestForDebug(res.data));
+    } else if (isFirmaDebugEnabled() && String(path).includes("/users")) {
       const users = normalizeUsersResponse(res.data);
       console.log("[firma] response", {
         url,
@@ -598,6 +751,11 @@ async function getSigningRequestUsers(signingRequestId) {
 async function getSigningRequest(signingRequestId) {
   if (!signingRequestId) throw new Error("signingRequestId manquant");
   return firmaRequest("get", `/signing-requests/${encodeURIComponent(signingRequestId)}`);
+}
+
+async function getSigningRequestFields(signingRequestId) {
+  if (!signingRequestId) throw new Error("signingRequestId manquant");
+  return firmaRequest("get", `/signing-requests/${encodeURIComponent(signingRequestId)}/fields`);
 }
 
 async function sendSigningRequest(signingRequestId) {
@@ -713,13 +871,19 @@ module.exports = {
   createSigningRequest,
   getSigningRequestUsers,
   getSigningRequest,
+  getSigningRequestFields,
   sendSigningRequest,
   downloadSignedDocument,
   waitForProofUrl,
+  extractSigningRequestId,
   normalizeUsersResponse,
   extractUserId,
   extractUserEmail,
   extractFinishedAt,
+  normalizeFirmaDateValue,
+  normalizeFieldsResponse,
+  extractSelectedDateFromFields,
+  resolveSignatureDate,
   isSignerFinished,
   isRequestFinished,
   pickSignerUser,

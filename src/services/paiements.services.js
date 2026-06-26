@@ -2,7 +2,6 @@ const prisma = require("../config/prisma");
 const { randomUUID: uuidv4 } = require("crypto");
 const notifications = require("./notifications.services");
 const { sendMail } = require("../config/mailer");
-const PDFDocument = require("pdfkit");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
@@ -10,6 +9,7 @@ const realtime = require("../realtime");
 const { resolveUploadsPathFromUrl } = require("./signatures.services");
 const firma = require("./firma.services");
 const signatureSessions = require("./signatureSessions.services");
+const signaturePdfTemplate = require("./signaturePdfTemplate");
 const permissionMap = require("../config/permissions");
 const P = require("../constants/permissions");
 const {
@@ -192,86 +192,31 @@ function splitAgentName(agent) {
 }
 
 function buildSignatureFields({ recipientId }) {
-  const A4_WIDTH = 595.28;
-  const A4_HEIGHT = 841.89;
-  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
-
-  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
-  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
-
-  const toField = (type, rect) => ({
-    recipient_id: recipientId,
-    type,
-    page_number: 1,
-    position: {
-      x: toPct(rect.x, A4_WIDTH),
-      y: toPct(rect.y, A4_HEIGHT),
-      width: toPct(rect.width, A4_WIDTH),
-      height: toPct(rect.height, A4_HEIGHT),
-    },
-  });
-
-  return [
-    toField("signature", signatureRect),
-    toField("date", dateRect),
-  ];
+  return signaturePdfTemplate.buildSignatureFields({ recipientId });
 }
 
 function buildPaiementSignaturePdf({ payload, demande, comptable }) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
-    const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+  const devise = demande?.devise ? String(demande.devise) : "FCFA";
+  const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
 
-    doc.font("Helvetica-Bold").fontSize(16).text("Creation de paiement", { align: "center" });
-    doc.moveDown(0.6);
-    doc.font("Helvetica").fontSize(10);
-
-    const devise = demande?.devise ? String(demande.devise) : "FCFA";
-    const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
-
-    const rows = [
-      ["Demande", demande?.uuid || demande?.id || "-"],
-      ["Motif", demande?.motif || "-"],
-      ["Beneficiaire", demande?.beneficiaire || "-"],
-      [
-        "Montant demande",
-        montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-",
-      ],
-      [
-        "Montant paiement",
-        payload?.montant != null ? `${formatMoneyValue(payload.montant)} ${devise}` : "-",
-      ],
-      ["Type paiement", payload?.type_paiement || "-"],
-      ["Moyen paiement", payload?.moyen_paiement || "-"],
-      ["Comptable", agentDisplayName(comptable)],
-      ["Date", formatDateTime(payload?.date_paiement || new Date())],
-    ];
-
-    rows.forEach(([label, value]) => {
-      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
-      doc.font("Helvetica").text(String(value ?? "-"));
-    });
-
-    doc.moveDown(2);
-    doc.font("Helvetica").fontSize(9).text(
-      "Ce document sert uniquement de preuve de signature electronique pour la creation."
-    );
-
-    const pageHeight = doc.page.height;
-    const sigHeight = 50;
-    const sigY = 140;
-    const sigTop = pageHeight - sigY - sigHeight;
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
-    doc.rect(50, sigTop, 250, sigHeight).stroke();
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
-    doc.rect(320, sigTop, 120, sigHeight).stroke();
-
-    doc.end();
+  return signaturePdfTemplate.buildSignaturePdf({
+    title: "Creation de paiement",
+    subtitle: "Validation electronique de l'enregistrement du paiement",
+    reference: demande?.uuid || demande?.id || "-",
+    generatedAtText: formatDateTime(payload?.date_paiement || new Date()),
+    signerName: agentDisplayName(comptable),
+    note: "Le signataire confirme l'enregistrement du paiement pour la demande indiquee.",
+    footer: "Ce document sert uniquement de preuve de signature electronique pour la creation du paiement.",
+    rows: [
+      { label: "Motif", value: demande?.motif || "-" },
+      { label: "Beneficiaire", value: demande?.beneficiaire || "-" },
+      { label: "Montant demande", value: montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-" },
+      { label: "Montant paiement", value: payload?.montant != null ? `${formatMoneyValue(payload.montant)} ${devise}` : "-" },
+      { label: "Type paiement", value: payload?.type_paiement || "-" },
+      { label: "Moyen paiement", value: payload?.moyen_paiement || "-" },
+      { label: "Comptable", value: agentDisplayName(comptable) },
+      { label: "Date paiement", value: formatDateTime(payload?.date_paiement || new Date()) },
+    ],
   });
 }
 
@@ -928,7 +873,7 @@ async function startCreateSignature(payload, comptableAgentId, userId) {
     },
   });
 
-  const signingRequestId = signingRequest?.id;
+  const signingRequestId = firma.extractSigningRequestId(signingRequest);
   if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
 
   try {

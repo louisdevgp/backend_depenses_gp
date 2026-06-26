@@ -252,6 +252,7 @@ async function computeAchatPendingCount(userId) {
       deleted_at: null,
       direction_id: Number(agent.direction_id),
       statut: { in: ["en_attente_paiement", "paye", "payee"] },
+      achat_requis: null,
     },
   });
 }

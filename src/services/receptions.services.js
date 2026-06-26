@@ -3,9 +3,9 @@ const { randomUUID: uuidv4 } = require("crypto");
 const notifications = require("./notifications.services");
 const { saveSignaturePngDataUrl } = require("./signatures.services");
 const realtime = require("../realtime");
-const PDFDocument = require("pdfkit");
 const firma = require("./firma.services");
 const signatureSessions = require("./signatureSessions.services");
+const signaturePdfTemplate = require("./signaturePdfTemplate");
 const {
   normalizePermissionCode,
   getScopesForPermissionFromUser,
@@ -355,140 +355,57 @@ function splitAgentName(agent) {
 }
 
 function buildSignatureFields({ recipientId }) {
-  const A4_WIDTH = 595.28;
-  const A4_HEIGHT = 841.89;
-  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
-
-  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
-  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
-
-  const toField = (type, rect) => ({
-    recipient_id: recipientId,
-    type,
-    page_number: 1,
-    position: {
-      x: toPct(rect.x, A4_WIDTH),
-      y: toPct(rect.y, A4_HEIGHT),
-      width: toPct(rect.width, A4_WIDTH),
-      height: toPct(rect.height, A4_HEIGHT),
-    },
-  });
-
-  return [
-    toField("signature", signatureRect),
-    toField("date", dateRect),
-  ];
+  return signaturePdfTemplate.buildSignatureFields({ recipientId });
 }
 
 function buildReceptionCreationSignaturePdf({ payload, demande, paiement, receveur }) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
-    const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+  const devise = demande?.devise ? String(demande.devise) : "FCFA";
+  const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
 
-    doc.font("Helvetica-Bold").fontSize(16).text("Creation de reception", { align: "center" });
-    doc.moveDown(0.6);
-    doc.font("Helvetica").fontSize(10);
-
-    const devise = demande?.devise ? String(demande.devise) : "FCFA";
-    const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
-
-    const rows = [
-      ["Demande", demande?.uuid || demande?.id || "-"],
-      ["Paiement", paiement?.uuid || paiement?.id || "-"],
-      ["Motif", demande?.motif || "-"],
-      ["Beneficiaire", demande?.beneficiaire || "-"],
-      [
-        "Montant demande",
-        montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-",
-      ],
-      ["Phase", payload?.phase || "-"],
-      ["Conforme", payload?.conforme ? "Oui" : "Non"],
-      ["Receveur", agentDisplayName(receveur)],
-      ["Date reception", formatDateTime(payload?.date_reception || new Date())],
-    ];
-
-    rows.forEach(([label, value]) => {
-      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
-      doc.font("Helvetica").text(String(value ?? "-"));
-    });
-
-    doc.moveDown(2);
-    doc.font("Helvetica").fontSize(9).text(
-      "Ce document sert uniquement de preuve de signature electronique pour la creation."
-    );
-
-    const pageHeight = doc.page.height;
-    const sigHeight = 50;
-    const sigY = 140;
-    const sigTop = pageHeight - sigY - sigHeight;
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
-    doc.rect(50, sigTop, 250, sigHeight).stroke();
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
-    doc.rect(320, sigTop, 120, sigHeight).stroke();
-
-    doc.end();
+  return signaturePdfTemplate.buildSignaturePdf({
+    title: "Creation de reception",
+    subtitle: "Validation electronique de la reception",
+    reference: demande?.uuid || demande?.id || "-",
+    generatedAtText: formatDateTime(payload?.date_reception || new Date()),
+    signerName: agentDisplayName(receveur),
+    note: "Le signataire confirme la reception et les informations de conformite renseignees.",
+    footer: "Ce document sert uniquement de preuve de signature electronique pour la creation de reception.",
+    rows: [
+      { label: "Paiement", value: paiement?.uuid || paiement?.id || "-" },
+      { label: "Motif", value: demande?.motif || "-" },
+      { label: "Beneficiaire", value: demande?.beneficiaire || "-" },
+      { label: "Montant demande", value: montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-" },
+      { label: "Phase", value: payload?.phase || "-" },
+      { label: "Conforme", value: payload?.conforme ? "Oui" : "Non" },
+      { label: "Receveur", value: agentDisplayName(receveur) },
+      { label: "Date reception", value: formatDateTime(payload?.date_reception || new Date()) },
+    ],
   });
 }
 
 function buildReceptionVisaSignaturePdf({ kind, reception, demande, signer, commentaire }) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
-    const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+  const title = kind === "daf" ? "Visa DAF" : "Visa Directeur";
+  const devise = demande?.devise ? String(demande.devise) : "FCFA";
+  const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
 
-    const title = kind === "daf" ? "Visa DAF" : "Visa Directeur";
-    doc.font("Helvetica-Bold").fontSize(16).text(title, { align: "center" });
-    doc.moveDown(0.6);
-    doc.font("Helvetica").fontSize(10);
-
-    const devise = demande?.devise ? String(demande.devise) : "FCFA";
-    const montantDemande = demande?.montant_net != null ? demande.montant_net : demande?.montant;
-
-    const rows = [
-      ["Reception", reception?.uuid || reception?.id || "-"],
-      ["Demande", demande?.uuid || demande?.id || "-"],
-      ["Motif", demande?.motif || "-"],
-      ["Beneficiaire", demande?.beneficiaire || "-"],
-      [
-        "Montant demande",
-        montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-",
-      ],
-      ["Conforme", reception?.conforme ? "Oui" : "Non"],
-      ["Receveur", reception?.receveur_nom || agentDisplayName(reception?.agents_receptions_recu_par_idToagents)],
-      ["Signataire", agentDisplayName(signer)],
-      ["Commentaire", commentaire ? String(commentaire) : "-"],
-      ["Date", formatDateTime(new Date())],
-    ];
-
-    rows.forEach(([label, value]) => {
-      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
-      doc.font("Helvetica").text(String(value ?? "-"));
-    });
-
-    doc.moveDown(2);
-    doc.font("Helvetica").fontSize(9).text(
-      "Ce document sert uniquement de preuve de signature electronique pour le visa."
-    );
-
-    const pageHeight = doc.page.height;
-    const sigHeight = 50;
-    const sigY = 140;
-    const sigTop = pageHeight - sigY - sigHeight;
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
-    doc.rect(50, sigTop, 250, sigHeight).stroke();
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
-    doc.rect(320, sigTop, 120, sigHeight).stroke();
-
-    doc.end();
+  return signaturePdfTemplate.buildSignaturePdf({
+    title,
+    subtitle: "Validation electronique du visa de reception",
+    reference: reception?.uuid || reception?.id || "-",
+    generatedAtText: formatDateTime(new Date()),
+    signerName: agentDisplayName(signer),
+    note: commentaire ? String(commentaire) : "Le signataire confirme le visa de reception.",
+    footer: "Ce document sert uniquement de preuve de signature electronique pour le visa.",
+    rows: [
+      { label: "Demande", value: demande?.uuid || demande?.id || "-" },
+      { label: "Motif", value: demande?.motif || "-" },
+      { label: "Beneficiaire", value: demande?.beneficiaire || "-" },
+      { label: "Montant demande", value: montantDemande != null ? `${formatMoneyValue(montantDemande)} ${devise}` : "-" },
+      { label: "Conforme", value: reception?.conforme ? "Oui" : "Non" },
+      { label: "Receveur", value: reception?.receveur_nom || agentDisplayName(reception?.agents_receptions_recu_par_idToagents) },
+      { label: "Signataire", value: agentDisplayName(signer) },
+      { label: "Date", value: formatDateTime(new Date()) },
+    ],
   });
 }
 
@@ -514,10 +431,17 @@ async function resolveDemandeurUserIdByDemandeId(demandeId) {
 }
 
 async function resolveRoleUserIds(roleName) {
-  const role = await prisma.roles.findFirst({ where: { name: String(roleName).toUpperCase(), is_active: true } });
+  const roleUpper = String(roleName).toUpperCase();
+  const role = await prisma.roles.findFirst({ where: { name: roleUpper, is_active: true } });
   if (!role) return [];
   const agents = await prisma.agents.findMany({
-    where: { role_id: role.id, deleted_at: null },
+    where: {
+      deleted_at: null,
+      OR: [
+        { role_id: role.id },
+        { users: { user_roles: { some: { role_id: role.id } } } },
+      ],
+    },
     select: { users: { select: { id: true } } },
     orderBy: { id: "asc" },
   });
@@ -637,15 +561,6 @@ async function createReception(payload, userAgentId, options = {}) {
       }
     }
 
-    const statutLower = String(demande?.statut || "").toLowerCase();
-    if (["en_attente_paiement", "paye", "payee"].includes(statutLower)) {
-      const err = new Error("Preuves d'achat requises avant la reception");
-      err.statusCode = 409;
-      throw err;
-    }
-
-
-
     let hasPaiement = Boolean(paiement_id);
     if (!hasPaiement) {
       const paiementCount = await tx.paiements.count({ where: { demande_id: Number(demande.id) } });
@@ -662,19 +577,6 @@ async function createReception(payload, userAgentId, options = {}) {
       const err = new Error("Paiement déjà effectué pour cette demande");
       err.statusCode = 400;
       throw err;
-    }
-
-    const isPaidStatut = ["paye", "payee"].includes(statutLower);
-    if (isPaidStatut) {
-      const anyReception = await tx.receptions.findFirst({
-        where: { demande_id: Number(demande.id) },
-        select: { id: true },
-      });
-      if (anyReception) {
-        const err = new Error("Réception déjà créée pour cette demande");
-        err.statusCode = 409;
-        throw err;
-      }
     }
 
     const existingReception = await tx.receptions.findFirst({
@@ -868,7 +770,7 @@ async function startCreateSignature(payload, userAgentId, userId) {
     },
   });
 
-  const signingRequestId = signingRequest?.id;
+  const signingRequestId = firma.extractSigningRequestId(signingRequest);
   if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
 
   try {
@@ -1106,7 +1008,7 @@ async function startVisaSignature(kind, receptionId, payload, agentId, userId) {
     },
   });
 
-  const signingRequestId = signingRequest?.id;
+  const signingRequestId = firma.extractSigningRequestId(signingRequest);
   if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
 
   try {
@@ -1496,11 +1398,11 @@ async function visaDirecteur(
   });
 
   // Notifications after commit (emails non-bloquants)
-  const notifiedDafUserIds = [];
+  let dafUserIdsForRealtime = [];
   try {
     const actorUserId = await findUserIdByAgentId(directeurAgentId);
     const demandeurUserId = await resolveDemandeurUserIdByDemandeId(existing.demande_id);
-    const dafUserIds = visaDafRequis ? await resolveRoleUserIds("DAF") : [];
+    dafUserIdsForRealtime = await resolveRoleUserIds("DAF");
 
     if (demandeurUserId && Number(demandeurUserId) !== Number(actorUserId)) {
       await notifications.createNotification({
@@ -1513,17 +1415,18 @@ async function visaDirecteur(
       });
     }
 
-    for (const dafUserId of dafUserIds) {
-      if (dafUserId && Number(dafUserId) !== Number(actorUserId)) {
-        await notifications.createNotification({
-          user_id: dafUserId,
-          type: "reception_visa_pending",
-          demande_id: existing.demande_id,
-          message: "Une réception attend votre Visa DAF.",
-          meta: { receptionId: updated.id, receptionUuid: updated.uuid },
-          sendEmailNow: true,
-        });
-        notifiedDafUserIds.push(Number(dafUserId));
+    if (visaDafRequis) {
+      for (const dafUserId of dafUserIdsForRealtime) {
+        if (dafUserId && Number(dafUserId) !== Number(actorUserId)) {
+          await notifications.createNotification({
+            user_id: dafUserId,
+            type: "reception_visa_pending",
+            demande_id: existing.demande_id,
+            message: "Une reception attend votre Visa DAF.",
+            meta: { receptionId: updated.id, receptionUuid: updated.uuid },
+            sendEmailNow: true,
+          });
+        }
       }
     }
   } catch {
@@ -1535,7 +1438,7 @@ async function visaDirecteur(
     if (actorUserId) {
       await realtime.emitReceptionPendingStatus(actorUserId);
     }
-    for (const dafUserId of notifiedDafUserIds) {
+    for (const dafUserId of dafUserIdsForRealtime) {
       await realtime.emitReceptionPendingStatus(dafUserId);
     }
   } catch {

@@ -51,8 +51,9 @@ function titleForType(type, meta) {
       return withDemande("ACHAT");
 
     case "demande_updated":
-    case "demande_returned_for_modification":
       return withDemande("MODIFICATION ACHAT");
+    case "demande_returned_for_modification":
+      return withDemande("DEMANDE A MODIFIER");
 
     case "demande_created":
     case "demande_deleted":
@@ -155,8 +156,7 @@ function pickHighlights(type, meta) {
 
   if (t === "demande_returned_for_modification") {
     if (m.fromRole) items.push({ label: "Role validateur", value: String(m.fromRole) });
-    if (m.previousRole) items.push({ label: "Etape precedente", value: String(m.previousRole) });
-    if (m.previousLevel != null) items.push({ label: "Niveau precedent", value: String(m.previousLevel) });
+    if (m.targetRole) items.push({ label: "Correction attendue par", value: String(m.targetRole) });
     if (m.commentaire) items.push({ label: "Motif", value: String(m.commentaire) });
   }
 

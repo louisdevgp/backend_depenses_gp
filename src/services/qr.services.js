@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const crypto = require("crypto");
+const firma = require("./firma.services");
 
 function mustGetEnv(name, fallbacks = []) {
   const candidates = [name, ...fallbacks];
@@ -55,6 +56,63 @@ function isDemandeFullyValidated(d) {
 
 function isReceptionFullyVised(r) {
   return Boolean(r?.visa_directeur_id) && (r?.visa_daf_requis === false || Boolean(r?.visa_daf_id));
+}
+
+async function resolveValidationOfficialDate(step) {
+  const payload = step?.signature_payload && typeof step.signature_payload === "object"
+    ? step.signature_payload
+    : {};
+
+  if (payload.official_signature_date) {
+    const date = firma.normalizeFirmaDateValue(payload.official_signature_date);
+    if (date) {
+      return {
+        date,
+        iso: date.toISOString(),
+        source: payload.official_signature_source || "firma_signer_finished_at",
+      };
+    }
+  }
+
+  if (step?.signature_request_id) {
+    try {
+      const fields = await firma.getSigningRequestFields(step.signature_request_id);
+      const selected = firma.extractSelectedDateFromFields(fields, step.signature_request_user_id);
+      if (selected?.date) {
+        return {
+          date: selected.date,
+          iso: selected.date.toISOString(),
+          source: "firma_date_field",
+        };
+      }
+    } catch {
+      // Continue with Firma's automatic completion date.
+    }
+
+    try {
+      const usersRaw = await firma.getSigningRequestUsers(step.signature_request_id);
+      const users = firma.normalizeUsersResponse(usersRaw);
+      const signer =
+        users.find((user) => String(firma.extractUserId(user)) === String(step.signature_request_user_id)) ||
+        users[0] ||
+        null;
+      const finishedDate = firma.normalizeFirmaDateValue(firma.extractFinishedAt(signer));
+      if (finishedDate) {
+        return {
+          date: finishedDate,
+          iso: finishedDate.toISOString(),
+          source: "firma_signer_finished_at",
+        };
+      }
+    } catch {
+      // Keep the database timestamp as the last fallback.
+    }
+  }
+
+  const fallback = firma.normalizeFirmaDateValue(step?.validated_at);
+  return fallback
+    ? { date: fallback, iso: fallback.toISOString(), source: "database_validated_at" }
+    : null;
 }
 
 function parseQrToken(token) {
@@ -202,10 +260,13 @@ async function verifyToken({ token, user = null }) {
       return { valid: false, reason: "NOT_FOUND", type: parsed.type, uuid: parsed.uuid };
     }
 
-    const validatedIso = step.validated_at ? asIsoDateTime(step.validated_at) : "";
-    if (!validatedIso || String(parsed.finalizedIso) !== String(validatedIso)) {
+    const officialDate = await resolveValidationOfficialDate(step);
+    const recordedIso = step.validated_at ? asIsoDateTime(step.validated_at) : "";
+    const acceptedDates = [officialDate?.iso, recordedIso].filter(Boolean);
+    if (!acceptedDates.includes(String(parsed.finalizedIso))) {
       return { valid: false, reason: "MISMATCH_VALIDATED_AT", type: parsed.type, uuid: parsed.uuid };
     }
+    const validatedIso = officialDate?.iso || recordedIso;
 
     const demande = step.demandes_paiement || null;
     const showDetails = demande ? canViewDemandeDetails({ user, demande }) : false;
@@ -226,6 +287,8 @@ async function verifyToken({ token, user = null }) {
       isFinal: true,
       finalizedAt: validatedIso,
       validatedAt: validatedIso,
+      validationRecordedAt: recordedIso || null,
+      validationDateSource: officialDate?.source || "database_validated_at",
       ref: String(parsed.sig).slice(0, 16),
       role: step.role_name,
       status: step.status,

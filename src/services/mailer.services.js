@@ -24,14 +24,14 @@ function buildDefaultEmail({ subject, message, meta }) {
   return { text, html };
 }
 
-async function sendNotificationEmail({ to, type, message, meta }) {
+async function sendNotificationEmail({ to, cc, type, message, meta }) {
   try {
     const built = buildNotificationEmail({ type, message, meta });
-    return sendMail({ to, subject: built.subject, text: built.text, html: built.html });
+    return sendMail({ to, cc, subject: built.subject, text: built.text, html: built.html });
   } catch {
     const subject = `${APP_NAME} - ${type}`;
     const { text, html } = buildDefaultEmail({ subject, message, meta });
-    return sendMail({ to, subject, text, html });
+    return sendMail({ to, cc, subject, text, html });
   }
 }
 

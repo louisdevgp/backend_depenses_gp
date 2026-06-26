@@ -3,8 +3,9 @@ const notifications = require("./notifications.services");
 const auditLogs = require("./auditLogs.services");
 const { randomUUID: uuidv4 } = require("crypto");
 const realtime = require("../realtime");
-const PDFDocument = require("pdfkit");
 const firma = require("./firma.services");
+const signaturePdfTemplate = require("./signaturePdfTemplate");
+const { resolveDirectionDirectorAgent, resolveReturnTarget } = require("../utils/returnWorkflow");
 
 function withStatusCode(err, statusCode) {
   err.statusCode = Number(statusCode);
@@ -172,81 +173,31 @@ function splitAgentName(agent) {
 }
 
 function buildValidationSignaturePdf({ demande, step, signer }) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50 });
-    const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+  const montant = demande?.montant_net != null ? demande.montant_net : demande?.montant;
+  const devise = demande?.devise ? String(demande.devise) : "FCFA";
 
-    doc.font("Helvetica-Bold").fontSize(16).text("Validation de demande", { align: "center" });
-    doc.moveDown(0.6);
-    doc.font("Helvetica").fontSize(10);
-
-    const montant = demande?.montant_net != null ? demande.montant_net : demande?.montant;
-    const devise = demande?.devise ? String(demande.devise) : "FCFA";
-
-    const rows = [
-      ["Référence demande", demande?.uuid || demande?.id || "-"],
-      ["Motif", demande?.motif || "-"],
-      ["Bénéficiaire", demande?.beneficiaire || "-"],
-      ["Montant", montant != null ? `${formatMoneyValue(montant)} ${devise}` : "-"],
-      ["Demandeur", agentDisplayName(demande?.agents_demandes_paiement_demandeur_idToagents)],
-      ["Rôle validation", step?.role_name || "-"],
-      ["Validateur", agentDisplayName(signer)],
-      ["Date", formatDateTime(new Date())],
-    ];
-
-    rows.forEach(([label, value]) => {
-      doc.font("Helvetica-Bold").text(`${label}: `, { continued: true });
-      doc.font("Helvetica").text(String(value ?? "-"));
-    });
-
-    doc.moveDown(2);
-    doc.font("Helvetica").fontSize(9).text(
-      "Ce document sert uniquement de preuve de signature électronique pour la validation."
-    );
-
-    // Zones visuelles pour la signature (repère)
-    const pageHeight = doc.page.height;
-    const sigHeight = 50;
-    const sigY = 140; // position depuis le bas (coordonnées Firma)
-    const sigTop = pageHeight - sigY - sigHeight;
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Signature", 50, sigTop - 18);
-    doc.rect(50, sigTop, 250, sigHeight).stroke();
-
-    doc.font("Helvetica-Bold").fontSize(10).text("Date", 320, sigTop - 18);
-    doc.rect(320, sigTop, 120, sigHeight).stroke();
-
-    doc.end();
+  return signaturePdfTemplate.buildSignaturePdf({
+    title: "Validation de demande",
+    subtitle: "Validation electronique d'une etape du circuit",
+    reference: demande?.uuid || demande?.id || "-",
+    generatedAtText: formatDateTime(new Date()),
+    signerName: agentDisplayName(signer),
+    note: "Le signataire confirme la validation de cette etape du circuit de demande.",
+    footer: "Ce document sert uniquement de preuve de signature electronique pour la validation.",
+    rows: [
+      { label: "Motif", value: demande?.motif || "-" },
+      { label: "Beneficiaire", value: demande?.beneficiaire || "-" },
+      { label: "Montant", value: montant != null ? `${formatMoneyValue(montant)} ${devise}` : "-" },
+      { label: "Demandeur", value: agentDisplayName(demande?.agents_demandes_paiement_demandeur_idToagents) },
+      { label: "Role validation", value: step?.role_name || "-" },
+      { label: "Validateur", value: agentDisplayName(signer) },
+      { label: "Date", value: formatDateTime(new Date()) },
+    ],
   });
 }
 
 function buildSignatureFields({ recipientId }) {
-  const A4_WIDTH = 595.28;
-  const A4_HEIGHT = 841.89;
-  const toPct = (value, total) => Math.round((Number(value) / total) * 10000) / 100;
-
-  const signatureRect = { x: 50, y: 140, width: 250, height: 50 };
-  const dateRect = { x: 320, y: 140, width: 120, height: 50 };
-
-  const toField = (type, rect) => ({
-    recipient_id: recipientId,
-    type,
-    page_number: 1,
-    position: {
-      x: toPct(rect.x, A4_WIDTH),
-      y: toPct(rect.y, A4_HEIGHT),
-      width: toPct(rect.width, A4_WIDTH),
-      height: toPct(rect.height, A4_HEIGHT),
-    },
-  });
-
-  return [
-    toField("signature", signatureRect),
-    toField("date", dateRect),
-  ];
+  return signaturePdfTemplate.buildSignatureFields({ recipientId });
 }
 
 function getEnvAny(keys) {
@@ -496,6 +447,7 @@ async function getPendingForUser(userId) {
     include: {
       demandes_paiement: {
         include: {
+          documents: true,
           conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
           agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
@@ -510,6 +462,9 @@ async function getPendingForUser(userId) {
 
 async function approveStep(stepId, userId, commentaire, signatureDataUrl = null, extra = {}) {
   const commentaireTrimmed = commentaire != null ? String(commentaire).trim() : "";
+  const firmaCompletedAt = extra?.firma_completed_at ? new Date(extra.firma_completed_at) : null;
+  const validatedAt =
+    firmaCompletedAt && !Number.isNaN(firmaCompletedAt.getTime()) ? firmaCompletedAt : new Date();
   // On ignore la signatureDataUrl car on ne gère plus les signatures électroniques
 
   const result = await prisma.$transaction(async (tx) => {
@@ -706,7 +661,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       where: { id: step.id },
       data: {
         status: "valide",
-        validated_at: new Date(),
+        validated_at: validatedAt,
         commentaire: commentaireTrimmed || null,
         agents_validation_steps_validated_by_idToagents: { connect: { id: agent.id } },
         // Plus de signature_url
@@ -1045,30 +1000,40 @@ async function returnForModification(stepId, userId, commentaire) {
       },
     });
 
-    if (!step || step.status !== "en_attente") throw withStatusCode(new Error("Étape invalide"), 400);
+    if (!step || step.status !== "en_attente") throw withStatusCode(new Error("Etape invalide"), 400);
     const stepLevel = Number(step.level || 0);
-    if (!stepLevel) {
-      throw withStatusCode(new Error("Étape invalide"), 400);
-    }
+    if (!stepLevel) throw withStatusCode(new Error("Etape invalide"), 400);
 
     const agent = await tx.agents.findFirst({
       where: { user_id: Number(userId), deleted_at: null },
       include: { roles: true, users: true },
     });
-    if (!agent || !agent.roles?.name) throw withStatusCode(new Error("Non autorisé"), 403);
+    if (!agent || !agent.roles?.name) throw withStatusCode(new Error("Non autorise"), 403);
 
     const ok = await canActByDelegation(tx, step, agent);
-    if (!ok) throw withStatusCode(new Error("Non autorisé"), 403);
+    if (!ok) throw withStatusCode(new Error("Non autorise"), 403);
 
-    const previous =
-      stepLevel > 1
-        ? await tx.validation_steps.findFirst({
-            where: { demande_id: Number(step.demande_id), level: stepLevel - 1 },
-          })
+    const steps = await tx.validation_steps.findMany({
+      where: { demande_id: Number(step.demande_id) },
+      orderBy: { level: "asc" },
+    });
+    const directionDirector =
+      String(step.role_name || "").trim().toUpperCase() === "DAF"
+        ? await resolveDirectionDirectorAgent(
+            tx,
+            step.demandes_paiement?.direction_id
+          )
         : null;
-    if (stepLevel > 1 && !previous) throw withStatusCode(new Error("Étape précédente introuvable"), 400);
+    const resolution = resolveReturnTarget({
+      steps,
+      returnStep: step,
+      demandeurId: step.demandes_paiement?.demandeur_id,
+      directionDirectorAgentId: directionDirector?.id,
+    });
+    if (!resolution?.targetAgentId) {
+      throw withStatusCode(new Error("Destinataire du retour introuvable"), 400);
+    }
 
-    // 1) Marquer l'étape courante comme "retour_modification" (on garde le motif)
     await tx.validation_steps.update({
       where: { id: step.id },
       data: {
@@ -1078,46 +1043,60 @@ async function returnForModification(stepId, userId, commentaire) {
       },
     });
 
-    // 2) Forcer la re-validation de l'étape N-1 (elle sera rouverte après correction)
-    if (previous) {
-      await tx.validation_steps.update({
-        where: { id: previous.id },
+    if (resolution.targetStep) {
+      const targetLevel = Number(resolution.targetStep.level);
+      await tx.validation_steps.updateMany({
+        where: {
+          demande_id: Number(step.demande_id),
+          level: { gte: targetLevel, lt: stepLevel },
+        },
         data: {
           status: "bloque",
+          validated_by_id: null,
           validated_at: null,
           signature_url: null,
+          signature_provider: null,
+          signature_request_id: null,
+          signature_request_user_id: null,
+          signature_status: null,
+          signature_payload: null,
           commentaire: null,
-          agents_validation_steps_validated_by_idToagents: { disconnect: true },
           updated_at: new Date(),
         },
       });
     }
 
-    // 3) Bloquer les étapes suivantes (sécurité)
     await tx.validation_steps.updateMany({
-      where: { demande_id: Number(step.demande_id), level: { gt: Number(step.level) } },
+      where: { demande_id: Number(step.demande_id), level: { gt: stepLevel } },
       data: { status: "bloque", updated_at: new Date() },
     });
 
-    // 4) Passer la demande en "a_modifier" (éditable par le demandeur)
     await tx.demandes_paiement.update({
       where: { id: Number(step.demande_id) },
       data: { statut: "a_modifier", updated_at: new Date() },
     });
 
-    const demandeurUser = step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users;
+    const targetAgent = await tx.agents.findUnique({
+      where: { id: Number(resolution.targetAgentId) },
+      include: { users: true },
+    });
+
     return {
       returned: true,
       stepId: step.id,
       demandeId: step.demande_id,
       demandeUuid: step.demandes_paiement?.uuid || null,
       validationUuid: step.uuid || null,
-      demandeurUserId: demandeurUser?.id || null,
+      demandeurUserId:
+        step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null,
+      targetUserId: targetAgent?.users?.id || null,
+      targetAgentId: resolution.targetAgentId,
+      targetRole: resolution.targetRole,
+      targetKind: resolution.kind,
+      targetStepId: resolution.targetStep?.id || null,
       role: step.role_name,
       demandeSnapshot: buildDemandeSnapshot(step.demandes_paiement),
       commentaire: commentaireTrimmed,
-      previousRole: previous?.role_name || null,
-      previousLevel: previous?.level || null,
     };
   });
 
@@ -1137,6 +1116,10 @@ async function returnForModification(stepId, userId, commentaire) {
         demande_id: result.demandeId,
         demande_uuid: result.demandeUuid || null,
         commentaire: result.commentaire || null,
+        target_kind: result.targetKind || null,
+        target_role: result.targetRole || null,
+        target_agent_id: result.targetAgentId || null,
+        target_step_id: result.targetStepId || null,
         demande_motif: result.demandeSnapshot?.motif ?? null,
         demande_montant: result.demandeSnapshot?.montant ?? null,
         demande_montant_net: result.demandeSnapshot?.montant_net ?? null,
@@ -1148,33 +1131,49 @@ async function returnForModification(stepId, userId, commentaire) {
   }
 
   try {
-    if (result?.demandeurUserId) {
+    if (result?.targetUserId) {
       await notifications.createNotification({
-        user_id: result.demandeurUserId,
+        user_id: result.targetUserId,
         type: "demande_returned_for_modification",
         demande_id: result.demandeId,
-        message: `Votre demande a été retournée pour modification (${result.role}). Motif: ${result.commentaire}`,
+        message:
+          "La demande " +
+          (result.demandeUuid || result.demandeId) +
+          " vous a ete retournee pour modification par le profil " +
+          result.role +
+          ". Motif: " +
+          result.commentaire,
         meta: {
           demandeUuid: result.demandeUuid,
           fromRole: result.role,
-          previousRole: result.previousRole,
-          previousLevel: result.previousLevel,
+          targetRole: result.targetRole,
+          targetAgentId: result.targetAgentId,
+          targetStepId: result.targetStepId,
           commentaire: result.commentaire,
         },
         sendEmailNow: true,
       });
     }
   } catch {
-    // ignore
+    // ignore notification errors
   }
 
   try {
     await realtime.emitPendingStatus(userId);
+    if (result?.targetUserId && Number(result.targetUserId) !== Number(userId)) {
+      await realtime.emitPendingStatus(result.targetUserId);
+    }
   } catch {
     // ignore realtime errors
   }
 
-  return { returned: true, stepId: result.stepId, demandeId: result.demandeId };
+  return {
+    returned: true,
+    stepId: result.stepId,
+    demandeId: result.demandeId,
+    targetRole: result.targetRole,
+    targetAgentId: result.targetAgentId,
+  };
 }
 
 async function getStepsByDemande(demandeId) {
@@ -1220,7 +1219,7 @@ async function validationDone(userId) {
     },
     orderBy: { validated_at: "desc" },
     include: {
-      demandes_paiement: true,
+      demandes_paiement: { include: { documents: true } },
       agents_validation_steps_validator_idToagents: { include: { users: { select: { email: true } } } },
       agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
     },
@@ -1305,7 +1304,7 @@ async function validationHistory(userId, options = {}) {
       demandeIds.length > 0
         ? await prisma.demandes_paiement.findMany({
             where: { id: { in: demandeIds }, deleted_at: null },
-            select: { id: true, uuid: true, statut: true, validation_stop_role: true },
+            select: { id: true, uuid: true, statut: true, validation_stop_role: true, documents: { select: { id: true } } },
           })
         : [];
     const demandeUuidById = new Map(demandes.map((d) => [Number(d.id), String(d.uuid)]));
@@ -1385,6 +1384,7 @@ async function validationHistory(userId, options = {}) {
           uuid: demandeMeta.uuid ?? entry.demande?.uuid ?? null,
           statut: demandeMeta.statut ?? null,
           validation_stop_role: demandeMeta.validation_stop_role ?? null,
+          documents: Array.isArray(demandeMeta.documents) ? demandeMeta.documents : [],
         };
       }
     }
@@ -1919,7 +1919,7 @@ async function startSignature(stepId, userId, payload = {}) {
     },
   });
 
-  const signingRequestId = signingRequest?.id;
+  const signingRequestId = firma.extractSigningRequestId(signingRequest);
   if (!signingRequestId) throw new Error("Firma: ID de signature introuvable");
 
   try {
@@ -2009,12 +2009,33 @@ async function completeSignature(stepId, userId) {
   }
 
   let finalDocumentUrl = null;
+  let firmaRequestData = null;
+  let firmaFields = null;
   try {
-    const request = await firma.getSigningRequest(step.signature_request_id);
-    finalDocumentUrl = firma.extractFinalDocumentUrl(request) || null;
+    firmaRequestData = await firma.getSigningRequest(step.signature_request_id);
+    finalDocumentUrl = firma.extractFinalDocumentUrl(firmaRequestData) || null;
   } catch {
-    // ignore download url errors
+    // The official date can still fall back to the signer completion date.
   }
+  try {
+    firmaFields = await firma.getSigningRequestFields(step.signature_request_id);
+  } catch {
+    // Older Firma requests may not expose fields; keep the automatic date fallback.
+  }
+
+  const officialSignatureDate = firma.resolveSignatureDate({
+    fields: firmaFields,
+    signerUser,
+    request: firmaRequestData,
+    signerUserId: signerUserId || step.signature_request_user_id,
+  });
+  const firmaCompletedAtRaw =
+    firma.extractFinishedAt(signerUser) ||
+    firma.extractFinishedAt(firmaRequestData) ||
+    firmaRequestData?.timestamps?.finished_on ||
+    firmaRequestData?.timestamps?.finished_at ||
+    new Date().toISOString();
+  const firmaCompletedAtDate = firma.normalizeFirmaDateValue(firmaCompletedAtRaw) || new Date();
 
   const payload = step.signature_payload || {};
   const commentaire = payload?.commentaire || null;
@@ -2023,6 +2044,7 @@ async function completeSignature(stepId, userId) {
   const result = await approveStep(stepId, userId, commentaire, null, {
     ...(extra || {}),
     signature_validated: true,
+    firma_completed_at: firmaCompletedAtDate.toISOString(),
   });
 
   await prisma.validation_steps.update({
@@ -2034,6 +2056,10 @@ async function completeSignature(stepId, userId) {
         ...(payload || {}),
         completed_at: new Date().toISOString(),
         final_document_url: finalDocumentUrl || null,
+        official_signature_date: officialSignatureDate.date.toISOString(),
+        official_signature_source: officialSignatureDate.source,
+        official_signature_raw_value: officialSignatureDate.rawValue || null,
+        firma_finished_at: firmaCompletedAtRaw || null,
       },
       updated_at: new Date(),
     },

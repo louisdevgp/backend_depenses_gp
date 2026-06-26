@@ -10,4 +10,3 @@ module.exports = {
 	COMPTABLE: "COMPTABLE",
 	ADMIN: "ADMIN",
 };
-

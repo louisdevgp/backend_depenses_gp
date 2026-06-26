@@ -122,7 +122,7 @@ exports.close = async (req, res) => {
     return res.json({ success: true, data: result });
   } catch (e) {
     const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
-    return res.status(status).json({ success: false, message: e.message });
+    return res.status(status).json({ success: false, message: e.message, code: e?.code || undefined });
   }
 };
 
@@ -158,5 +158,19 @@ exports.confirmAchat = async (req, res) => {
   } catch (e) {
     const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
     return res.status(status).json({ success: false, message: e.message });
+  }
+};
+
+exports.confirmAchatNotRequired = async (req, res) => {
+  try {
+    const result = await service.confirmAchatNotRequired(
+      req.user,
+      req.params.idOrUuid,
+      req.body || {}
+    );
+    return res.json({ success: true, data: result });
+  } catch (e) {
+    const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
+    return res.status(status).json({ success: false, message: e.message, code: e?.code || undefined });
   }
 };

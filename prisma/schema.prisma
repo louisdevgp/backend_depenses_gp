@@ -57,6 +57,7 @@ model agents {
   delegations_delegations_principal_idToagents                      delegations[]           @relation("delegations_principal_idToagents")
   demandes_paiement_demandes_paiement_ajournee_par_idToagents       demandes_paiement[]     @relation("demandes_paiement_ajournee_par_idToagents")
   demandes_paiement_demandes_paiement_acheteur_idToagents           demandes_paiement[]     @relation("demandes_paiement_acheteur_idToagents")
+  demandes_paiement_demandes_paiement_achat_decision_par_idToagents demandes_paiement[]     @relation("demandes_paiement_achat_decision_par_idToagents")
   demandes_paiement_demandes_paiement_demandeur_idToagents          demandes_paiement[]     @relation("demandes_paiement_demandeur_idToagents")
   documents                                                         documents[]
   paiements                                                         paiements[]
@@ -190,59 +191,66 @@ model demande_items {
 }
 
 model demandes_paiement {
-  id                                               Int                   @id @default(autoincrement()) @db.UnsignedInt
-  uuid                                             String                @unique(map: "uk_demandes_uuid") @db.Char(36)
-  motif                                            String                @db.VarChar(255)
-  description                                      String?               @db.Text
-  montant                                          Decimal               @db.Decimal(18, 2)
-  devise                                           String?               @db.VarChar(10)
-  taux_change                                      Decimal?              @db.Decimal(18, 6)
-  montant_base                                     Decimal?              @db.Decimal(18, 2)
-  beneficiaire                                     String                @db.VarChar(255)
-  fournisseur_id                                   Int?                  @db.UnsignedInt
-  remarque                                         String?               @db.Text
-  demandeur_id                                     Int                   @db.UnsignedInt
-  acheteur_id                                      Int?                  @db.UnsignedInt
-  direction_id                                     Int?                  @db.UnsignedInt
-  departement_id                                   Int?                  @db.UnsignedInt
-  service_id                                       Int?                  @db.UnsignedInt
-  statut                                           String                @default("draft") @db.VarChar(50)
-  budget_prevu                                     Boolean?
-  budget_disponible                                Boolean?
-  paiement_immediat                                Boolean?
-  validation_oci                                   Boolean?
-  ajournee                                         Boolean               @default(false)
-  ajournee_le                                      DateTime?             @db.DateTime(0)
-  ajournee_par_id                                  Int?                  @db.UnsignedInt
-  prochaine_revue_le                               DateTime?             @db.DateTime(0)
-  created_at                                       DateTime              @default(now()) @db.DateTime(0)
-  updated_at                                       DateTime              @default(now()) @db.DateTime(0)
-  deleted_at                                       DateTime?             @db.DateTime(0)
-  validation_flow_id                               Int?                  @db.UnsignedInt
-  validation_stop_role                             String?               @db.VarChar(20)
-  daf_critere4                                     String?               @db.VarChar(50)
-  montant_net                                      Decimal?              @db.Decimal(18, 2)
-  remise_type                                      String?               @db.VarChar(20)
-  remise_valeur                                    Decimal?              @db.Decimal(18, 2)
-  bons_commande                                    bons_commande[]
-  conditions_paiement                              conditions_paiement[]
-  demande_items                                    demande_items[]
-  agents_demandes_paiement_ajournee_par_idToagents agents?               @relation("demandes_paiement_ajournee_par_idToagents", fields: [ajournee_par_id], references: [id], map: "fk_demande_ajournee_par")
-  agents_demandes_paiement_acheteur_idToagents     agents?               @relation("demandes_paiement_acheteur_idToagents", fields: [acheteur_id], references: [id], onDelete: SetNull, map: "fk_demande_acheteur")
-  agents_demandes_paiement_demandeur_idToagents    agents                @relation("demandes_paiement_demandeur_idToagents", fields: [demandeur_id], references: [id], map: "fk_demande_demandeur")
-  departements                                     departements?         @relation(fields: [departement_id], references: [id], map: "fk_demande_departement")
-  directions                                       directions?           @relation(fields: [direction_id], references: [id], map: "fk_demande_direction")
-  validation_flows                                 validation_flows?     @relation(fields: [validation_flow_id], references: [id], map: "fk_demande_flow")
-  fournisseurs                                     fournisseurs?         @relation(fields: [fournisseur_id], references: [id], map: "fk_demande_fournisseur")
-  services                                         services?             @relation(fields: [service_id], references: [id], map: "fk_demande_service")
-  documents                                        documents[]
-  notifications                                    notifications[]
-  paiements                                        paiements[]
-  receptions                                       receptions[]
-  validation_steps                                 validation_steps[]
+  id                                                     Int                   @id @default(autoincrement()) @db.UnsignedInt
+  uuid                                                   String                @unique(map: "uk_demandes_uuid") @db.Char(36)
+  motif                                                  String                @db.VarChar(255)
+  description                                            String?               @db.Text
+  montant                                                Decimal               @db.Decimal(18, 2)
+  devise                                                 String?               @db.VarChar(10)
+  taux_change                                            Decimal?              @db.Decimal(18, 6)
+  montant_base                                           Decimal?              @db.Decimal(18, 2)
+  beneficiaire                                           String                @db.VarChar(255)
+  fournisseur_id                                         Int?                  @db.UnsignedInt
+  remarque                                               String?               @db.Text
+  demandeur_id                                           Int                   @db.UnsignedInt
+  acheteur_id                                            Int?                  @db.UnsignedInt
+  achat_requis                                           Boolean?
+  achat_decision_par_id                                  Int?                  @db.UnsignedInt
+  achat_decision_at                                      DateTime?             @db.DateTime(0)
+  achat_decision_commentaire                             String?               @db.Text
+  direction_id                                           Int?                  @db.UnsignedInt
+  departement_id                                         Int?                  @db.UnsignedInt
+  service_id                                             Int?                  @db.UnsignedInt
+  statut                                                 String                @default("draft") @db.VarChar(50)
+  budget_prevu                                           Boolean?
+  budget_disponible                                      Boolean?
+  paiement_immediat                                      Boolean?
+  validation_oci                                         Boolean?
+  ajournee                                               Boolean               @default(false)
+  ajournee_le                                            DateTime?             @db.DateTime(0)
+  ajournee_par_id                                        Int?                  @db.UnsignedInt
+  prochaine_revue_le                                     DateTime?             @db.DateTime(0)
+  created_at                                             DateTime              @default(now()) @db.DateTime(0)
+  updated_at                                             DateTime              @default(now()) @db.DateTime(0)
+  deleted_at                                             DateTime?             @db.DateTime(0)
+  validation_flow_id                                     Int?                  @db.UnsignedInt
+  validation_stop_role                                   String?               @db.VarChar(20)
+  daf_critere4                                           String?               @db.VarChar(50)
+  montant_net                                            Decimal?              @db.Decimal(18, 2)
+  remise_type                                            String?               @db.VarChar(20)
+  remise_valeur                                          Decimal?              @db.Decimal(18, 2)
+  bons_commande                                          bons_commande[]
+  conditions_paiement                                    conditions_paiement[]
+  demande_items                                          demande_items[]
+  agents_demandes_paiement_ajournee_par_idToagents       agents?               @relation("demandes_paiement_ajournee_par_idToagents", fields: [ajournee_par_id], references: [id], map: "fk_demande_ajournee_par")
+  agents_demandes_paiement_acheteur_idToagents           agents?               @relation("demandes_paiement_acheteur_idToagents", fields: [acheteur_id], references: [id], onDelete: SetNull, map: "fk_demande_acheteur")
+  agents_demandes_paiement_achat_decision_par_idToagents agents?               @relation("demandes_paiement_achat_decision_par_idToagents", fields: [achat_decision_par_id], references: [id], onDelete: SetNull, map: "fk_demande_achat_decision_par")
+  agents_demandes_paiement_demandeur_idToagents          agents                @relation("demandes_paiement_demandeur_idToagents", fields: [demandeur_id], references: [id], map: "fk_demande_demandeur")
+  departements                                           departements?         @relation(fields: [departement_id], references: [id], map: "fk_demande_departement")
+  directions                                             directions?           @relation(fields: [direction_id], references: [id], map: "fk_demande_direction")
+  validation_flows                                       validation_flows?     @relation(fields: [validation_flow_id], references: [id], map: "fk_demande_flow")
+  fournisseurs                                           fournisseurs?         @relation(fields: [fournisseur_id], references: [id], map: "fk_demande_fournisseur")
+  services                                               services?             @relation(fields: [service_id], references: [id], map: "fk_demande_service")
+  documents                                              documents[]
+  notifications                                          notifications[]
+  paiements                                              paiements[]
+  receptions                                             receptions[]
+  validation_steps                                       validation_steps[]
 
   @@index([ajournee_par_id], map: "fk_demande_ajournee_par")
   @@index([acheteur_id], map: "idx_demande_acheteur")
+  @@index([achat_decision_par_id], map: "idx_demande_achat_decision_par")
+  @@index([achat_requis], map: "idx_demande_achat_requis")
   @@index([departement_id], map: "fk_demande_departement")
   @@index([deleted_at], map: "idx_demande_deleted")
   @@index([demandeur_id], map: "idx_demande_demandeur")

@@ -7,6 +7,7 @@ const path = require("path");
 const Mustache = require("mustache");
 const axios = require("axios");
 const { resolveUploadsPathFromUrl } = require("./signatures.services");
+const firma = require("./firma.services");
 
 let puppeteer;
 try {
@@ -823,7 +824,9 @@ async function getDemandeData(idOrUuid) {
           agents_validation_steps_validator_idToagents: { include: { users: true } },
         },
       },
-      agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+      agents_demandes_paiement_demandeur_idToagents: {
+        include: { users: true, roles: true },
+      },
     },
   });
   if (!demande) throw new Error("Demande introuvable");
@@ -950,9 +953,12 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
   }
 
   {
-    const demandeurName = userDisplayNameFromAgent(d.agents_demandes_paiement_demandeur_idToagents);
+    const demandeur = d.agents_demandes_paiement_demandeur_idToagents;
+    const demandeurName = userDisplayNameFromAgent(demandeur);
+    const demandeurRole = String(demandeur?.roles?.name || "").trim().toUpperCase();
     const stepByRole = new Map((d.validation_steps || []).map((s) => [String(s.role_name || "").toUpperCase(), s]));
     const pick = (role) => stepByRole.get(String(role).toUpperCase()) || null;
+    const directeur = pick("DIRECTEUR");
     const dg = pick("DG");
     const dga = pick("DGA");
     const daf = pick("DAF");
@@ -961,15 +967,95 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
       const ref = s.signature_request_id || s.signature_request_user_id || null;
       return ref ? `ID: ${ref}` : null;
     };
-    const signatureAt = (s) => {
+    const resolveSignatureMoment = async (s) => {
       if (!s?.validated_at) return null;
-      return `Date: ${asDateTime(s.validated_at)}`;
+      const payload = s?.signature_payload && typeof s.signature_payload === "object"
+        ? s.signature_payload
+        : {};
+
+      if (payload.official_signature_source === "firma_date_field") {
+        const selectedValue = payload.official_signature_raw_value || payload.official_signature_date;
+        const selectedDate = firma.normalizeFirmaDateValue(selectedValue);
+        if (selectedDate) {
+          return {
+            date: selectedDate,
+            iso: selectedDate.toISOString(),
+            source: "firma_date_field",
+            rawValue: selectedValue,
+          };
+        }
+      }
+      if (payload.official_signature_date) {
+        const officialDate = firma.normalizeFirmaDateValue(payload.official_signature_date);
+        if (officialDate) {
+          return {
+            date: officialDate,
+            iso: officialDate.toISOString(),
+            source: payload.official_signature_source || "firma_signer_finished_at",
+            rawValue: payload.official_signature_raw_value || payload.official_signature_date,
+          };
+        }
+      }
+
+      // Backward compatibility: older completed signatures did not persist the
+      // official Firma date. Read it lazily when the expense sheet is generated.
+      if (s.signature_request_id) {
+        try {
+          const fields = await firma.getSigningRequestFields(s.signature_request_id);
+          const selected = firma.extractSelectedDateFromFields(fields, s.signature_request_user_id);
+          if (selected?.date) {
+            return {
+              date: selected.date,
+              iso: selected.date.toISOString(),
+              source: "firma_date_field",
+              rawValue: selected.rawValue,
+            };
+          }
+        } catch {
+          // Continue with Firma's automatic completion date.
+        }
+
+        try {
+          const usersRaw = await firma.getSigningRequestUsers(s.signature_request_id);
+          const users = firma.normalizeUsersResponse(usersRaw);
+          const signer =
+            users.find((user) => String(firma.extractUserId(user)) === String(s.signature_request_user_id)) ||
+            users[0] ||
+            null;
+          const finishedAt = firma.extractFinishedAt(signer);
+          const finishedDate = firma.normalizeFirmaDateValue(finishedAt);
+          if (finishedDate) {
+            return {
+              date: finishedDate,
+              iso: finishedDate.toISOString(),
+              source: "firma_signer_finished_at",
+              rawValue: finishedAt,
+            };
+          }
+        } catch {
+          // Keep the database timestamp as the last fallback.
+        }
+      }
+
+      const fallbackDate = firma.normalizeFirmaDateValue(s.validated_at);
+      return fallbackDate
+        ? {
+            date: fallbackDate,
+            iso: fallbackDate.toISOString(),
+            source: "database_validated_at",
+            rawValue: s.validated_at,
+          }
+        : null;
     };
-    const signatureQrDataUrl = async (s) => {
-      if (!s?.uuid || !s?.validated_at) return null;
-      const validatedIso = asIsoDateTime(s.validated_at);
-      if (!validatedIso) return null;
-      const tokenBase = `GP|validation|${s.uuid}|${validatedIso}`;
+    const signatureAt = (moment) => {
+      if (!moment?.date) return null;
+      return moment.source === "firma_date_field"
+        ? `Date: ${asDate(moment.rawValue || moment.date)}`
+        : `Date: ${asDateTime(moment.date)}`;
+    };
+    const signatureQrDataUrl = async (s, moment) => {
+      if (!s?.uuid || !moment?.iso) return null;
+      const tokenBase = `GP|validation|${s.uuid}|${moment.iso}`;
       const sig = hmacSignature(tokenBase);
       if (!sig) return null;
       const token = `${tokenBase}|${sig}`;
@@ -978,20 +1064,47 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
       return `data:image/png;base64,${qrBuf.toString("base64")}`;
     };
 
-    const [dafQr, dgaQr, dgQr] = await Promise.all([
-      daf?.validated_by_id ? signatureQrDataUrl(daf) : Promise.resolve(null),
-      dga?.validated_by_id ? signatureQrDataUrl(dga) : Promise.resolve(null),
-      dg?.validated_by_id ? signatureQrDataUrl(dg) : Promise.resolve(null),
+    const [directeurMoment, dafMoment, dgaMoment, dgMoment] = await Promise.all([
+      directeur?.validated_by_id ? resolveSignatureMoment(directeur) : Promise.resolve(null),
+      daf?.validated_by_id ? resolveSignatureMoment(daf) : Promise.resolve(null),
+      dga?.validated_by_id ? resolveSignatureMoment(dga) : Promise.resolve(null),
+      dg?.validated_by_id ? resolveSignatureMoment(dg) : Promise.resolve(null),
     ]);
+    const [directeurQr, dafQr, dgaQr, dgQr] = await Promise.all([
+      directeur?.validated_by_id ? signatureQrDataUrl(directeur, directeurMoment) : Promise.resolve(null),
+      daf?.validated_by_id ? signatureQrDataUrl(daf, dafMoment) : Promise.resolve(null),
+      dga?.validated_by_id ? signatureQrDataUrl(dga, dgaMoment) : Promise.resolve(null),
+      dg?.validated_by_id ? signatureQrDataUrl(dg, dgMoment) : Promise.resolve(null),
+    ]);
+    const directeurAt = signatureAt(directeurMoment);
+    const dafAt = signatureAt(dafMoment);
+    const dgaAt = signatureAt(dgaMoment);
+    const dgAt = signatureAt(dgMoment);
 
     // Noms + date + identifiant + QR de validation
     html = injectDemandeSignataires(html, {
       // Demandeur: affiché dès la soumission (création)
-      demandeur: signatureCellHtml({ name: demandeurName, signatureDataUrl: null }),
+      demandeur: directeur?.validated_by_id
+        ? signatureCellHtml({
+            nameLines: signatureLabelLinesFromValidationStep(directeur),
+            at: directeurAt,
+            ref: signatureRef(directeur),
+            qrDataUrl: directeurQr,
+            signatureDataUrl: null,
+          })
+        : demandeurRole === "DIRECTEUR"
+          ? signatureCellHtml({
+              name: demandeurName,
+              at: d.created_at ? `Date: ${asDateTime(d.created_at)}` : null,
+              ref: "Directeur demandeur",
+              qrDataUrl: isFinal && qrBuf ? `data:image/png;base64,${qrBuf.toString("base64")}` : null,
+              signatureDataUrl: null,
+            })
+          : "",
       daf: daf?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(daf),
-            at: signatureAt(daf),
+            at: dafAt,
             ref: signatureRef(daf),
             qrDataUrl: dafQr,
             signatureDataUrl: null, // Plus de signature
@@ -1000,7 +1113,7 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
       dga: dga?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(dga),
-            at: signatureAt(dga),
+            at: dgaAt,
             ref: signatureRef(dga),
             qrDataUrl: dgaQr,
             signatureDataUrl: null, // Plus de signature
@@ -1009,7 +1122,7 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
       dg: dg?.validated_by_id
         ? signatureCellHtml({
             nameLines: signatureLabelLinesFromValidationStep(dg),
-            at: signatureAt(dg),
+            at: dgAt,
             ref: signatureRef(dg),
             qrDataUrl: dgQr,
             signatureDataUrl: null, // Plus de signature

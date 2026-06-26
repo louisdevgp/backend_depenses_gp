@@ -68,6 +68,95 @@ function hasOwn(obj, key) {
   return obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key);
 }
 
+function shouldCopyAccountantsForDaf(type, meta) {
+  const normalizedType = String(type || "").trim().toLowerCase();
+  if (normalizedType === "reception_visa_pending") return true;
+  if (normalizedType !== "validation_pending") return false;
+  return String(meta?.role || "").trim().toUpperCase() === "DAF";
+}
+
+async function resolveDafAccountantCcEmails(userId, type, meta) {
+  if (!shouldCopyAccountantsForDaf(type, meta)) return [];
+
+  const recipient = await prisma.users.findFirst({
+    where: { id: Number(userId), is_active: true, deleted_at: null },
+    select: {
+      email: true,
+      agents: {
+        where: { deleted_at: null },
+        select: {
+          direction_id: true,
+          roles: { select: { name: true } },
+        },
+      },
+      user_roles: {
+        select: { roles: { select: { name: true, is_active: true, deleted_at: true } } },
+      },
+    },
+  });
+  if (!recipient) return [];
+
+  const effectiveRoles = new Set([
+    ...recipient.agents.map((agent) => String(agent?.roles?.name || "").toUpperCase()),
+    ...recipient.user_roles
+      .filter((entry) => entry?.roles?.is_active && !entry?.roles?.deleted_at)
+      .map((entry) => String(entry?.roles?.name || "").toUpperCase()),
+  ]);
+  if (!effectiveRoles.has("DAF")) return [];
+
+  const directionIds = Array.from(
+    new Set(
+      recipient.agents
+        .map((agent) => agent?.direction_id)
+        .filter((id) => id != null)
+        .map(Number)
+    )
+  );
+  if (!directionIds.length) return [];
+
+  const accountants = await prisma.users.findMany({
+    where: {
+      id: { not: Number(userId) },
+      is_active: true,
+      deleted_at: null,
+      agents: {
+        some: {
+          deleted_at: null,
+          direction_id: { in: directionIds },
+        },
+      },
+      OR: [
+        {
+          agents: {
+            some: {
+              deleted_at: null,
+              direction_id: { in: directionIds },
+              roles: { is: { name: "COMPTABLE", is_active: true, deleted_at: null } },
+            },
+          },
+        },
+        {
+          user_roles: {
+            some: {
+              roles: { name: "COMPTABLE", is_active: true, deleted_at: null },
+            },
+          },
+        },
+      ],
+    },
+    select: { email: true },
+  });
+
+  const recipientEmail = String(recipient.email || "").trim().toLowerCase();
+  return Array.from(
+    new Set(
+      accountants
+        .map((user) => String(user?.email || "").trim())
+        .filter((email) => email && email.toLowerCase() !== recipientEmail)
+    )
+  );
+}
+
 /**
  * Crée une notification en DB (canal email par défaut).
  * ✅ tx optionnel: si tu es dans une transaction, passe tx pour éviter les FK errors.
@@ -213,8 +302,10 @@ async function createNotification(
 
     if (!user?.email) return created;
 
+    const ccEmails = await resolveDafAccountantCcEmails(user_id, type, created.meta);
     const mailRes = await sendNotificationEmail({
       to: user.email,
+      cc: ccEmails.length ? ccEmails.join(",") : undefined,
       type,
       message: normalizedMessage,
       meta: created.meta,
@@ -289,5 +380,6 @@ module.exports = {
   createNotification,
   listMyNotifications,
   markAsRead,
+  resolveDafAccountantCcEmails,
 };
 
