@@ -1,4 +1,6 @@
 const prisma = require("../config/prisma");
+const P = require("../constants/permissions");
+const { getUserPermissionProfile, normalizePermissionCode } = require("../utils/permissionScopes");
 
 function toNumber(v) {
   if (v == null) return 0;
@@ -91,6 +93,105 @@ function buildDemandesByBeneficiaire(rows = []) {
     map.set(beneficiaire, current);
   }
   return Array.from(map.values()).sort((a, b) => (b.montant || 0) - (a.montant || 0));
+}
+
+function budgetSolde(line) {
+  return toNumber(line?.montant_initial) - toNumber(line?.montant_engage) - toNumber(line?.montant_paye);
+}
+
+function budgetConsumptionRate(line) {
+  const initial = toNumber(line?.montant_initial);
+  if (!initial || initial <= 0) return 0;
+  return ((toNumber(line?.montant_engage) + toNumber(line?.montant_paye)) / initial) * 100;
+}
+
+function decorateBudgetLine(line) {
+  const solde = budgetSolde(line);
+  const taux = budgetConsumptionRate(line);
+  return {
+    id: line.id,
+    uuid: line.uuid,
+    code: line.code,
+    libelle: line.libelle,
+    exercice: line.exercice,
+    statut: line.statut,
+    devise: line.devise || "FCFA",
+    montant_initial: toNumber(line.montant_initial),
+    montant_engage: toNumber(line.montant_engage),
+    montant_paye: toNumber(line.montant_paye),
+    solde_disponible: solde,
+    taux_consommation: Math.round(taux * 100) / 100,
+    depassement_montant: solde < 0 ? Math.abs(solde) : 0,
+  };
+}
+
+async function hasUserPermission(userId, code) {
+  try {
+    const profile = await getUserPermissionProfile({ prisma, userId });
+    const allowed = new Set((profile.allowedCodes || []).map(normalizePermissionCode));
+    return allowed.has(normalizePermissionCode(code));
+  } catch {
+    return false;
+  }
+}
+
+async function buildBudgetDashboard({ period, directionScopeWhere }) {
+  const lines = await prisma.lignes_budgetaires.findMany({
+    where: { deleted_at: null },
+    orderBy: [{ exercice: "desc" }, { code: "asc" }],
+  });
+
+  const decorated = lines.map(decorateBudgetLine);
+  const totals = decorated.reduce(
+    (acc, line) => {
+      acc.count += 1;
+      acc.montant_initial += line.montant_initial;
+      acc.montant_engage += line.montant_engage;
+      acc.montant_paye += line.montant_paye;
+      acc.solde_disponible += line.solde_disponible;
+      acc.depassement_montant += line.depassement_montant;
+      if (line.solde_disponible < 0) acc.lignes_en_depassement += 1;
+      if (line.taux_consommation >= 80) acc.lignes_a_surveillance += 1;
+      return acc;
+    },
+    {
+      count: 0,
+      montant_initial: 0,
+      montant_engage: 0,
+      montant_paye: 0,
+      solde_disponible: 0,
+      depassement_montant: 0,
+      lignes_en_depassement: 0,
+      lignes_a_surveillance: 0,
+    }
+  );
+
+  const demandesSansLigne = await prisma.demandes_paiement.count({
+    where: {
+      deleted_at: null,
+      ligne_budgetaire_id: null,
+      created_at: { gte: period.from, lte: period.to },
+      ...directionScopeWhere,
+    },
+  });
+
+  return {
+    totals: {
+      ...totals,
+      demandes_sans_ligne: demandesSansLigne,
+    },
+    topConsumed: [...decorated]
+      .sort((a, b) => (b.taux_consommation || 0) - (a.taux_consommation || 0))
+      .slice(0, 5),
+    overrunLines: decorated
+      .filter((line) => line.solde_disponible < 0)
+      .sort((a, b) => (b.depassement_montant || 0) - (a.depassement_montant || 0))
+      .slice(0, 5),
+    warningLines: decorated
+      .filter((line) => line.solde_disponible >= 0 && line.taux_consommation >= 80)
+      .sort((a, b) => (b.taux_consommation || 0) - (a.taux_consommation || 0))
+      .slice(0, 5),
+  };
 }
 
 async function getAgentByUserId(userId) {
@@ -253,6 +354,10 @@ async function dashboard(userId, query = {}) {
     };
   }
 
+  const budget = (await hasUserPermission(userId, P.BUDGET_DASHBOARD_VIEW))
+    ? await buildBudgetDashboard({ period, directionScopeWhere })
+    : null;
+
   // ---------------- DEMANDEUR ----------------
   if (role === "DEMANDEUR") {
     const demandeurRows = await prisma.demandes_paiement.findMany({
@@ -277,6 +382,7 @@ async function dashboard(userId, query = {}) {
       ...base,
       global,
       admin,
+      budget,
       demandeur: {
         demandesByStatut: demandeurByStatut,
         total,
@@ -420,6 +526,7 @@ async function dashboard(userId, query = {}) {
     ...base,
     global,
     admin,
+    budget,
     validator: isValidator ? { pending } : null,
     compta,
     exec,

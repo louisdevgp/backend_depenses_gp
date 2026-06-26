@@ -1,4 +1,4 @@
-const service = require("../services/validation.services");
+﻿const service = require("../services/validation.services");
 const prisma = require("../config/prisma");
 const firma = require("../services/firma.services");
 
@@ -57,8 +57,9 @@ exports.approveStep = async (req, res) => {
     conditions_paiement_custom,
     conditions_paiement_use_demandeur,
     validation_stop_role,
+    ligne_budgetaire_id,
   } = req.body || {};
-  // On ignore signature_data_url car on ne gère plus les signatures électroniques
+  // On ignore signature_data_url car on ne gÃ¨re plus les signatures Ã©lectroniques
   const result = await service.approveStep(stepId, req.user.userId, commentaire, null, {
     budget_prevu,
     budget_disponible,
@@ -69,8 +70,9 @@ exports.approveStep = async (req, res) => {
     conditions_paiement_custom,
     conditions_paiement_use_demandeur,
     validation_stop_role,
+    ligne_budgetaire_id,
   });
-  res.json({ success: true, message: "Étape validée", data: result });
+  res.json({ success: true, message: "Ã‰tape validÃ©e", data: result });
 };
 
 exports.startSignature = async (req, res) => {
@@ -156,7 +158,7 @@ exports.downloadSignature = async (req, res) => {
     if (!signatureUrl) {
       return res.status(409).json({
         success: false,
-        message: "Document en cours de gÃ©nÃ©ration. RÃ©essayez dans quelques instants.",
+        message: "Document en cours de gÃƒÂ©nÃƒÂ©ration. RÃƒÂ©essayez dans quelques instants.",
       });
     }
 
@@ -187,7 +189,7 @@ exports.rejectStep = async (req, res) => {
   }
 
   const result = await service.rejectStep(stepId, req.user.userId, commentaire);
-  res.json({ success: true, message: "Demande rejetée", data: result });
+  res.json({ success: true, message: "Demande rejetÃ©e", data: result });
 };
 
 exports.returnForModification = async (req, res) => {
@@ -201,7 +203,7 @@ exports.returnForModification = async (req, res) => {
 
   try {
     const result = await service.returnForModification(stepId, req.user.userId, commentaireTrimmed);
-    return res.json({ success: true, message: "Demande retournée pour modification", data: result });
+    return res.json({ success: true, message: "Demande retournÃ©e pour modification", data: result });
   } catch (e) {
     const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
     return res.status(status).json({ success: false, message: e.message });
@@ -250,3 +252,4 @@ exports.getValidationsDoneBydemande = async (req, res) => {
   const data = await service.getValidationsDoneBydemande(req.params.demandeUuid);
   res.json({ success: true, data });
 };
+

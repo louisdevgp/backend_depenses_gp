@@ -1,4 +1,4 @@
-const prisma = require("../config/prisma");
+﻿const prisma = require("../config/prisma");
 const { randomUUID: uuidv4 } = require("crypto");
 const notifications = require("./notifications.services");
 const { sendMail } = require("../config/mailer");
@@ -10,6 +10,7 @@ const { resolveUploadsPathFromUrl } = require("./signatures.services");
 const firma = require("./firma.services");
 const signatureSessions = require("./signatureSessions.services");
 const signaturePdfTemplate = require("./signaturePdfTemplate");
+const budgetLines = require("./budgetLines.services");
 const permissionMap = require("../config/permissions");
 const P = require("../constants/permissions");
 const {
@@ -319,7 +320,7 @@ function hasPermission(user, code) {
 
 function paiementScopeWhereForUser(user, permissionCodes = []) {
   if (!user) {
-    const err = new Error("Accès interdit");
+    const err = new Error("AccÃ¨s interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -333,7 +334,7 @@ function paiementScopeWhereForUser(user, permissionCodes = []) {
   }
 
   if (!scopes.length) {
-    const err = new Error("Accès interdit");
+    const err = new Error("AccÃ¨s interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -345,7 +346,7 @@ function paiementScopeWhereForUser(user, permissionCodes = []) {
   if (scopeWhere === null) return null;
   if (scopeWhere && scopeWhere.id !== -1) return scopeWhere;
 
-  const err = new Error("Accès interdit");
+  const err = new Error("AccÃ¨s interdit");
   err.statusCode = 403;
   throw err;
 }
@@ -387,7 +388,7 @@ async function assertDemandePayable(demandeId) {
   });
 
   if (pending > 0) {
-    const err = new Error("Demande non payable : validations incomplètes ou rejetée");
+    const err = new Error("Demande non payable : validations incomplÃ¨tes ou rejetÃ©e");
     err.statusCode = 400;
     throw err;
   }
@@ -406,7 +407,7 @@ async function ensureConditionsForDemande(tx, demandeId, source) {
 
   if (src !== "DEMANDEUR") return [];
 
-  // Compat: anciennes demandes sans échéancier -> créer 100/100
+  // Compat: anciennes demandes sans Ã©chÃ©ancier -> crÃ©er 100/100
   const d = await tx.demandes_paiement.findUnique({
     where: { id: Number(demandeId) },
     select: { id: true, montant: true, montant_net: true },
@@ -449,6 +450,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     date_paiement,
     moyen_paiement,
     conditions_source,
+    ligne_budgetaire_id,
     reference_piece,
     compte_debite,
     commentaire,
@@ -460,7 +462,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
   const result = await prisma.$transaction(async (tx) => {
     const demande = await tx.demandes_paiement.findUnique({
       where: { id: Number(demande_id) },
-      select: { id: true, uuid: true, montant: true, statut: true },
+      select: { id: true, uuid: true, montant: true, montant_net: true, statut: true, ligne_budgetaire_id: true },
     });
     if (!demande) {
       const err = new Error("Demande introuvable");
@@ -481,6 +483,26 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       throw err;
     }
     const effectiveSource = normalizeConditionsSource(lockedSource) || normalizedSource;
+    let effectiveBudgetLineId = demande.ligne_budgetaire_id ? Number(demande.ligne_budgetaire_id) : null;
+    let budgetLineChangedByDaf = false;
+    const requestedBudgetLineId =
+      ligne_budgetaire_id != null && String(ligne_budgetaire_id).trim() !== ""
+        ? Number(ligne_budgetaire_id)
+        : null;
+    if (requestedBudgetLineId != null && (!Number.isFinite(requestedBudgetLineId) || requestedBudgetLineId <= 0)) {
+      const err = new Error("Ligne budgetaire invalide");
+      err.statusCode = 400;
+      throw err;
+    }
+    if (requestedBudgetLineId && requestedBudgetLineId !== effectiveBudgetLineId) {
+      await budgetLines.changeDemandeLineBeforePayment(tx, {
+        demandeId: Number(demande.id),
+        newLineId: requestedBudgetLineId,
+        actorAgentId: Number(comptableAgentId),
+      });
+      effectiveBudgetLineId = requestedBudgetLineId;
+      budgetLineChangedByDaf = true;
+    }
 
     const conditions = await ensureConditionsForDemande(tx, demande.id, effectiveSource);
     if (effectiveSource === "DAF" && conditions.length === 0) {
@@ -492,7 +514,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
 
     const unpaid = conditions.filter((c) => !c.paiement_id && String(c.statut || "").toLowerCase() !== "paye");
     if (unpaid.length === 0) {
-      const err = new Error("Demande déjà payée");
+      const err = new Error("Demande dÃ©jÃ  payÃ©e");
       err.statusCode = 409;
       throw err;
     }
@@ -513,14 +535,14 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         throw err;
       }
 
-      // Règle: une seule fois par tranche, et ordre imposé (montant le plus élevé en premier)
+      // RÃ¨gle: une seule fois par tranche, et ordre imposÃ© (montant le plus Ã©levÃ© en premier)
       const nextTranche = [...unpaid].sort((a, b) => {
         const diff = Number(b.montant_prevu || 0) - Number(a.montant_prevu || 0);
         if (diff !== 0) return diff;
         return Number(a.id || 0) - Number(b.id || 0);
       })[0];
       if (!nextTranche) {
-        const err = new Error("Aucune tranche à payer");
+        const err = new Error("Aucune tranche Ã  payer");
         err.statusCode = 400;
         throw err;
       }
@@ -548,6 +570,8 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         date_paiement: date_paiement ? new Date(date_paiement) : new Date(),
         moyen_paiement,
         conditions_source: effectiveSource,
+        ligne_budgetaire_id: effectiveBudgetLineId,
+        ligne_budgetaire_changee_par_daf: budgetLineChangedByDaf,
         reference_piece: reference_piece || null,
         compte_debite: compte_debite || null,
         commentaire: commentaire || null,
@@ -569,6 +593,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       },
       include: {
         documents: true,
+        lignes_budgetaires: true,
         demandes_paiement: {
           include: {
             agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
@@ -576,6 +601,20 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         },
       },
     });
+
+    if (effectiveBudgetLineId) {
+      await budgetLines.ensureEngagementForDemande(tx, {
+        demandeId: Number(demande.id),
+        actorAgentId: Number(comptableAgentId),
+      });
+      await budgetLines.recordPaymentMovement(tx, {
+        paiementId: Number(paiement.id),
+        demandeId: Number(demande.id),
+        ligneBudgetaireId: Number(effectiveBudgetLineId),
+        amount: montantNum,
+        actorAgentId: Number(comptableAgentId),
+      });
+    }
 
     // Appliquer paiement -> conditions
     const unpaidAfterCreate = await tx.conditions_paiement.findMany({
@@ -591,7 +630,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         return Number(a.id || 0) - Number(b.id || 0);
       })[0];
       if (!nextTranche) {
-        const err = new Error("Aucune tranche à payer");
+        const err = new Error("Aucune tranche Ã  payer");
         err.statusCode = 400;
         throw err;
       }
@@ -601,7 +640,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         data: { paiement_id: paiement.id, statut: "paye", updated_at: new Date() },
       });
     } else {
-      // total: marque toutes les tranches restantes comme payées par ce paiement
+      // total: marque toutes les tranches restantes comme payÃ©es par ce paiement
       await tx.conditions_paiement.updateMany({
         where: { demande_id: Number(demande_id), source: effectiveSource, paiement_id: null },
         data: { paiement_id: paiement.id, statut: "paye", updated_at: new Date() },
@@ -618,8 +657,8 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     });
     const fullyPaid = stillUnpaid === 0;
 
-    // Règle: un paiement partiel ne doit jamais "bloquer" la capacité à payer.
-    // Donc tant que ce n'est pas totalement payé => en_attente_paiement (même si réception existe).
+    // RÃ¨gle: un paiement partiel ne doit jamais "bloquer" la capacitÃ© Ã  payer.
+    // Donc tant que ce n'est pas totalement payÃ© => en_attente_paiement (mÃªme si rÃ©ception existe).
     const currentDemandeStatut = String(demande?.statut || "").toLowerCase();
     const keepAchatStatut = currentDemandeStatut === "achat_effectue";
     const nextStatut = keepAchatStatut ? "achat_effectue" : (fullyPaid ? "paye" : "en_attente_paiement");
@@ -656,8 +695,8 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         type: "paiement_effectue",
         demande_id: Number(demande_id),
         message: fullyPaid
-          ? `Votre demande a été payée. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
-          : `Un paiement partiel a été enregistré. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
+          ? `Votre demande a Ã©tÃ© payÃ©e. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
+          : `Un paiement partiel a Ã©tÃ© enregistrÃ©. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
         meta: { paiementId: result.id, paiementUuid: result.uuid },
         sendEmailNow: false,
       });
@@ -676,7 +715,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     // ignore realtime errors
   }
 
-  // ? Email récap paiement + pièces jointes: documents de la demande
+  // ? Email rÃ©cap paiement + piÃ¨ces jointes: documents de la demande
   try {
     const demande = await prisma.demandes_paiement.findUnique({
       where: { id: Number(demande_id) },
@@ -714,7 +753,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       )
     ).filter(Boolean);
 
-    // docs liés à la demande
+    // docs liÃ©s Ã  la demande
     const docs = await prisma.documents.findMany({
       where: { demande_id: Number(demande_id) },
       orderBy: { created_at: "asc" },
@@ -729,7 +768,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     const uniqueRecipients = Array.from(new Set(recipients.map((x) => String(x).trim()).filter(Boolean)));
 
     if (uniqueRecipients.length > 0) {
-      const subject = `E-Dépenses — Paiement effectué (Demande ${demande?.uuid || Number(demande_id)})`;
+      const subject = `E-DÃ©penses â€” Paiement effectuÃ© (Demande ${demande?.uuid || Number(demande_id)})`;
 
       const validatorsLine = (steps || [])
         .map((s) => (s?.role_name ? String(s.role_name) : null))
@@ -744,30 +783,30 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
           const n = safeFilename(d);
           const u = d?.url ? String(d.url) : "";
           const t = d?.type_document ? String(d.type_document) : "document";
-          return `<li><b>${t}</b> — ${n}${u ? ` <span style=\"color:#666\">(${u})</span>` : ""}</li>`;
+          return `<li><b>${t}</b> â€” ${n}${u ? ` <span style=\"color:#666\">(${u})</span>` : ""}</li>`;
         })
         .join("");
 
       const skippedHtml = skipped.length
         ? `
-          <p style="margin-top:12px;color:#b45309"><b>Note:</b> certains documents n'ont pas pu être joints (taille/URL). Ils sont listés ci-dessus avec leurs liens.</p>
+          <p style="margin-top:12px;color:#b45309"><b>Note:</b> certains documents n'ont pas pu Ãªtre joints (taille/URL). Ils sont listÃ©s ci-dessus avec leurs liens.</p>
           <p style="margin-top:6px;color:#666;font-size:12px">Taille jointe: ${(totalBytes / 1024 / 1024).toFixed(1)}MB / ${(maxTotalBytes / 1024 / 1024).toFixed(1)}MB</p>
         `
         : "";
 
       const html = `
         <div style="font-family:Arial,sans-serif;line-height:1.5">
-          <h2 style="margin:0 0 8px">Paiement effectué</h2>
-          <p style="margin:0 0 12px">Un paiement a été enregistré pour la demande <b>${demande?.uuid || Number(demande_id)}</b>.</p>
+          <h2 style="margin:0 0 8px">Paiement effectuÃ©</h2>
+          <p style="margin:0 0 12px">Un paiement a Ã©tÃ© enregistrÃ© pour la demande <b>${demande?.uuid || Number(demande_id)}</b>.</p>
           <ul style="margin:0 0 12px;padding-left:18px">
             <li><b>Motif:</b> ${demande?.motif ? String(demande.motif) : "-"}</li>
-            <li><b>Bénéficiaire:</b> ${demande?.beneficiaire ? String(demande.beneficiaire) : "-"}</li>
+            <li><b>BÃ©nÃ©ficiaire:</b> ${demande?.beneficiaire ? String(demande.beneficiaire) : "-"}</li>
             <li><b>Montant demande:</b> ${montantLabel ? `${montantLabel} ${devise}` : "-"}</li>
             <li><b>Type paiement:</b> ${payload?.type_paiement ? String(payload.type_paiement) : "-"}</li>
-            <li><b>Montant payé:</b> ${payload?.montant != null ? String(payload.montant) : "-"}</li>
+            <li><b>Montant payÃ©:</b> ${payload?.montant != null ? String(payload.montant) : "-"}</li>
             <li><b>Moyen:</b> ${payload?.moyen_paiement ? String(payload.moyen_paiement) : "-"}</li>
           </ul>
-          ${validatorsLine ? `<p style="margin:0 0 12px;color:#111"><b>Chaîne de validation:</b> ${validatorsLine}</p>` : ""}
+          ${validatorsLine ? `<p style="margin:0 0 12px;color:#111"><b>ChaÃ®ne de validation:</b> ${validatorsLine}</p>` : ""}
 
           <div style="margin-top:14px">
             <div style="font-weight:700;margin-bottom:6px">Documents de la demande</div>
@@ -775,7 +814,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
             ${skippedHtml}
           </div>
 
-          <p style="margin-top:16px;color:#777">— E-Dépenses</p>
+          <p style="margin-top:16px;color:#777">â€” E-DÃ©penses</p>
         </div>
       `;
 
@@ -786,7 +825,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         to,
         ...(ccList.length ? { cc: ccList.join(",") } : {}),
         subject,
-        text: `Paiement effectué pour la demande ${demande?.uuid || Number(demande_id)}.`,
+        text: `Paiement effectuÃ© pour la demande ${demande?.uuid || Number(demande_id)}.`,
         html,
         attachments,
       });
@@ -1018,6 +1057,7 @@ async function listPaiements({ demande_id, from, to, moyen_paiement }, authUser 
     orderBy: { id: "desc" },
     include: {
       documents: true,
+      lignes_budgetaires: true,
       demandes_paiement: { select: { id: true, uuid: true, beneficiaire: true } },
     },
   });
@@ -1031,6 +1071,7 @@ async function getPaiementById(id, authUser = null) {
     where,
     include: {
       documents: true,
+      lignes_budgetaires: true,
       demandes_paiement: true,
       agents: {
         select: {
@@ -1065,6 +1106,7 @@ async function getPaiementByUuid(uuid, authUser = null) {
     where,
     include: {
       documents: true,
+      lignes_budgetaires: true,
       demandes_paiement: true,
       agents: {
         select: {
@@ -1100,7 +1142,7 @@ async function listByDemande(demandeId, authUser = null) {
   return prisma.paiements.findMany({
     where,
     orderBy: { id: "desc" },
-    include: { documents: true },
+    include: { documents: true, lignes_budgetaires: true },
   });
 }
 
@@ -1143,7 +1185,7 @@ async function updatePaiement(id, payload, actorAgentId) {
         user_id: demandeurUser.id,
         type: "paiement_updated",
         demande_id: Number(existing.demande_id),
-        message: "Un paiement lié à votre demande a été modifié.",
+        message: "Un paiement liÃ© Ã  votre demande a Ã©tÃ© modifiÃ©.",
         meta: {
           paiementId: updated.id,
           paiementUuid: updated.uuid,
@@ -1193,7 +1235,9 @@ async function deletePaiement(id, actorAgentId) {
   }
 
   await prisma.$transaction(async (tx) => {
-    // 1) Détacher les tranches liées à ce paiement
+    await budgetLines.reversePaymentMovement(tx, { paiement: snapshot, actorAgentId });
+
+    // 1) DÃ©tacher les tranches liÃ©es Ã  ce paiement
     await tx.conditions_paiement.updateMany({
       where: { paiement_id: Number(id) },
       data: { paiement_id: null, statut: "prevu", updated_at: new Date() },
@@ -1245,7 +1289,7 @@ async function deletePaiement(id, actorAgentId) {
         user_id: demandeurUser.id,
         type: "paiement_deleted",
         demande_id: Number(snapshot.demande_id),
-        message: "Un paiement lié à votre demande a été supprimé.",
+        message: "Un paiement liÃ© Ã  votre demande a Ã©tÃ© supprimÃ©.",
         meta: { paiementId: snapshot.id, paiementUuid: snapshot.uuid },
         sendEmailNow: true,
       });
@@ -1277,4 +1321,5 @@ module.exports = {
   updatePaiement,
   deletePaiement,
 };
+
 

@@ -47,6 +47,14 @@ module.exports = {
   [P.PAIEMENT_UPDATE]: { module: "Paiements", appliesTo: ["action"] },
   [P.PAIEMENT_DELETE]: { module: "Paiements", appliesTo: ["action"] },
 
+  // Lignes budgetaires
+  [P.BUDGET_LINE_CREATE]: { module: "Budget", appliesTo: ["action"] },
+  [P.BUDGET_LINE_UPDATE]: { module: "Budget", appliesTo: ["action"] },
+  [P.BUDGET_LINE_LIST]: { module: "Budget", appliesTo: ["menu", "action"] },
+  [P.BUDGET_LINE_GET]: { module: "Budget", appliesTo: ["action"] },
+  [P.BUDGET_LINE_USE]: { module: "Budget", appliesTo: ["action"] },
+  [P.BUDGET_LINE_DELETE]: { module: "Budget", appliesTo: ["action"] },
+
   // Demandes
   [P.DEMANDE_CREATE]: { module: "Demandes", appliesTo: ["menu", "action"] },
   [P.DEMANDE_LIST]: { module: "Demandes", appliesTo: ["menu", "action"] },
@@ -68,6 +76,11 @@ module.exports = {
     module: "Dashboard",
     appliesTo: ["menu", "action"],
     description: "Etend la vue globale au perimetre directionnel (par entite).",
+  },
+  [P.BUDGET_DASHBOARD_VIEW]: {
+    module: "Dashboard",
+    appliesTo: ["action"],
+    description: "Affiche les indicateurs de lignes budgetaires dans le dashboard.",
   },
 
   // Bon de commande

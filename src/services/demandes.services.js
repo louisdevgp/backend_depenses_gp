@@ -1592,6 +1592,8 @@ exports.listDemandes = async (user, query) => {
       agents_demandes_paiement_achat_decision_par_idToagents: {
         include: { users: true, roles: true },
       },
+      lignes_budgetaires: true,
+      agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       documents: true,
@@ -1607,6 +1609,8 @@ exports.listMyDemandes = async (user) => {
     include: {
       agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
       agents_demandes_paiement_achat_decision_par_idToagents: { include: { users: true, roles: true } },
+      lignes_budgetaires: true,
+      agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
@@ -1622,6 +1626,8 @@ exports.listByDemandeur = async (demandeurId) => {
     include: {
       agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
       agents_demandes_paiement_achat_decision_par_idToagents: { include: { users: true, roles: true } },
+      lignes_budgetaires: true,
+      agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: { orderBy: { level: "asc" } },
       demande_items: true,
@@ -1644,6 +1650,8 @@ exports.getOne = async (user, idOrUuid) => {
       agents_demandes_paiement_achat_decision_par_idToagents: {
         include: { users: true, roles: true },
       },
+      lignes_budgetaires: true,
+      agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: { include: { users: true, roles: true } },
       demande_items: true,
       conditions_paiement: { orderBy: { id: "asc" } },
       validation_steps: {
@@ -1655,7 +1663,7 @@ exports.getOne = async (user, idOrUuid) => {
       },
       documents: true,
       receptions: true,
-      paiements: true,
+      paiements: { include: { lignes_budgetaires: true } },
     },
   });
 
@@ -2029,6 +2037,8 @@ exports.update = async (user, idOrUuid, payload) => {
       where: { id: updatedDemande.id },
       include: {
         validation_steps: { orderBy: { level: "asc" } },
+        lignes_budgetaires: true,
+        agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: { include: { users: true, roles: true } },
       },
     });
   });

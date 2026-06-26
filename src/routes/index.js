@@ -18,6 +18,7 @@ router.use("/demandes", require("../routes/demandes.routes"));
 router.use("/receptions", require("../routes/receptions.routes"));
 router.use("/documents", require("../routes/documents.routes"));
 router.use("/paiements", require("../routes/paiements.routes"));
+router.use("/budget-lines", require("../routes/budgetLines.routes"));
 router.use("/signatures", require("../routes/signatures.routes"));
 router.use("/qr", require("../routes/qr.routes"));
 router.use("/stats", require("../routes/stats.routes"));

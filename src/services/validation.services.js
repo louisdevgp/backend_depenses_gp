@@ -5,6 +5,7 @@ const { randomUUID: uuidv4 } = require("crypto");
 const realtime = require("../realtime");
 const firma = require("./firma.services");
 const signaturePdfTemplate = require("./signaturePdfTemplate");
+const budgetLines = require("./budgetLines.services");
 const { resolveDirectionDirectorAgent, resolveReturnTarget } = require("../utils/returnWorkflow");
 
 function withStatusCode(err, statusCode) {
@@ -449,6 +450,7 @@ async function getPendingForUser(userId) {
         include: {
           documents: true,
           conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
+          lignes_budgetaires: true,
           agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
       },
@@ -473,6 +475,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       include: {
         demandes_paiement: {
           include: {
+            lignes_budgetaires: true,
             agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
           },
         },
@@ -505,6 +508,7 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         conditions_paiement_custom,
         conditions_paiement_use_demandeur,
         validation_stop_role,
+        ligne_budgetaire_id,
       } = extra || {};
       const useDemandeurRaw = isBoolean(conditions_paiement_use_demandeur)
         ? conditions_paiement_use_demandeur
@@ -537,6 +541,16 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         );
       }
 
+      const ligneBudgetaireId = Number(ligne_budgetaire_id);
+      if (!Number.isFinite(ligneBudgetaireId) || ligneBudgetaireId <= 0) {
+        throw withStatusCode(new Error("Ligne budgetaire requise pour la validation DAF"), 400);
+      }
+      const totalForBudget =
+        step?.demandes_paiement?.montant_net != null
+          ? step.demandes_paiement.montant_net
+          : step?.demandes_paiement?.montant;
+      await budgetLines.calculateBudgetWarning(ligneBudgetaireId, totalForBudget);
+
       if (validation_oci === false && !commentaireTrimmed) {
         throw withStatusCode(new Error("Commentaire obligatoire si validation OCI = non"), 400);
       }
@@ -559,6 +573,12 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
           throw withStatusCode(new Error("Definir les conditions de paiement (mode ou personnalise)"), 400);
         }
       }
+
+      await budgetLines.assignLineToDemande(tx, {
+        demandeId: Number(step.demande_id),
+        ligneBudgetaireId,
+        actorAgentId: Number(agent.id),
+      });
 
       await tx.demandes_paiement.update({
         where: { id: Number(step.demande_id) },
@@ -696,6 +716,12 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
     }
 
     const stage = await setDemandeStageFromCurrentStep(tx, step.demande_id);
+    if (stage?.statut === "approuvee") {
+      await budgetLines.ensureEngagementForDemande(tx, {
+        demandeId: Number(step.demande_id),
+        actorAgentId: Number(agent.id),
+      });
+    }
 
     const demandeurUser = step.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users;
 
@@ -887,6 +913,7 @@ async function rejectStep(stepId, userId, commentaire) {
       include: {
         demandes_paiement: {
           include: {
+            lignes_budgetaires: true,
             agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
           },
         },
@@ -1234,6 +1261,7 @@ async function getByUuid(uuid) {
         include: {
           documents: true,
           conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
+          lignes_budgetaires: true,
           agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
       },
@@ -1496,6 +1524,7 @@ async function cancelStep(stepId, userId, payload = {}) {
       include: {
         demandes_paiement: {
           include: {
+            lignes_budgetaires: true,
             agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
           },
         },
@@ -1763,6 +1792,7 @@ async function startSignature(stepId, userId, payload = {}) {
     include: {
       demandes_paiement: {
         include: {
+          lignes_budgetaires: true,
           agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
       },
@@ -1791,6 +1821,7 @@ async function startSignature(stepId, userId, payload = {}) {
       conditions_paiement_custom,
       conditions_paiement_use_demandeur,
       validation_stop_role,
+      ligne_budgetaire_id,
     } = payload || {};
     const useDemandeurRaw = isBoolean(conditions_paiement_use_demandeur)
       ? conditions_paiement_use_demandeur
@@ -1820,6 +1851,16 @@ async function startSignature(stepId, userId, payload = {}) {
         400
       );
     }
+    const ligneBudgetaireId = Number(ligne_budgetaire_id);
+    if (!Number.isFinite(ligneBudgetaireId) || ligneBudgetaireId <= 0) {
+      throw withStatusCode(new Error("Ligne budgetaire requise pour la validation DAF"), 400);
+    }
+    const totalForBudget =
+      step?.demandes_paiement?.montant_net != null
+        ? step.demandes_paiement.montant_net
+        : step?.demandes_paiement?.montant;
+    await budgetLines.calculateBudgetWarning(ligneBudgetaireId, totalForBudget);
+
     if (validation_oci === false && !commentaireTrimmed) {
       throw withStatusCode(new Error("Commentaire obligatoire si validation OCI = non"), 400);
     }
