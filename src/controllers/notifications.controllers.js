@@ -18,6 +18,24 @@ exports.readOne = async (req, res) => {
   }
 };
 
+exports.readMany = async (req, res) => {
+  try {
+    const data = await service.markManyAsRead(req.user.userId, req.body?.ids);
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(400).json({ success: false, message: e.message });
+  }
+};
+
+exports.readAll = async (req, res) => {
+  try {
+    const data = await service.markAllAsRead(req.user.userId);
+    res.json({ success: true, data });
+  } catch (e) {
+    res.status(400).json({ success: false, message: e.message });
+  }
+};
+
 exports.create = async (req, res) => {
   try {
     const data = await service.createNotification(req.body);

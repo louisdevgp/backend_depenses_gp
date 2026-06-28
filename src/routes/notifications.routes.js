@@ -7,6 +7,8 @@ const P = require("../constants/permissions");
 router.use(auth);
 
 router.get("/my", ctrl.listMine);
+router.patch("/read-all", ctrl.readAll);
+router.patch("/read-many", ctrl.readMany);
 router.patch("/:id/read", ctrl.readOne);
 
 // (optionnel) endpoint admin/test

@@ -376,10 +376,57 @@ async function markAsRead(userId, notifId) {
   return updated;
 }
 
+async function markManyAsRead(userId, ids = []) {
+  const uniqueIds = Array.from(
+    new Set(
+      (Array.isArray(ids) ? ids : [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+  if (!uniqueIds.length) return { count: 0, ids: [] };
+
+  const rows = await prisma.notifications.findMany({
+    where: { id: { in: uniqueIds }, user_id: Number(userId), read_at: null },
+    select: { id: true },
+  });
+  const ownedIds = rows.map((row) => Number(row.id));
+  if (!ownedIds.length) return { count: 0, ids: [] };
+
+  const readAt = new Date();
+  const result = await prisma.notifications.updateMany({
+    where: { id: { in: ownedIds }, user_id: Number(userId), read_at: null },
+    data: { read_at: readAt },
+  });
+
+  try {
+    for (const id of ownedIds) {
+      realtime.emitToUser(userId, "notification:read", { id, read_at: readAt });
+    }
+  } catch {
+    // ignore realtime errors
+  }
+
+  return { count: result.count, ids: ownedIds, read_at: readAt };
+}
+
+async function markAllAsRead(userId) {
+  const rows = await prisma.notifications.findMany({
+    where: { user_id: Number(userId), read_at: null },
+    select: { id: true },
+  });
+  return markManyAsRead(
+    userId,
+    rows.map((row) => row.id)
+  );
+}
+
 module.exports = {
   createNotification,
   listMyNotifications,
   markAsRead,
+  markManyAsRead,
+  markAllAsRead,
   resolveDafAccountantCcEmails,
 };
 
