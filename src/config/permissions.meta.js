@@ -82,6 +82,11 @@ module.exports = {
     appliesTo: ["action"],
     description: "Affiche les indicateurs de lignes budgetaires dans le dashboard.",
   },
+  [P.ARCHIVES_V1_VIEW]: {
+    module: "Archives",
+    appliesTo: ["menu", "action"],
+    description: "Permet de consulter les anciennes demandes importees depuis la V1.",
+  },
 
   // Bon de commande
   [P.BON_COMMANDE_CREATE]: { module: "BonCommande", appliesTo: ["action"] },
