@@ -1,6 +1,7 @@
 const { PrismaClient } = require("@prisma/client");
 const { randomUUID: uuidv4 } = require("crypto");
 const { hashPassword } = require("../utils/password");
+const seedLog = require("./seed-logger");
 
 function getArgValue(name) {
   const idx = process.argv.indexOf(name);
@@ -90,6 +91,9 @@ async function upsertUserWithRole({ prisma, email, password, nom, prenom, roleNa
 }
 
 async function main() {
+  const startedAt = Date.now();
+  seedLog.start("seed:profiles");
+
   const prisma = new PrismaClient();
 
   const password =
@@ -116,6 +120,7 @@ async function main() {
   try {
     const results = [];
     for (const p of profiles) {
+      seedLog.info("profile sync started", { role: p.roleName, email: p.email });
       const user = await upsertUserWithRole({
         prisma,
         email: p.email,
@@ -127,26 +132,28 @@ async function main() {
         pruneGlobalValidators,
       });
       results.push({ role: p.roleName, email: user.email, userId: user.id });
+      seedLog.success("profile synced", { role: p.roleName, email: user.email, userId: user.id });
     }
 
-    console.log("Seed profils OK:");
+    seedLog.info("profiles summary");
     for (const r of results) {
-      console.log(`- ${r.role}: ${r.email} (userId=${r.userId})`);
+      seedLog.info("profile", { role: r.role, email: r.email, userId: r.userId });
     }
-    console.log(`Mot de passe: ${password === "Test@1234" ? "Test@1234" : "(custom)"}`);
+    seedLog.info("password mode", { value: password === "Test@1234" ? "Test@1234" : "custom" });
     if (!forcePassword) {
-      console.log("Note: utilise --force-password pour réécrire les mots de passe existants.");
+      seedLog.info("use --force-password to rewrite existing passwords");
     }
     if (pruneGlobalValidators) {
-      console.log("Note: --prune-global-validators actif (DG/DGA/DAF: suppression soft des doublons d'agents). ");
+      seedLog.warn("--prune-global-validators active");
     }
+    seedLog.end("seed:profiles", startedAt);
   } finally {
     await prisma.$disconnect();
   }
 }
 
 main().catch((e) => {
-  console.error(e);
+  seedLog.error("seed:profiles failed", e);
   process.exit(1);
 });
 

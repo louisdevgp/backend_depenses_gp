@@ -1,8 +1,12 @@
 const { PrismaClient } = require("@prisma/client");
 const { randomUUID: uuidv4 } = require("crypto");
+const seedLog = require("./seed-logger");
 const prisma = new PrismaClient();
 
 async function main() {
+  const startedAt = Date.now();
+  seedLog.start("main seed");
+
   const roles = [
     { name: "ADMIN", label: "Administrateur" },
     { name: "DEMANDEUR", label: "Demandeur" },
@@ -16,6 +20,7 @@ async function main() {
     { name: "COMPTABLE", label: "Comptable / Caisse" },
   ];
 
+  seedLog.info("roles sync started", { total: roles.length });
   for (const r of roles) {
     await prisma.roles.upsert({
       where: { name: r.name },
@@ -30,6 +35,7 @@ async function main() {
       },
     });
   }
+  seedLog.success("roles synced", { total: roles.length });
 
   // Flows utilisés par l'application (selectionnés par rôle du demandeur)
   // ⚠️ Idempotent: on remplace les steps de chaque flow.
@@ -71,6 +77,7 @@ async function main() {
     },
   ];
 
+  seedLog.info("validation flows sync started", { total: flows.length });
   for (const f of flows) {
     const flow = await prisma.validation_flows.upsert({
       where: { code: f.code },
@@ -93,13 +100,15 @@ async function main() {
         required: true,
       })),
     });
+    seedLog.success("validation flow synced", { code: f.code, steps: f.steps.length });
   }
+  seedLog.end("main seed", startedAt);
 }
 
 main()
   .then(() => prisma.$disconnect())
   .catch((e) => {
-    console.error(e);
+    seedLog.error("main seed failed", e);
     prisma.$disconnect();
     process.exit(1);
   });
