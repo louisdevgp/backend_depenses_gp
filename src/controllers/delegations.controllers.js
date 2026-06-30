@@ -3,10 +3,19 @@ const prisma = new PrismaClient();
 const notifications = require("../services/notifications.services");
 const { randomUUID: uuidv4 } = require("crypto");
 
-// Délégations autorisées uniquement entre rôles validateurs.
-// Le délégué peut aussi être COMPTABLE (ex: DAF -> COMPTABLE).
-const ALLOWED_PRINCIPAL_ROLES = new Set(["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG"]);
-const ALLOWED_DELEGATE_ROLES = new Set(["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG", "COMPTABLE"]);
+// Delegations are allowed for business roles, except ADMIN.
+const DELEGABLE_ROLES = new Set([
+  "DEMANDEUR",
+  "ACHETEUR",
+  "ASSISTANTE_TECHNIQUE",
+  "RESPONSABLE",
+  "DIRECTEUR",
+  "DAF",
+  "DGA",
+  "DG",
+  "COMPTABLE",
+]);
+const GLOBAL_DELEGATION_VIEW_ROLES = new Set(["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG"]);
 
 function parseScope(scopeRaw) {
   if (scopeRaw == null) return null;
@@ -89,10 +98,14 @@ function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
 }
 
+function isDelegableRole(role) {
+  return DELEGABLE_ROLES.has(normalizeRoleName(role));
+}
+
 function isGlobalViewer(req) {
   const roles = new Set((req.user?.roles || []).map(normalizeRoleName));
   if (roles.has("ADMIN")) return true;
-  for (const role of ALLOWED_PRINCIPAL_ROLES) {
+  for (const role of GLOBAL_DELEGATION_VIEW_ROLES) {
     if (roles.has(role)) return true;
   }
   return false;
@@ -353,11 +366,10 @@ exports.create = async (req, res) => {
     return res.status(400).json({ success: false, message: "Le rôle ADMIN ne peut pas être délégué" });
   }
 
-  // ✅ délégations uniquement entre validateurs: le principal doit être un rôle valideur
-  if (!ALLOWED_PRINCIPAL_ROLES.has(String(principalRole).toUpperCase())) {
+  if (!isDelegableRole(principalRole)) {
     return res
       .status(400)
-      .json({ success: false, message: "Les délégations ne sont autorisées que pour les rôles validateurs" });
+      .json({ success: false, message: "Ce role ne peut pas creer de delegation" });
   }
 
   if (roleNameNorm !== String(principalRole).trim().toUpperCase()) {
@@ -372,8 +384,8 @@ exports.create = async (req, res) => {
   if (String(delegateRole).toUpperCase() === "ADMIN") {
     return res.status(400).json({ success: false, message: "Le rôle ADMIN ne peut pas être délégué" });
   }
-  if (!ALLOWED_DELEGATE_ROLES.has(String(delegateRole).toUpperCase())) {
-    return res.status(400).json({ success: false, message: "Le délégué doit être un validateur (ou COMPTABLE)" });
+  if (!isDelegableRole(delegateRole)) {
+    return res.status(400).json({ success: false, message: "Ce delegue n'a pas un role autorise" });
   }
 
   // non-admin: on autorise uniquement la création si l'utilisateur est le principal
@@ -515,10 +527,10 @@ exports.update = async (req, res) => {
     if (!principalRole || String(principalRole).toUpperCase() === "ADMIN") {
       return res.status(400).json({ success: false, message: "Le principal n'a pas de rôle valide" });
     }
-    if (!ALLOWED_PRINCIPAL_ROLES.has(String(principalRole).toUpperCase())) {
+    if (!isDelegableRole(principalRole)) {
       return res
         .status(400)
-        .json({ success: false, message: "Les délégations ne sont autorisées que pour les rôles validateurs" });
+        .json({ success: false, message: "Ce role ne peut pas creer de delegation" });
     }
 
     const principalOrg = await getAgentOrg(existing.principal_id);
@@ -636,7 +648,7 @@ exports.listAgentsForDelegation = async (req, res) => {
   const rows = await prisma.agents.findMany({
     where: {
       deleted_at: null,
-      roles: { is: { name: { in: Array.from(new Set([...ALLOWED_PRINCIPAL_ROLES, ...ALLOWED_DELEGATE_ROLES])) } } },
+      roles: { is: { name: { in: Array.from(DELEGABLE_ROLES) } } },
     },
     orderBy: [{ nom: "asc" }, { prenom: "asc" }],
     select: {
