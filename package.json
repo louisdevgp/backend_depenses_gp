@@ -20,7 +20,8 @@
     "pdf:sim:reception": "node src/scripts/pdf-reception-sim.js",
     "pdf:sim:demande": "node src/scripts/pdf-demande-sim.js",
     "delegations:check": "node src/scripts/delegations-check.js",
-    "reception:reminder": "node src/scripts/reception-reminder.js"
+    "reception:reminder": "node src/scripts/reception-reminder.js",
+    "repair:validation-flow": "node src/scripts/repair-demande-validation-flow.js"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",
