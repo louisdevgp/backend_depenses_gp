@@ -827,6 +827,9 @@ async function getDemandeData(idOrUuid) {
       agents_demandes_paiement_demandeur_idToagents: {
         include: { users: true, roles: true },
       },
+      agents_demandes_paiement_created_by_idToagents: {
+        include: { users: true, roles: true },
+      },
     },
   });
   if (!demande) throw new Error("Demande introuvable");

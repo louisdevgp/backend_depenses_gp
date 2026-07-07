@@ -58,6 +58,7 @@ model agents {
   demandes_paiement_demandes_paiement_ajournee_par_idToagents       demandes_paiement[]     @relation("demandes_paiement_ajournee_par_idToagents")
   demandes_paiement_demandes_paiement_acheteur_idToagents           demandes_paiement[]     @relation("demandes_paiement_acheteur_idToagents")
   demandes_paiement_demandes_paiement_achat_decision_par_idToagents demandes_paiement[]     @relation("demandes_paiement_achat_decision_par_idToagents")
+  demandes_paiement_demandes_paiement_created_by_idToagents         demandes_paiement[]     @relation("demandes_paiement_created_by_idToagents")
   demandes_paiement_demandes_paiement_demandeur_idToagents          demandes_paiement[]     @relation("demandes_paiement_demandeur_idToagents")
   demandes_paiement_ligne_budgetaire_assignee_par_idToagents        demandes_paiement[]     @relation("demandes_paiement_ligne_budgetaire_assignee_par_idToagents")
   documents                                                         documents[]
@@ -207,6 +208,7 @@ model demandes_paiement {
   fournisseur_id                                         Int?                  @db.UnsignedInt
   remarque                                               String?               @db.Text
   demandeur_id                                           Int                   @db.UnsignedInt
+  created_by_id                                          Int?                  @db.UnsignedInt
   acheteur_id                                            Int?                  @db.UnsignedInt
   achat_requis                                           Boolean?
   achat_decision_par_id                                  Int?                  @db.UnsignedInt
@@ -244,6 +246,7 @@ model demandes_paiement {
   agents_demandes_paiement_ajournee_par_idToagents       agents?               @relation("demandes_paiement_ajournee_par_idToagents", fields: [ajournee_par_id], references: [id], map: "fk_demande_ajournee_par")
   agents_demandes_paiement_acheteur_idToagents           agents?               @relation("demandes_paiement_acheteur_idToagents", fields: [acheteur_id], references: [id], onDelete: SetNull, map: "fk_demande_acheteur")
   agents_demandes_paiement_achat_decision_par_idToagents agents?               @relation("demandes_paiement_achat_decision_par_idToagents", fields: [achat_decision_par_id], references: [id], onDelete: SetNull, map: "fk_demande_achat_decision_par")
+  agents_demandes_paiement_created_by_idToagents         agents?               @relation("demandes_paiement_created_by_idToagents", fields: [created_by_id], references: [id], onDelete: SetNull, map: "fk_demande_created_by")
   agents_demandes_paiement_demandeur_idToagents          agents                @relation("demandes_paiement_demandeur_idToagents", fields: [demandeur_id], references: [id], map: "fk_demande_demandeur")
   agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents agents?    @relation("demandes_paiement_ligne_budgetaire_assignee_par_idToagents", fields: [ligne_budgetaire_assignee_par_id], references: [id], onDelete: SetNull, map: "fk_demande_budget_assignee_par")
   departements                                           departements?         @relation(fields: [departement_id], references: [id], map: "fk_demande_departement")
@@ -265,6 +268,7 @@ model demandes_paiement {
   @@index([achat_requis], map: "idx_demande_achat_requis")
   @@index([departement_id], map: "fk_demande_departement")
   @@index([deleted_at], map: "idx_demande_deleted")
+  @@index([created_by_id], map: "idx_demande_created_by")
   @@index([demandeur_id], map: "idx_demande_demandeur")
   @@index([direction_id, departement_id], map: "idx_demande_direction_dept")
   @@index([validation_flow_id], map: "idx_demande_flow")
@@ -436,6 +440,7 @@ model lignes_budgetaires {
   libelle                                         String                    @db.VarChar(255)
   description                                     String?                   @db.Text
   exercice                                        Int
+  mois                                            Int                       @default(1) @db.TinyInt
   devise                                          String                    @default("FCFA") @db.VarChar(10)
   montant_initial                                 Decimal                   @db.Decimal(18, 2)
   montant_engage                                  Decimal                   @default(0.00) @db.Decimal(18, 2)
@@ -458,6 +463,7 @@ model lignes_budgetaires {
   @@index([created_by_id], map: "idx_lb_created_by")
   @@index([updated_by_id], map: "idx_lb_updated_by")
   @@index([exercice], map: "idx_lb_exercice")
+  @@index([exercice, mois], map: "idx_lb_periode")
   @@index([statut], map: "idx_lb_statut")
   @@index([scope_type, scope_id], map: "idx_lb_scope")
   @@index([deleted_at], map: "idx_lb_deleted")

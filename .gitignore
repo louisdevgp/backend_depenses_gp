@@ -8,3 +8,4 @@ node_modules
 # Runtime/generated files
 uploads/
 tmp/
+*.log

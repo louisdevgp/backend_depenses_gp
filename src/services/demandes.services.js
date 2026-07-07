@@ -6,6 +6,8 @@ const realtime = require("../realtime");
 const firma = require("./firma.services");
 const signatureSessions = require("./signatureSessions.services");
 const signaturePdfTemplate = require("./signaturePdfTemplate");
+const P = require("../constants/permissions");
+const { delegationScopeCoversAgent } = require("../utils/delegationScope.utils");
 const {
   normalizePermissionCode,
   getScopesForPermissionFromUser,
@@ -58,6 +60,92 @@ async function getAgentFromUser(user) {
   if (!agent) throw new Error("Agent introuvable pour cet utilisateur");
   if (!agent.roles?.name) throw new Error("Role agent introuvable (agent.role_id non defini)");
   return agent;
+}
+
+function toPositiveInt(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function getRequestedDemandeurId(payload = {}) {
+  return toPositiveInt(
+    payload.demandeur_id ??
+      payload.demandeurId ??
+      payload.create_for_agent_id ??
+      payload.createForAgentId
+  );
+}
+
+async function getTargetAgentForDemande(agentId) {
+  return prisma.agents.findFirst({
+    where: {
+      id: Number(agentId),
+      deleted_at: null,
+      users: { is_active: true, deleted_at: null },
+    },
+    include: { roles: true, users: { include: { user_roles: { include: { roles: true } } } } },
+  });
+}
+
+async function hasActiveCreateDelegation({ principalId, delegateId, principalAgent }) {
+  if (!principalId || !delegateId) return false;
+  const now = new Date();
+  const delegations = await prisma.delegations.findMany({
+    where: {
+      principal_id: Number(principalId),
+      delegate_id: Number(delegateId),
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+    },
+    select: { scope: true },
+  });
+
+  return delegations.some((delegation) => delegationScopeCoversAgent(delegation.scope, principalAgent));
+}
+
+async function resolveCreateDemandeContext(user, payload = {}) {
+  const actorAgent = await getAgentFromUser(user);
+  const requestedDemandeurId = getRequestedDemandeurId(payload);
+  const targetAgentId = requestedDemandeurId || Number(actorAgent.id);
+  const isForAnotherAgent = Number(targetAgentId) !== Number(actorAgent.id);
+  const hasCreate = hasPermission(user, P.DEMANDE_CREATE);
+  const hasCreateForAgent = hasPermission(user, P.DEMANDE_CREATE_FOR_AGENT);
+
+  if (!isForAnotherAgent && !hasCreate && !hasCreateForAgent) {
+    throw withStatusCode(new Error("Creation de demande non autorisee"), 403);
+  }
+
+  const demandeurAgent = isForAnotherAgent
+    ? await getTargetAgentForDemande(targetAgentId)
+    : actorAgent;
+  if (!demandeurAgent) {
+    throw withStatusCode(new Error("Demandeur cible introuvable ou inactif"), 404);
+  }
+
+  if (isForAnotherAgent) {
+    const hasDelegation = await hasActiveCreateDelegation({
+      principalId: demandeurAgent.id,
+      delegateId: actorAgent.id,
+      principalAgent: demandeurAgent,
+    });
+
+    if (!hasDelegation) {
+      throw withStatusCode(
+        new Error("Creation pour le compte de cet agent non autorisee: aucune delegation active ne le couvre"),
+        403
+      );
+    }
+  }
+
+  const flow = await resolveValidationFlowForAgent(demandeurAgent);
+  return {
+    actorAgent,
+    demandeurAgent,
+    flow,
+    isForAnotherAgent,
+  };
 }
 
 async function assertCanEditDemande({ user, demande, action = "Modification", allowDirectorStage = false }) {
@@ -309,6 +397,29 @@ function userEffectiveRoles(user, agent) {
   return Array.from(out);
 }
 
+function canViewDafValidationFields(user, agent) {
+  const roles = userEffectiveRoles(user, agent);
+  return hasPermission(user, P.DEMANDE_DAF_FIELDS_VIEW) || hasAnyRole(roles, ["ADMIN", "DAF"]);
+}
+
+function sanitizeDemandeForViewer(demande, user, agent) {
+  if (!demande) return demande;
+  if (canViewDafValidationFields(user, agent)) return demande;
+  return {
+    ...demande,
+    budget_prevu: null,
+    budget_disponible: null,
+    paiement_immediat: null,
+    validation_oci: null,
+    ligne_budgetaire_id: null,
+    lignes_budgetaires: null,
+    ligne_budgetaire_assignee_par_id: null,
+    ligne_budgetaire_assignee_at: null,
+    agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: null,
+    budget_depassement_montant: null,
+  };
+}
+
 async function canActAsReturnTarget({ user, agent, demande, resolution, client = prisma }) {
   if (!agent?.id || !resolution?.targetAgentId) return false;
 
@@ -470,7 +581,12 @@ function buildDemandeAccessWhere({ user, agent }) {
   }
 
   if (hasPermission(user, "DEMANDE_LIST_SELF") && agent?.id) {
-    filters.push({ demandeur_id: Number(agent.id) });
+    filters.push({
+      OR: [
+        { demandeur_id: Number(agent.id) },
+        { created_by_id: Number(agent.id) },
+      ],
+    });
   }
   if (hasPermission(user, "DEMANDE_LIST_ASSIGNED_ACHETEUR") && agent?.id) {
     filters.push({ acheteur_id: Number(agent.id) });
@@ -489,12 +605,15 @@ async function resolveStakeholderUserIds({ demandeId, demande = null, excludeUse
       select: {
         id: true,
         uuid: true,
+        created_by_id: true,
         agents_demandes_paiement_demandeur_idToagents: { select: { users: { select: { id: true } } } },
+        agents_demandes_paiement_created_by_idToagents: { select: { users: { select: { id: true } } } },
       },
     });
   }
 
   const demandeurUserId = demandeRow?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null;
+  const createdByUserId = demandeRow?.agents_demandes_paiement_created_by_idToagents?.users?.id || null;
 
   const steps = await prisma.validation_steps.findMany({
     where: { demande_id: Number(demandeId) },
@@ -520,11 +639,11 @@ async function resolveStakeholderUserIds({ demandeId, demande = null, excludeUse
   }
 
   const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
-  const recipients = uniq([demandeurUserId, ...stakeholderUserIds]).filter(
+  const recipients = uniq([demandeurUserId, createdByUserId, ...stakeholderUserIds]).filter(
     (id) => Number(id) !== Number(excludeUserId)
   );
 
-  return { demande: demandeRow, demandeurUserId, recipients };
+  return { demande: demandeRow, demandeurUserId, createdByUserId, recipients };
 }
 
 async function resolveDirectionAcheteurUserIds(directionId, excludeUserId = null) {
@@ -558,13 +677,19 @@ function assertCanReadDemande({ demande, user, agent }) {
 
   const agentUserId = agent?.user_id ?? agent?.users?.id;
   const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
+  const createdByUserId = demande?.agents_demandes_paiement_created_by_idToagents?.user_id;
   const isOwnerByAgentId = Number(demande.demandeur_id) === Number(agent?.id);
   const isOwnerByUserId =
     agentUserId != null && demandeurUserId != null && Number(demandeurUserId) === Number(agentUserId);
   const isOwnerByUserIdFallback =
     agentUserId != null && Number(demande.demandeur_id) === Number(agentUserId);
+  const isCreatorByAgentId = demande?.created_by_id != null && Number(demande.created_by_id) === Number(agent?.id);
+  const isCreatorByUserId =
+    agentUserId != null && createdByUserId != null && Number(createdByUserId) === Number(agentUserId);
 
-  if (isOwnerByAgentId || isOwnerByUserId || isOwnerByUserIdFallback) return true;
+  if (isOwnerByAgentId || isOwnerByUserId || isOwnerByUserIdFallback || isCreatorByAgentId || isCreatorByUserId) {
+    return true;
+  }
   if (
     demande?.return_workflow?.active &&
     demande.return_workflow.can_edit === true &&
@@ -618,7 +743,15 @@ function assertCanReadDemande({ demande, user, agent }) {
     if (accessWhere?.OR && Array.isArray(accessWhere.OR)) {
       return accessWhere.OR.some((cond) => {
         if (cond?.demandeur_id != null) return Number(cond.demandeur_id) === Number(demande.demandeur_id);
+        if (cond?.created_by_id != null) return Number(cond.created_by_id) === Number(demande.created_by_id);
         if (cond?.acheteur_id != null) return Number(cond.acheteur_id) === Number(demande.acheteur_id);
+        if (cond?.OR && Array.isArray(cond.OR)) {
+          return cond.OR.some((inner) => {
+            if (inner?.demandeur_id != null) return Number(inner.demandeur_id) === Number(demande.demandeur_id);
+            if (inner?.created_by_id != null) return Number(inner.created_by_id) === Number(demande.created_by_id);
+            return false;
+          });
+        }
         if (cond?.direction_id?.in) return cond.direction_id.in.includes(Number(demande.direction_id));
         if (cond?.departement_id?.in) return cond.departement_id.in.includes(Number(demande.departement_id));
         if (cond?.service_id?.in) return cond.service_id.in.includes(Number(demande.service_id));
@@ -626,6 +759,7 @@ function assertCanReadDemande({ demande, user, agent }) {
       });
     }
     if (accessWhere?.demandeur_id != null) return Number(accessWhere.demandeur_id) === Number(demande.demandeur_id);
+    if (accessWhere?.created_by_id != null) return Number(accessWhere.created_by_id) === Number(demande.created_by_id);
     if (accessWhere?.acheteur_id != null) return Number(accessWhere.acheteur_id) === Number(demande.acheteur_id);
     return false;
   })();
@@ -646,10 +780,13 @@ exports.assertCanReadDemandeByIdOrUuid = async (user, idOrUuid) => {
       id: true,
       uuid: true,
       demandeur_id: true,
+      created_by_id: true,
       acheteur_id: true,
       direction_id: true,
       departement_id: true,
       service_id: true,
+      agents_demandes_paiement_demandeur_idToagents: { select: { user_id: true } },
+      agents_demandes_paiement_created_by_idToagents: { select: { user_id: true } },
     },
   });
 
@@ -677,10 +814,13 @@ exports.getDemandeHeader = async (user, idOrUuid) => {
       id: true,
       uuid: true,
       demandeur_id: true,
+      created_by_id: true,
       acheteur_id: true,
       direction_id: true,
       departement_id: true,
       service_id: true,
+      agents_demandes_paiement_demandeur_idToagents: { select: { user_id: true } },
+      agents_demandes_paiement_created_by_idToagents: { select: { user_id: true } },
     },
   });
 
@@ -694,19 +834,20 @@ exports.startCreateSignature = async (user, payload = {}) => {
   const userId = getUserIdFromToken(user);
   if (!userId) throw withStatusCode(new Error("Unauthorized"), 401);
 
-  const { agent, montantAPayer, remiseCalc } = await prepareCreateDemandePayload(user, payload);
+  const { agent, actorAgent, montantAPayer, remiseCalc } = await prepareCreateDemandePayload(user, payload);
   const demandeUuid = uuidv4();
 
   const pdfBuffer = await buildDemandeCreationSignaturePdf({
     demandeUuid,
     payload,
-    agent,
+    signerAgent: actorAgent,
+    demandeurAgent: agent,
     montantAPayer,
     remiseCalc,
   });
 
-  const { first_name, last_name } = splitAgentName(agent);
-  const email = agent?.users?.email ? String(agent.users.email).trim() : "";
+  const { first_name, last_name } = splitAgentName(actorAgent);
+  const email = actorAgent?.users?.email ? String(actorAgent.users.email).trim() : "";
   if (!email) throw new Error("Email du signataire introuvable");
 
   const recipientId = "temp_signer_1";
@@ -754,7 +895,8 @@ exports.startCreateSignature = async (user, payload = {}) => {
 
   const signaturePayload = {
     signer_user_id: Number(userId),
-    signer_agent_id: Number(agent.id),
+    signer_agent_id: Number(actorAgent.id),
+    demandeur_agent_id: Number(agent.id),
     signer_email: email,
     created_at: new Date().toISOString(),
     demande_uuid: demandeUuid,
@@ -767,7 +909,7 @@ exports.startCreateSignature = async (user, payload = {}) => {
     action: "create",
     entity_id: null,
     signer_user_id: Number(userId),
-    signer_agent_id: Number(agent.id),
+    signer_agent_id: Number(actorAgent.id),
     signature_provider: "firma",
     signature_request_id: String(signingRequestId),
     signature_request_user_id: signerUserId != null ? String(signerUserId) : null,
@@ -1057,17 +1199,19 @@ function buildSignatureFields({ recipientId }) {
   return signaturePdfTemplate.buildSignatureFields({ recipientId });
 }
 
-function buildDemandeCreationSignaturePdf({ demandeUuid, payload, agent, montantAPayer, remiseCalc }) {
+function buildDemandeCreationSignaturePdf({ demandeUuid, payload, signerAgent, demandeurAgent, montantAPayer, remiseCalc }) {
   const devise = payload?.devise ? String(payload.devise) : "FCFA";
   const montantNet = remiseCalc?.montant_net != null ? remiseCalc.montant_net : montantAPayer;
   const itemsCount = Array.isArray(payload?.items) ? payload.items.filter((it) => it?.designation).length : 0;
+  const signerName = agentDisplayName(signerAgent);
+  const demandeurName = agentDisplayName(demandeurAgent || signerAgent);
 
   return signaturePdfTemplate.buildSignaturePdf({
     title: "Creation de demande",
     subtitle: "Validation electronique de la creation d'une demande de depense",
     reference: demandeUuid || "-",
     generatedAtText: formatDateTime(new Date()),
-    signerName: agentDisplayName(agent),
+    signerName,
     note: "Le signataire confirme la creation de cette demande et l'exactitude des informations renseignees.",
     footer: "Ce document sert uniquement de preuve de signature electronique pour la creation.",
     rows: [
@@ -1075,15 +1219,15 @@ function buildDemandeCreationSignaturePdf({ demandeUuid, payload, agent, montant
       { label: "Beneficiaire", value: payload?.beneficiaire || "-" },
       { label: "Montant brut", value: montantAPayer != null ? `${formatMoneyValue(montantAPayer)} ${devise}` : "-" },
       { label: "Montant net", value: montantNet != null ? `${formatMoneyValue(montantNet)} ${devise}` : "-" },
-      { label: "Demandeur", value: agentDisplayName(agent) },
+      { label: "Demandeur", value: demandeurName },
+      { label: "Saisi par", value: signerName },
       { label: "Nombre d'articles", value: itemsCount ? String(itemsCount) : "-" },
     ],
   });
 }
 
 async function prepareCreateDemandePayload(user, payload) {
-  const agent = await getAgentFromUser(user);
-  const flow = await resolveValidationFlowForAgent(agent);
+  const { actorAgent, demandeurAgent, flow, isForAnotherAgent } = await resolveCreateDemandeContext(user, payload);
   if (!payload.motif) throw new Error("motif requis");
   if (!payload.beneficiaire) throw new Error("beneficiaire requis");
 
@@ -1150,7 +1294,16 @@ async function prepareCreateDemandePayload(user, payload) {
     }
   }
 
-  return { agent, flow, items, montantAPayer, remiseCalc, customTranches };
+  return {
+    agent: demandeurAgent,
+    actorAgent,
+    flow,
+    items,
+    montantAPayer,
+    remiseCalc,
+    customTranches,
+    isForAnotherAgent,
+  };
 }
 
 function toStageStatus(roleName) {
@@ -1345,7 +1498,7 @@ async function buildValidationStepsForDemande(tx, flow, demande) {
 }
 
 exports.createDemande = async (user, payload, options = {}) => {
-  const { agent, flow, items, montantAPayer, remiseCalc, customTranches } = await prepareCreateDemandePayload(
+  const { agent, actorAgent, flow, items, montantAPayer, remiseCalc, customTranches } = await prepareCreateDemandePayload(
     user,
     payload
   );
@@ -1368,9 +1521,10 @@ exports.createDemande = async (user, payload, options = {}) => {
         beneficiaire: payload.beneficiaire,
         remarque: payload.remarque || null,
         demandeur_id: agent.id,
-        direction_id: payload.direction_id || agent.direction_id || null,
-        departement_id: payload.departement_id || agent.departement_id || null,
-        service_id: payload.service_id || agent.service_id || null,
+        created_by_id: actorAgent?.id ? Number(actorAgent.id) : null,
+        direction_id: agent.direction_id || null,
+        departement_id: agent.departement_id || null,
+        service_id: agent.service_id || null,
         statut: "soumise",
         budget_prevu: payload.budget_prevu ?? null,
         budget_disponible: payload.budget_disponible ?? null,
@@ -1592,6 +1746,9 @@ exports.listDemandes = async (user, query) => {
       agents_demandes_paiement_achat_decision_par_idToagents: {
         include: { users: true, roles: true },
       },
+      agents_demandes_paiement_created_by_idToagents: {
+        include: { users: true, directions: true, departements: true, services: true, roles: true },
+      },
       lignes_budgetaires: true,
       agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
@@ -1604,11 +1761,18 @@ exports.listDemandes = async (user, query) => {
 exports.listMyDemandes = async (user) => {
   const agent = await getAgentFromUser(user);
   return prisma.demandes_paiement.findMany({
-    where: { deleted_at: null, demandeur_id: agent.id },
+    where: {
+      deleted_at: null,
+      OR: [
+        { demandeur_id: agent.id },
+        { created_by_id: agent.id },
+      ],
+    },
     orderBy: { created_at: "desc" },
     include: {
       agents_demandes_paiement_acheteur_idToagents: { include: { users: true, roles: true } },
       agents_demandes_paiement_achat_decision_par_idToagents: { include: { users: true, roles: true } },
+      agents_demandes_paiement_created_by_idToagents: { include: { users: true, roles: true } },
       lignes_budgetaires: true,
       agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: { include: { users: true, roles: true } },
       conditions_paiement: { orderBy: { id: "asc" } },
@@ -1635,13 +1799,100 @@ exports.listByDemandeur = async (demandeurId) => {
     },
   });
 };
-exports.getOne = async (user, idOrUuid) => {
+
+exports.listCreateForAgentCandidates = async (user, query = {}) => {
+  const actorAgent = await getAgentFromUser(user);
+  const q = String(query?.q || query?.search || "").trim();
+  const limitRaw = Number(query?.limit || 200);
+  const take = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 500) : 200;
+  const now = new Date();
+
+  const delegations = await prisma.delegations.findMany({
+    where: {
+      delegate_id: Number(actorAgent.id),
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+    },
+    orderBy: [{ start_at: "asc" }, { id: "asc" }],
+    include: {
+      agents_delegations_principal_idToagents: {
+        include: {
+          users: true,
+          roles: true,
+          directions: true,
+          departements: true,
+          services: true,
+        },
+      },
+    },
+  });
+
+  const byPrincipal = new Map();
+  for (const delegation of delegations) {
+    const agent = delegation.agents_delegations_principal_idToagents;
+    if (!agent || agent.deleted_at || !agent.users?.is_active || agent.users?.deleted_at) continue;
+    if (!delegationScopeCoversAgent(delegation.scope, agent)) continue;
+    const labelHaystack = [
+      agent.nom,
+      agent.prenom,
+      agent.users?.email,
+      agent.roles?.name,
+      agent.directions?.nom,
+      agent.departements?.nom,
+      agent.services?.nom,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    if (q && !labelHaystack.includes(q.toLowerCase())) continue;
+
+    const existing = byPrincipal.get(Number(agent.id));
+    const delegationInfo = {
+      id: delegation.id,
+      uuid: delegation.uuid,
+      role_name: delegation.role_name,
+      scope: delegation.scope || "GLOBAL",
+      start_at: delegation.start_at,
+      end_at: delegation.end_at,
+    };
+
+    if (existing) {
+      existing.delegations.push(delegationInfo);
+      continue;
+    }
+
+    byPrincipal.set(Number(agent.id), {
+      id: agent.id,
+      uuid: agent.uuid,
+      nom: agent.nom,
+      prenom: agent.prenom,
+      email: agent.users?.email || null,
+      role: agent.roles?.name || null,
+      direction_id: agent.direction_id,
+      departement_id: agent.departement_id,
+      service_id: agent.service_id,
+      direction: agent.directions?.nom || null,
+      departement: agent.departements?.nom || null,
+      service: agent.services?.nom || null,
+      delegations: [delegationInfo],
+    });
+  }
+
+  return Array.from(byPrincipal.values())
+    .sort((a, b) => String(`${a.nom || ""} ${a.prenom || ""}`).localeCompare(String(`${b.nom || ""} ${b.prenom || ""}`)))
+    .slice(0, take);
+};
+exports.getOne = async (user, idOrUuid, options = {}) => {
   const where = isNumericId(idOrUuid) ? { id: Number(idOrUuid) } : { uuid: String(idOrUuid) };
 
   const demande = await prisma.demandes_paiement.findFirst({
     where: { ...where, deleted_at: null },
     include: {
       agents_demandes_paiement_demandeur_idToagents: {
+        include: { users: true, directions: true, departements: true, services: true, roles: true },
+      },
+      agents_demandes_paiement_created_by_idToagents: {
         include: { users: true, directions: true, departements: true, services: true, roles: true },
       },
       agents_demandes_paiement_acheteur_idToagents: {
@@ -1675,13 +1926,14 @@ exports.getOne = async (user, idOrUuid) => {
     agent,
   });
 
-  return {
+  const result = {
     ...demande,
     return_workflow: returnWorkflow,
   };
+  return options?.sanitize === false ? result : sanitizeDemandeForViewer(result, user, agent);
 };
 exports.update = async (user, idOrUuid, payload) => {
-  const demande = await exports.getOne(user, idOrUuid);
+  const demande = await exports.getOne(user, idOrUuid, { sanitize: false });
 
   const {
     canEditAsDirector = false,
@@ -2098,7 +2350,7 @@ exports.update = async (user, idOrUuid, payload) => {
   return updated;
 };
 exports.softDelete = async (user, idOrUuid) => {
-  const demande = await exports.getOne(user, idOrUuid);
+  const demande = await exports.getOne(user, idOrUuid, { sanitize: false });
   const editAccess = await assertCanEditDemande({ user, demande, action: "Annulation" });
   const isReturnCancellation =
     String(demande?.statut || "").toLowerCase() === "a_modifier" &&
@@ -2696,7 +2948,7 @@ exports.confirmAchatNotRequired = async (user, idOrUuid, payload = {}) => {
 };
 
 exports.closeDemande = async (user, idOrUuid) => {
-  const demande = await exports.getOne(user, idOrUuid);
+  const demande = await exports.getOne(user, idOrUuid, { sanitize: false });
   await assertCanEditDemande({ user, demande, action: "Cloture" });
 
   const statut = String(demande?.statut || "").toLowerCase();

@@ -141,6 +141,7 @@ function canViewDemandeDetails({ user, demande }) {
   const roles = rolesFromReqUser(user);
   if (roles.includes("ADMIN")) return true;
   if (user?.agentId && Number(demande?.demandeur_id) === Number(user.agentId)) return true;
+  if (user?.agentId && demande?.created_by_id && Number(demande.created_by_id) === Number(user.agentId)) return true;
   const allow = ["RESPONSABLE", "DIRECTEUR", "DG", "DGA", "DAF", "COMPTABLE", "ADMIN"];
   return roles.some((r) => allow.includes(r));
 }
@@ -176,6 +177,7 @@ async function verifyToken({ token, user = null }) {
           include: { agents_validation_steps_validated_by_idToagents: { include: { users: true } } },
         },
         agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
+        agents_demandes_paiement_created_by_idToagents: { include: { users: true } },
       },
     });
 

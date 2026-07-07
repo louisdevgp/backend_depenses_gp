@@ -78,7 +78,7 @@ exports.downloadSessionSignature = async (req, res) => {
     if (!signatureUrl) {
       return res.status(409).json({
         success: false,
-        message: "Document en cours de gÃ©nÃ©ration. RÃ©essayez dans quelques instants.",
+        message: "Document en cours de generation. Reessayez dans quelques instants.",
       });
     }
 

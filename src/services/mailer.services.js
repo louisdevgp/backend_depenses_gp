@@ -1,7 +1,7 @@
 const { sendMail } = require("../config/mailer");
 const { buildNotificationEmail } = require("./notificationEmailTemplate");
 
-const APP_NAME = "E-Dépenses";
+const APP_NAME = "E-Depenses";
 
 function buildDefaultEmail({ subject, message, meta }) {
   const safeMeta = meta ? JSON.stringify(meta, null, 2) : null;
@@ -17,7 +17,7 @@ function buildDefaultEmail({ subject, message, meta }) {
           ? `<pre style="background:#f6f6f6;padding:12px;border-radius:8px">${safeMeta}</pre>`
           : ""
       }
-      <p style="color:#777;margin-top:16px">— ${APP_NAME}</p>
+      <p style="color:#777;margin-top:16px">- ${APP_NAME}</p>
     </div>
   `;
 

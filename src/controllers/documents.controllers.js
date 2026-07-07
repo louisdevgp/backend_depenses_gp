@@ -137,11 +137,13 @@ async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId
     select: {
       id: true,
       demandeur_id: true,
+      created_by_id: true,
       acheteur_id: true,
       direction_id: true,
       departement_id: true,
       service_id: true,
       agents_demandes_paiement_demandeur_idToagents: { select: { user_id: true } },
+      agents_demandes_paiement_created_by_idToagents: { select: { user_id: true } },
     },
   });
   if (!demande) return { ok: false, status: 404, message: "Demande introuvable" };
@@ -171,9 +173,14 @@ async function assertCanMutateDemandeContext({ userId, agentId = null, demandeId
   }
 
   const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.user_id;
+  const createdByUserId = demande?.agents_demandes_paiement_created_by_idToagents?.user_id;
   if (demandeurUserId != null && Number(demandeurUserId) === Number(userId)) return { ok: true };
+  if (createdByUserId != null && Number(createdByUserId) === Number(userId)) return { ok: true };
 
   if (agentId != null && Number(demande.demandeur_id) === Number(agentId)) return { ok: true };
+  if (agentId != null && demande.created_by_id != null && Number(demande.created_by_id) === Number(agentId)) {
+    return { ok: true };
+  }
 
   return { ok: false, status: 403, message: `${actionLabel || "Action"} non autorisee` };
 }
@@ -231,11 +238,14 @@ async function resolveUserIdsForDemandeContext({ demandeId, excludeUserId = null
     select: {
       id: true,
       uuid: true,
+      created_by_id: true,
       agents_demandes_paiement_demandeur_idToagents: { select: { users: { select: { id: true } } } },
+      agents_demandes_paiement_created_by_idToagents: { select: { users: { select: { id: true } } } },
     },
   });
 
   const demandeurUserId = demande?.agents_demandes_paiement_demandeur_idToagents?.users?.id || null;
+  const createdByUserId = demande?.agents_demandes_paiement_created_by_idToagents?.users?.id || null;
 
   const current = await prisma.validation_steps.findFirst({
     where: { demande_id: Number(demandeId), status: "en_attente" },
@@ -253,9 +263,11 @@ async function resolveUserIdsForDemandeContext({ demandeId, excludeUserId = null
   }
 
   const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
-  const recipients = uniq([demandeurUserId, currentValidatorUserId]).filter((id) => Number(id) !== Number(excludeUserId));
+  const recipients = uniq([demandeurUserId, createdByUserId, currentValidatorUserId]).filter(
+    (id) => Number(id) !== Number(excludeUserId)
+  );
 
-  return { demande, demandeurUserId, currentValidatorUserId, recipients, current };
+  return { demande, demandeurUserId, createdByUserId, currentValidatorUserId, recipients, current };
 }
 
 exports.uploadMany = async (req, res) => {
@@ -269,7 +281,7 @@ exports.uploadMany = async (req, res) => {
     if (!agent) {
       return res.status(400).json({
         success: false,
-        message: "Agent non trouvÃƒÂ© pour l'utilisateur connectÃƒÂ©",
+        message: "Agent non trouve pour l'utilisateur connecte",
       });
     }
 
@@ -283,7 +295,7 @@ exports.uploadMany = async (req, res) => {
     if (!authz.ok) return res.status(authz.status).json({ success: false, message: authz.message });
 
     const files = req.files || [];
-    if (!files.length) throw new Error("Aucun fichier reÃƒÂ§u (champ 'files')");
+    if (!files.length) throw new Error("Aucun fichier recu (champ 'files')");
 
     const uploadTypeDoc = req.body?.type_document;
     if (authz?.asAcheteur && !isPurchaseEvidenceType(uploadTypeDoc)) {
@@ -345,7 +357,7 @@ exports.uploadMany = async (req, res) => {
               user_id: uid,
               type: "document_uploaded",
               demande_id: demandeId,
-              message: `${count} document(s) ajoutÃƒÂ©(s) ÃƒÂ  la demande (${typeDoc}).`,
+              message: `${count} document(s) ajoute(s) a la demande (${typeDoc}).`,
               meta: {
                 demandeUuid: ctx?.demande?.uuid,
                 type_document: typeDoc,
@@ -415,7 +427,7 @@ exports.download = async (req, res) => {
 
     const contentType = doc.format || "application/octet-stream";
     res.setHeader("Content-Type", contentType);
-    // inline => preview dans le navigateur, mais tÃƒÂ©lÃƒÂ©chargeable
+    // inline => preview dans le navigateur, mais telechargeable
     res.setHeader(
       "Content-Disposition",
       `inline; filename="${String(doc.nom_fichier || filename).replace(/\"/g, "")}"`
@@ -472,7 +484,7 @@ exports.remove = async (req, res) => {
                 user_id: uid,
                 type: "document_deleted",
                 demande_id: demandeId,
-                message: `Un document a ÃƒÂ©tÃƒÂ© supprimÃƒÂ© de la demande (${doc.type_document || "document"}).`,
+                message: `Un document a ete supprime de la demande (${doc.type_document || "document"}).`,
                 meta: {
                   demandeUuid: ctx?.demande?.uuid,
                   documentId: doc.id,

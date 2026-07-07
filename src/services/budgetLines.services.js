@@ -29,6 +29,35 @@ function normalizeControleMode(value) {
   return v === "STRICT" ? "STRICT" : "SOUPLE";
 }
 
+function normalizeMois(value, fallback = new Date().getMonth() + 1) {
+  const n = Number(value);
+  if (Number.isInteger(n) && n >= 1 && n <= 12) return n;
+  return fallback;
+}
+
+function nextPeriod(exercice, mois) {
+  const currentYear = Number(exercice) || new Date().getFullYear();
+  const currentMonth = normalizeMois(mois, new Date().getMonth() + 1);
+  if (currentMonth >= 12) return { exercice: currentYear + 1, mois: 1 };
+  return { exercice: currentYear, mois: currentMonth + 1 };
+}
+
+function periodSuffix(exercice, mois) {
+  return `${Number(exercice)}-${String(normalizeMois(mois, 1)).padStart(2, "0")}`;
+}
+
+function stripPeriodSuffix(code) {
+  return String(code || "")
+    .trim()
+    .replace(/[-_ ]?\d{4}[-_ ]?(0[1-9]|1[0-2])$/i, "")
+    .replace(/[-_ ]+$/g, "");
+}
+
+function buildPeriodicCode(baseCode, exercice, mois) {
+  const base = normalizeUpper(stripPeriodSuffix(baseCode) || "LB").replace(/\s+/g, "-");
+  return `${base}-${periodSuffix(exercice, mois)}`;
+}
+
 function normalizeScopeType(value) {
   const v = normalizeUpper(value || "GLOBAL");
   return ["GLOBAL", "DIRECTION", "DEPARTEMENT", "SERVICE"].includes(v) ? v : "GLOBAL";
@@ -55,6 +84,7 @@ function buildBudgetSnapshot(line, amount) {
     code: line?.code || null,
     libelle: line?.libelle || null,
     exercice: line?.exercice ?? null,
+    mois: line?.mois ?? null,
     devise: line?.devise || "FCFA",
     montant_initial: round2(line?.montant_initial),
     montant_engage: round2(line?.montant_engage),
@@ -117,6 +147,7 @@ async function findLine(client, idOrUuid, extraWhere = {}) {
 async function listBudgetLines(query = {}) {
   const where = { deleted_at: null };
   if (query.exercice) where.exercice = Number(query.exercice);
+  if (query.mois) where.mois = normalizeMois(query.mois, 0);
   if (query.statut) where.statut = normalizeStatut(query.statut);
   if (query.activeOnly === true || String(query.activeOnly || "").toLowerCase() === "true") {
     where.statut = "active";
@@ -128,7 +159,7 @@ async function listBudgetLines(query = {}) {
 
   const rows = await prisma.lignes_budgetaires.findMany({
     where,
-    orderBy: [{ exercice: "desc" }, { code: "asc" }],
+    orderBy: [{ exercice: "desc" }, { mois: "desc" }, { code: "asc" }],
     include: {
       agents_lignes_budgetaires_created_by_idToagents: { include: { users: true } },
       agents_lignes_budgetaires_updated_by_idToagents: { include: { users: true } },
@@ -156,7 +187,10 @@ async function getBudgetLine(idOrUuid) {
 async function createBudgetLine(payload = {}, actorAgentId) {
   await ensureDafAgent(prisma, actorAgentId);
   const exercice = Number(payload.exercice || new Date().getFullYear());
-  const code = String(payload.code || `LB-${exercice}-${Date.now()}`).trim().toUpperCase();
+  const mois = normalizeMois(payload.mois);
+  const code = payload.code
+    ? buildPeriodicCode(payload.code, exercice, mois)
+    : String(`LB-${periodSuffix(exercice, mois)}-${Date.now()}`).trim().toUpperCase();
   const libelle = String(payload.libelle || "").trim();
   const montantInitial = round2(payload.montant_initial);
   if (!libelle) throw withStatusCode(new Error("Libelle requis"), 400);
@@ -171,6 +205,7 @@ async function createBudgetLine(payload = {}, actorAgentId) {
       libelle,
       description: payload.description ? String(payload.description).trim() : null,
       exercice,
+      mois,
       devise: payload.devise ? String(payload.devise).trim().toUpperCase() : "FCFA",
       montant_initial: montantInitial,
       montant_engage: 0,
@@ -192,12 +227,18 @@ async function updateBudgetLine(idOrUuid, payload = {}, actorAgentId) {
   if (!existing) throw withStatusCode(new Error("Ligne budgetaire introuvable"), 404);
 
   const data = { updated_by_id: Number(actorAgentId), updated_at: new Date() };
-  if (payload.code !== undefined) data.code = String(payload.code || "").trim().toUpperCase();
+  if (payload.code !== undefined) {
+    const nextExercice = payload.exercice !== undefined ? Number(payload.exercice) : Number(existing.exercice);
+    const nextMois = payload.mois !== undefined ? normalizeMois(payload.mois, existing.mois || 1) : existing.mois || 1;
+    const rawCode = String(payload.code || "").trim() || existing.code;
+    data.code = buildPeriodicCode(rawCode, nextExercice, nextMois);
+  }
   if (payload.libelle !== undefined) data.libelle = String(payload.libelle || "").trim();
   if (payload.description !== undefined) {
     data.description = payload.description ? String(payload.description).trim() : null;
   }
   if (payload.exercice !== undefined) data.exercice = Number(payload.exercice);
+  if (payload.mois !== undefined) data.mois = normalizeMois(payload.mois, existing.mois || 1);
   if (payload.devise !== undefined) data.devise = String(payload.devise || "FCFA").trim().toUpperCase();
   if (payload.montant_initial !== undefined) data.montant_initial = round2(payload.montant_initial);
   if (payload.controle_mode !== undefined) data.controle_mode = normalizeControleMode(payload.controle_mode);
@@ -215,6 +256,64 @@ async function updateBudgetLine(idOrUuid, payload = {}, actorAgentId) {
     data,
   });
   return decorateLine(updated);
+}
+
+async function renewBudgetLine(idOrUuid, payload = {}, actorAgentId) {
+  await ensureDafAgent(prisma, actorAgentId);
+  const source = await findLine(prisma, idOrUuid, { deleted_at: null });
+  if (!source) throw withStatusCode(new Error("Ligne budgetaire introuvable"), 404);
+
+  const defaultPeriod = nextPeriod(source.exercice, source.mois);
+  const exercice = Number(payload.exercice || defaultPeriod.exercice);
+  const mois = normalizeMois(payload.mois, defaultPeriod.mois);
+  const montantInitial =
+    payload.montant_initial !== undefined ? round2(payload.montant_initial) : round2(source.montant_initial);
+  if (!Number.isFinite(montantInitial) || montantInitial < 0) {
+    throw withStatusCode(new Error("Montant initial invalide"), 400);
+  }
+
+  const baseCode = payload.code ? String(payload.code).trim() : source.code;
+  const code = buildPeriodicCode(baseCode, exercice, mois);
+
+  const existing = await prisma.lignes_budgetaires.findFirst({
+    where: { code, deleted_at: null },
+    select: { id: true },
+  });
+  if (existing) {
+    throw withStatusCode(new Error(`Une ligne existe deja pour le code ${code}`), 409);
+  }
+
+  const line = await prisma.lignes_budgetaires.create({
+    data: {
+      uuid: uuidv4(),
+      code,
+      libelle: payload.libelle ? String(payload.libelle).trim() : source.libelle,
+      description:
+        payload.description !== undefined
+          ? payload.description
+            ? String(payload.description).trim()
+            : null
+          : source.description,
+      exercice,
+      mois,
+      devise: payload.devise ? String(payload.devise).trim().toUpperCase() : source.devise || "FCFA",
+      montant_initial: montantInitial,
+      montant_engage: 0,
+      montant_paye: 0,
+      controle_mode: normalizeControleMode(payload.controle_mode || source.controle_mode),
+      scope_type: normalizeScopeType(payload.scope_type || source.scope_type),
+      scope_id:
+        payload.scope_id !== undefined
+          ? payload.scope_id != null
+            ? Number(payload.scope_id)
+            : null
+          : source.scope_id,
+      statut: normalizeStatut(payload.statut || "active"),
+      created_by_id: Number(actorAgentId),
+      updated_by_id: Number(actorAgentId),
+    },
+  });
+  return decorateLine(line);
 }
 
 async function deleteBudgetLine(idOrUuid, actorAgentId) {
@@ -452,6 +551,7 @@ module.exports = {
   getBudgetLine,
   createBudgetLine,
   updateBudgetLine,
+  renewBudgetLine,
   deleteBudgetLine,
   calculateBudgetWarning,
   assignLineToDemande,

@@ -51,6 +51,17 @@ exports.update = async (req, res) => {
   }
 };
 
+exports.renew = async (req, res) => {
+  try {
+    const actorAgentId = await getActorAgentId(req.user);
+    if (!actorAgentId) return res.status(400).json({ success: false, message: "Agent introuvable" });
+    const data = await service.renewBudgetLine(req.params.idOrUuid, req.body || {}, actorAgentId);
+    return res.status(201).json({ success: true, data });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
+};
+
 exports.remove = async (req, res) => {
   try {
     const actorAgentId = await getActorAgentId(req.user);

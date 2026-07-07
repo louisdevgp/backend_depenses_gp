@@ -2,6 +2,10 @@ const prisma = require("../config/prisma");
 const { randomUUID: uuidv4 } = require("crypto");
 const { sendNotificationEmail } = require("./mailer.services");
 const realtime = require("../realtime");
+const {
+  agentLabel,
+  getActiveDelegateEntriesForNotificationRecipient,
+} = require("../utils/delegatedNotificationRecipients.utils");
 
 function isNumericId(v) {
   return /^[0-9]+$/.test(String(v));
@@ -47,10 +51,10 @@ function normalizeNotificationMessage(input) {
 
   // Residual mojibake fragments that can survive re-decoding.
   out = out
-    .replace(/â€”|â€“/g, " - ")
-    .replace(/â€˜|â€™/g, "'")
-    .replace(/â€œ|â€\u009d/g, '"')
-    .replace(/â€¦/g, "...");
+    .replace(/Ã¢â‚¬â€|Ã¢â‚¬â€œ|â€”|â€“/g, " - ")
+    .replace(/Ã¢â‚¬Ëœ|Ã¢â‚¬â„¢|â€˜|â€™/g, "'")
+    .replace(/Ã¢â‚¬Å“|Ã¢â‚¬\u009d|â€œ|â€\u009d/g, '"')
+    .replace(/Ã¢â‚¬Â¦|â€¦/g, "...");
 
   // Remove replacement chars and normalize punctuation.
   out = out.replace(/\s+\uFFFD\s+/g, " - ");
@@ -73,6 +77,102 @@ function shouldCopyAccountantsForDaf(type, meta) {
   if (normalizedType === "reception_visa_pending") return true;
   if (normalizedType !== "validation_pending") return false;
   return String(meta?.role || "").trim().toUpperCase() === "DAF";
+}
+
+function shouldPropagateToDelegates(meta) {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return true;
+  if (meta.delegatedNotification) return false;
+  if (meta.skipDelegatedNotifications) return false;
+  return true;
+}
+
+function buildDelegatedNotificationMessage(message, principalLabel) {
+  const principal = principalLabel || "le delegant";
+  const base = normalizeNotificationMessage(message);
+  if (!base) return `Notification deleguee pour ${principal}.`;
+
+  let rewritten = base
+    .replace(/^Votre demande\b/i, `La demande de ${principal}`)
+    .replace(/\bvotre demande\b/gi, `la demande de ${principal}`)
+    .replace(/^Une demande\b/i, `Une demande de ${principal}`)
+    .replace(/^La demande\b/i, `La demande de ${principal}`);
+
+  if (rewritten !== base) return rewritten;
+  return `Notification deleguee pour ${principal} : ${base}`;
+}
+
+function orgFromDemande(demande) {
+  return {
+    direction_id: demande?.direction_id ?? null,
+    departement_id: demande?.departement_id ?? null,
+    service_id: demande?.service_id ?? null,
+  };
+}
+
+async function propagateNotificationToDelegates(
+  {
+    client,
+    tx,
+    userId,
+    type,
+    demandeId,
+    channel,
+    message,
+    meta,
+    sendEmailNow,
+  }
+) {
+  if (!demandeId || !shouldPropagateToDelegates(meta)) return;
+
+  const originalUserId = Number(userId);
+  if (!Number.isInteger(originalUserId) || originalUserId <= 0) return;
+
+  const demande = await client.demandes_paiement.findUnique({
+    where: { id: Number(demandeId) },
+    select: {
+      id: true,
+      uuid: true,
+      demandeur_id: true,
+      direction_id: true,
+      departement_id: true,
+      service_id: true,
+    },
+  });
+  if (!demande) return;
+
+  const delegateEntries = await getActiveDelegateEntriesForNotificationRecipient(
+    client,
+    originalUserId,
+    orgFromDemande(demande),
+    { excludeUserIds: [originalUserId] }
+  );
+  if (!delegateEntries.length) return;
+
+  for (const entry of delegateEntries) {
+    const delegateUserId = Number(entry?.user?.id);
+    if (!Number.isInteger(delegateUserId) || delegateUserId <= 0) continue;
+
+    const principal = agentLabel(entry?.principalAgent);
+    await createNotification(
+      {
+        user_id: delegateUserId,
+        type,
+        demande_id: Number(demande.id),
+        demande_uuid: demande.uuid,
+        channel,
+        message: buildDelegatedNotificationMessage(message, principal),
+        meta: mergeMeta(meta, {
+          delegatedNotification: true,
+          principalUserId: originalUserId,
+          principalAgentId: entry?.principalAgent?.id ? Number(entry.principalAgent.id) : null,
+          principalLabel: principal,
+          originalNotificationRecipientUserId: originalUserId,
+        }),
+        sendEmailNow,
+      },
+      tx
+    );
+  }
 }
 
 async function resolveDafAccountantCcEmails(userId, type, meta) {
@@ -158,9 +258,9 @@ async function resolveDafAccountantCcEmails(userId, type, meta) {
 }
 
 /**
- * Crée une notification en DB (canal email par défaut).
- * ✅ tx optionnel: si tu es dans une transaction, passe tx pour éviter les FK errors.
- * ✅ demande_id OU demande_uuid
+ * Cree une notification en DB (canal email par defaut).
+ * tx optionnel: si tu es dans une transaction, passe tx pour eviter les FK errors.
+ * demande_id OU demande_uuid
  */
 async function createNotification(
   {
@@ -188,8 +288,8 @@ async function createNotification(
   // 1) demande_id (int)
   if (demande_id !== null && demande_id !== undefined && demande_id !== "") {
     if (!isNumericId(demande_id)) {
-      // si quelqu’un a envoyé un uuid par erreur dans demande_id
-      throw new Error("demande_id doit être un ID numérique (int). Utilise demande_uuid sinon.");
+      // si quelqu'un a envoye un uuid par erreur dans demande_id
+      throw new Error("demande_id doit etre un ID numerique (int). Utilise demande_uuid sinon.");
     }
     demandeIdFinal = Number(demande_id);
   }
@@ -206,7 +306,7 @@ async function createNotification(
     }
   }
 
-  // 3) si on a un demandeIdFinal, on vérifie qu’il existe (évite FK violation)
+  // 3) si on a un demandeIdFinal, on verifie qu'il existe (evite FK violation)
   if (demandeIdFinal) {
     const exists = await client.demandes_paiement.findUnique({
       where: { id: Number(demandeIdFinal) },
@@ -214,10 +314,10 @@ async function createNotification(
     });
 
     if (!exists) {
-      // ✅ OPTION A: on ignore le lien demande (pas de FK) et on crée la notif quand même
+      // OPTION A: on ignore le lien demande (pas de FK) et on cree la notif quand meme
       demandeIdFinal = null;
 
-      // ❌ OPTION B (si tu préfères bloquer): dé-commente
+      // OPTION B (si tu preferes bloquer): de-commente
       // const err = new Error("demande_id invalide: demande introuvable");
       // err.statusCode = 400;
       // throw err;
@@ -280,6 +380,23 @@ async function createNotification(
     }
   } catch {
     // ignore realtime errors
+  }
+
+  try {
+    await propagateNotificationToDelegates({
+      client,
+      tx,
+      userId: user_id,
+      type,
+      demandeId: demandeIdFinal,
+      channel,
+      message: normalizedMessage,
+      meta: created.meta,
+      sendEmailNow,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[notifications] delegated propagation failed:", err?.message || err);
   }
 
   // Best practice: do not send email inside a DB transaction callback.

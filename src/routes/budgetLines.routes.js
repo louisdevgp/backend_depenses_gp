@@ -8,6 +8,7 @@ router.get("/", auth, requirePermission(P.BUDGET_LINE_LIST), ctrl.list);
 router.get("/preview", auth, requirePermission(P.BUDGET_LINE_USE), ctrl.preview);
 router.post("/", auth, requirePermission(P.BUDGET_LINE_CREATE), ctrl.create);
 router.get("/:idOrUuid", auth, requirePermission(P.BUDGET_LINE_GET), ctrl.getOne);
+router.post("/:idOrUuid/renew", auth, requirePermission(P.BUDGET_LINE_CREATE), ctrl.renew);
 router.put("/:idOrUuid", auth, requirePermission(P.BUDGET_LINE_UPDATE), ctrl.update);
 router.delete("/:idOrUuid", auth, requirePermission(P.BUDGET_LINE_DELETE), ctrl.remove);
 

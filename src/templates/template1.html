@@ -38,6 +38,12 @@
         margin-top: 4mm;
       }
       
+      .brand-block {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
       .logo {
         width: 150px;
         height: auto;
@@ -281,16 +287,18 @@
     <div class="container">
       <!-- HEADER (FIXE) -->
       <div class="header">
-        <img
-          src="{{{company_logo_url}}}"
-          class="logo"
-          alt="Green - Pay"
-        />
-        <div class="org">
-          <p>Tél : 27 22 54 96 97</p>
-          <p>06 BP 6903 ABJ 06</p>
-          <p>CDI : CME COCODY DANGA</p>
-          <p>Régime d'imposition : RSI</p>
+        <div class="brand-block">
+          <img
+            src="{{{company_logo_url}}}"
+            class="logo"
+            alt="Green - Pay"
+          />
+          <div class="org">
+            <p>T&eacute;l : 27 22 54 54 96 / 97</p>
+            <p>06 BP 6903 ABJ 06</p>
+            <p>CDI : 2 PLATEAUX 2</p>
+            <p>R&eacute;gime d'imposition : RSI</p>
+          </div>
         </div>
       </div>
 
@@ -307,7 +315,7 @@
           <div class="row">
             <span class="label">MONTANT EN LETTRES :</span>
             <span class="dotline"
-              ><span class="value">{{montant_lettres}}</span></span
+              ><span class="value letters">{{montant_lettres}}</span></span
             >
           </div>
           <div class="row indent">
@@ -331,7 +339,7 @@
             >
           </div>
 
-          <!-- CNI/Mle + Entreprise (à la main, deux segments) -->
+          CNI/Mle + Entreprise (à la main, deux segments)
           <div class="row split">
             <span class="label">N° CNI / Mle :</span>
             <span class="dotline"><span class="value"></span></span>

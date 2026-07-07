@@ -11,6 +11,7 @@ const {
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,
 } = require("../utils/permissionScopes");
+const { isActiveDelegateAgentForDemande } = require("../utils/delegatedNotificationRecipients.utils");
 
 function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
@@ -48,6 +49,46 @@ function candidateScopesForDemandeOrg(org) {
   if (org.departement_id) scopes.push(`DEPARTEMENT:${Number(org.departement_id)}`);
   if (org.service_id) scopes.push(`SERVICE:${Number(org.service_id)}`);
   return scopes;
+}
+
+function demandeRelationFilterForDelegation(delegation) {
+  const principalId = Number(delegation?.principal_id);
+  if (!Number.isInteger(principalId) || principalId <= 0) return null;
+
+  const base = { demandeur_id: principalId };
+  const scope = String(delegation?.scope || "").trim().toUpperCase();
+  if (!scope || scope === "GLOBAL") {
+    return { demandes_paiement: { is: base } };
+  }
+
+  const [kind, rawId] = scope.split(":");
+  const scopeId = Number(rawId);
+  if (!Number.isInteger(scopeId) || scopeId <= 0) return null;
+
+  if (kind === "DIRECTION") base.direction_id = scopeId;
+  else if (kind === "DEPARTEMENT") base.departement_id = scopeId;
+  else if (kind === "SERVICE") base.service_id = scopeId;
+  else return null;
+
+  return { demandes_paiement: { is: base } };
+}
+
+async function delegatedReceptionFiltersForAgent(client, agentId) {
+  const delegateId = Number(agentId);
+  if (!Number.isInteger(delegateId) || delegateId <= 0) return [];
+
+  const now = new Date();
+  const delegations = await client.delegations.findMany({
+    where: {
+      delegate_id: delegateId,
+      is_active: true,
+      start_at: { lte: now },
+      end_at: { gte: now },
+    },
+    select: { principal_id: true, scope: true },
+  });
+
+  return delegations.map(demandeRelationFilterForDelegation).filter(Boolean);
 }
 
 async function getAgentById(tx, agentId) {
@@ -260,6 +301,8 @@ async function receptionScopeWhereForUser(user) {
 
   if (hasPermission(user, "RECEPTION_LIST_SELF")) {
     filters.push({ demandes_paiement: { is: { demandeur_id: Number(agent.id) } } });
+    filters.push({ recu_par_id: Number(agent.id) });
+    filters.push(...(await delegatedReceptionFiltersForAgent(prisma, agent.id)));
   }
   if (hasPermission(user, "DEMANDE_LIST_ASSIGNED_ACHETEUR")) {
     filters.push({ demandes_paiement: { is: { acheteur_id: Number(agent.id) } } });
@@ -529,17 +572,18 @@ async function createReception(payload, userAgentId, options = {}) {
     };
 
     const isOwner = Number(demande.demandeur_id) === Number(userAgentId);
+    const canDelegatedDemandeur = await isActiveDelegateAgentForDemande(tx, demande, userAgentId);
     const canDirector = await canActAsDirectorForDemande(tx, userAgentId, demandeOrg);
     const canResponsable = await canActAsResponsableForDemande(tx, userAgentId, demandeOrg);
     const canAssignedAcheteur = await canActAsAcheteurForDemande(tx, userAgentId, demande);
-    if (!isOwner && !canDirector && !canResponsable && !canAssignedAcheteur) {
+    if (!isOwner && !canDelegatedDemandeur && !canDirector && !canResponsable && !canAssignedAcheteur) {
       const err = new Error(
-        "Seul le Directeur de la direction, le responsable, le demandeur ou l'acheteur assigne peut creer une reception"
+        "Seul le Directeur de la direction, le responsable, le demandeur, son delegataire actif ou l'acheteur assigne peut creer une reception"
       );
       err.statusCode = 403;
       throw err;
     }
-    if ((isOwner || canResponsable || canAssignedAcheteur) && !canDirector) {
+    if ((isOwner || canDelegatedDemandeur || canResponsable || canAssignedAcheteur) && !canDirector) {
       const pending = await tx.validation_steps.count({
         where: {
           demande_id: Number(demande.id),

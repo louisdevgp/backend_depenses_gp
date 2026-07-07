@@ -57,6 +57,11 @@ module.exports = {
 
   // Demandes
   [P.DEMANDE_CREATE]: { module: "Demandes", appliesTo: ["menu", "action"] },
+  [P.DEMANDE_CREATE_FOR_AGENT]: {
+    module: "Demandes",
+    appliesTo: ["action"],
+    description: "Permet de creer une demande pour le compte d'un autre agent dans un perimetre autorise.",
+  },
   [P.DEMANDE_LIST]: { module: "Demandes", appliesTo: ["menu", "action"] },
   [P.DEMANDE_LIST_SELF]: { module: "Demandes", appliesTo: ["menu", "action"] },
   [P.DEMANDE_LIST_ALL]: { module: "Demandes", appliesTo: ["menu", "action"] },
@@ -68,6 +73,11 @@ module.exports = {
   [P.DEMANDE_ASSIGN_ACHETEUR]: { module: "Demandes", appliesTo: ["action"] },
   [P.DEMANDE_CLOSE]: { module: "Demandes", appliesTo: ["action"] },
   [P.DEMANDE_REOPEN]: { module: "Demandes", appliesTo: ["action"] },
+  [P.DEMANDE_DAF_FIELDS_VIEW]: {
+    module: "Demandes",
+    appliesTo: ["action"],
+    description: "Affiche les champs de controle DAF dans le detail d'une demande.",
+  },
 
   // Dashboard
   [P.DASHBOARD_VIEW_SELF]: { module: "Dashboard", appliesTo: ["menu", "action"] },

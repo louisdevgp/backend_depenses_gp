@@ -2,6 +2,7 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const notifications = require("../services/notifications.services");
 const { randomUUID: uuidv4 } = require("crypto");
+const { canManageDelegation } = require("../utils/delegationPermissions.utils");
 
 // Delegations are allowed for business roles, except ADMIN.
 const DELEGABLE_ROLES = new Set([
@@ -16,6 +17,14 @@ const DELEGABLE_ROLES = new Set([
   "COMPTABLE",
 ]);
 const GLOBAL_DELEGATION_VIEW_ROLES = new Set(["RESPONSABLE", "DIRECTEUR", "DAF", "DGA", "DG"]);
+
+const delegationAgentInclude = {
+  users: { select: { email: true } },
+  roles: { select: { name: true } },
+  directions: { select: { nom: true } },
+  departements: { select: { nom: true } },
+  services: { select: { nom: true } },
+};
 
 function parseScope(scopeRaw) {
   if (scopeRaw == null) return null;
@@ -264,9 +273,9 @@ exports.list = async (req, res) => {
     where,
     orderBy: { id: "desc" },
     include: {
-      agents_delegations_principal_idToagents: true,
-      agents_delegations_delegate_idToagents: true,
-      agents_delegations_created_by_idToagents: true,
+      agents_delegations_principal_idToagents: { include: delegationAgentInclude },
+      agents_delegations_delegate_idToagents: { include: delegationAgentInclude },
+      agents_delegations_created_by_idToagents: { include: delegationAgentInclude },
     },
   });
 
@@ -277,9 +286,9 @@ exports.getOne = async (req, res) => {
   const row = await prisma.delegations.findFirst({
     where: whereIdOrUuid(req.params.idOrUuid),
     include: {
-      agents_delegations_principal_idToagents: true,
-      agents_delegations_delegate_idToagents: true,
-      agents_delegations_created_by_idToagents: true,
+      agents_delegations_principal_idToagents: { include: delegationAgentInclude },
+      agents_delegations_delegate_idToagents: { include: delegationAgentInclude },
+      agents_delegations_created_by_idToagents: { include: delegationAgentInclude },
     },
   });
   if (!row) return res.status(404).json({ success: false, message: "Not found" });
@@ -452,14 +461,14 @@ exports.update = async (req, res) => {
   const actorAgentId = await resolveActorAgentId(req);
   if (!admin) {
     if (!actorAgentId) return res.status(403).json({ success: false, message: "Agent non trouvé" });
-    if (existing.principal_id !== actorAgentId && existing.delegate_id !== actorAgentId) {
-      return res.status(403).json({ success: false, message: "Non autorisé" });
+    if (!canManageDelegation({ admin, actorAgentId, principalId: existing.principal_id })) {
+      return res.status(403).json({ success: false, message: "Seul le principal peut modifier cette délégation" });
     }
   }
 
   const data = {};
 
-  // ✅ période modifiable par principal OU délégué
+  // Période modifiable uniquement par le principal ou l'admin.
   if (req.body.start_at) data.start_at = new Date(req.body.start_at);
   if (req.body.end_at) data.end_at = new Date(req.body.end_at);
 
@@ -578,8 +587,8 @@ exports.toggleActive = async (req, res) => {
   const actorAgentId = await resolveActorAgentId(req);
   if (!admin) {
     if (!actorAgentId) return res.status(403).json({ success: false, message: "Agent non trouvé" });
-    if (existing.principal_id !== actorAgentId && existing.delegate_id !== actorAgentId) {
-      return res.status(403).json({ success: false, message: "Non autorisé" });
+    if (!canManageDelegation({ admin, actorAgentId, principalId: existing.principal_id })) {
+      return res.status(403).json({ success: false, message: "Seul le principal peut activer ou désactiver cette délégation" });
     }
   }
 
@@ -617,7 +626,7 @@ exports.remove = async (req, res) => {
   if (!admin) {
     if (!actorAgentId) return res.status(403).json({ success: false, message: "Agent non trouvé" });
     // suppression reste réservée au principal (ou admin)
-    if (existing.principal_id !== actorAgentId) {
+    if (!canManageDelegation({ admin, actorAgentId, principalId: existing.principal_id })) {
       return res.status(403).json({ success: false, message: "Seul le principal peut supprimer cette délégation" });
     }
   }
@@ -661,9 +670,11 @@ exports.listAgentsForDelegation = async (req, res) => {
       service_id: true,
       users: { select: { email: true } },
       roles: { select: { name: true } },
+      directions: { select: { nom: true } },
+      departements: { select: { nom: true } },
+      services: { select: { nom: true } },
     },
   });
 
   res.json({ success: true, data: rows });
 };
-

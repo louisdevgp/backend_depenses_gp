@@ -7,13 +7,30 @@ const ctrl = require("../controllers/demandes.controllers");
 const P = require("../constants/permissions");
 
 // CRUD
-router.post("/", auth, requirePermission(P.DEMANDE_CREATE), ctrl.create);
-router.post("/signature/start", auth, requirePermission(P.DEMANDE_CREATE), requireWeeklyOtp, ctrl.startSignature);
-router.post("/signature/complete", auth, requirePermission(P.DEMANDE_CREATE), ctrl.completeSignature);
+router.post("/", auth, requirePermission([P.DEMANDE_CREATE, P.DEMANDE_CREATE_FOR_AGENT]), ctrl.create);
+router.post(
+  "/signature/start",
+  auth,
+  requirePermission([P.DEMANDE_CREATE, P.DEMANDE_CREATE_FOR_AGENT]),
+  requireWeeklyOtp,
+  ctrl.startSignature
+);
+router.post(
+  "/signature/complete",
+  auth,
+  requirePermission([P.DEMANDE_CREATE, P.DEMANDE_CREATE_FOR_AGENT]),
+  ctrl.completeSignature
+);
 // Liste globale (encadrement): rôles de validation + compta + admin
 router.get("/", auth, requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_ALL, P.DEMANDE_LIST_ASSIGNED_ACHETEUR]), ctrl.list);
 router.get("/my", auth, requirePermission(P.DEMANDE_LIST_SELF), ctrl.listMine);
 router.get("/by-demandeur/:demandeurId", auth, requirePermission(P.DEMANDE_LIST_BY_DEMANDEUR), ctrl.listByDemandeur);
+router.get(
+  "/create-candidates",
+  auth,
+  requirePermission([P.DEMANDE_CREATE, P.DEMANDE_CREATE_FOR_AGENT]),
+  ctrl.listCreateForAgentCandidates
+);
 router.get(
   "/:idOrUuid/pdf",
   auth,
@@ -23,13 +40,21 @@ router.get(
     P.VALIDATION_LIST_PENDING,
     P.VALIDATION_LIST_DONE,
     P.PAIEMENT_GET,
+    P.DEMANDE_CREATE_FOR_AGENT,
   ]),
   ctrl.pdf
 );
 router.get(
   "/:idOrUuid/validation-history",
   auth,
-  requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_SELF, P.DEMANDE_LIST_ASSIGNED_ACHETEUR, P.VALIDATION_LIST_PENDING, P.VALIDATION_LIST_DONE]),
+  requirePermission([
+    P.DEMANDE_LIST,
+    P.DEMANDE_LIST_SELF,
+    P.DEMANDE_LIST_ASSIGNED_ACHETEUR,
+    P.VALIDATION_LIST_PENDING,
+    P.VALIDATION_LIST_DONE,
+    P.DEMANDE_CREATE_FOR_AGENT,
+  ]),
   ctrl.validationHistory
 );
 router.get("/:idOrUuid/acheteurs-candidats", auth, requirePermission(P.DEMANDE_ASSIGN_ACHETEUR), ctrl.listAcheteurCandidates);
@@ -54,7 +79,14 @@ router.post(
 router.get(
   "/:idOrUuid",
   auth,
-  requirePermission([P.DEMANDE_LIST, P.DEMANDE_LIST_SELF, P.DEMANDE_LIST_ASSIGNED_ACHETEUR, P.VALIDATION_LIST_PENDING, P.VALIDATION_LIST_DONE]),
+  requirePermission([
+    P.DEMANDE_LIST,
+    P.DEMANDE_LIST_SELF,
+    P.DEMANDE_LIST_ASSIGNED_ACHETEUR,
+    P.VALIDATION_LIST_PENDING,
+    P.VALIDATION_LIST_DONE,
+    P.DEMANDE_CREATE_FOR_AGENT,
+  ]),
   ctrl.getOne
 );
 router.put(

@@ -18,6 +18,7 @@ const {
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,
 } = require("../utils/permissionScopes");
+const { getActiveDelegateUsersForDemande } = require("../utils/delegatedNotificationRecipients.utils");
 
 function getEnvAny(keys) {
   for (const k of keys) {
@@ -45,6 +46,121 @@ function safeFilename(doc) {
     const base = path.basename(url || "") || "document";
     return base;
   }
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function buildPaymentRecapEmail({
+  demande,
+  payload,
+  docs,
+  validatorsLine,
+  skipped,
+  totalBytes,
+  maxTotalBytes,
+}) {
+  const appName = "E-Depenses";
+  const primary = "#16a34a";
+  const dark = "#166534";
+  const bg = "#f3f4f6";
+  const light = "#ecfdf3";
+  const text = "#0f172a";
+  const demandeRef = demande?.uuid || "-";
+  const montantLabel = demande?.montant != null ? String(demande.montant) : "";
+  const devise = demande?.devise ? String(demande.devise) : "XOF";
+
+  const docsListHtml = (docs || [])
+    .map((d) => {
+      const n = safeFilename(d);
+      const u = d?.url ? String(d.url) : "";
+      const t = d?.type_document ? String(d.type_document) : "document";
+      return `<li style="margin:6px 0;"><strong>${escapeHtml(t)}</strong> - ${escapeHtml(n)}${
+        u ? ` <span style="color:#667085;">${escapeHtml(u)}</span>` : ""
+      }</li>`;
+    })
+    .join("");
+
+  const skippedHtml = skipped?.length
+    ? `
+      <div style="margin-top:12px; padding:10px 12px; background:#fffbeb; border:1px solid #fde68a; color:#92400e; border-radius:10px;">
+        <strong>Note :</strong> certains documents n'ont pas pu etre joints (taille/URL). Ils sont listes ci-dessus avec leurs liens.
+        <div style="font-size:12px; margin-top:4px;">Taille jointe : ${(totalBytes / 1024 / 1024).toFixed(1)}MB / ${(maxTotalBytes / 1024 / 1024).toFixed(1)}MB</div>
+      </div>`
+    : "";
+
+  const rows = [
+    ["Motif", demande?.motif || "-"],
+    ["Beneficiaire", demande?.beneficiaire || "-"],
+    ["Montant demande", montantLabel ? `${montantLabel} ${devise}` : "-"],
+    ["Type paiement", payload?.type_paiement || "-"],
+    ["Montant paye", payload?.montant != null ? String(payload.montant) : "-"],
+    ["Moyen", payload?.moyen_paiement || "-"],
+  ];
+
+  const html = `
+    <div style="background:${bg}; padding:24px 0;">
+      <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+      <div style="max-width:680px; margin:0 auto; padding:0 16px; font-family:Arial, sans-serif; color:${text};">
+        <div style="background:#ffffff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden;">
+          <div style="background:${primary}; color:#ffffff; padding:18px 20px;">
+            <div style="font-size:13px; opacity:.92;">${appName}</div>
+            <div style="font-size:22px; font-weight:800; margin-top:4px;">Paiement effectue</div>
+          </div>
+          <div style="padding:20px;">
+            <p style="margin:0 0 16px; line-height:1.6;">
+              Un paiement a ete enregistre pour la demande <strong>${escapeHtml(demandeRef)}</strong>.
+            </p>
+
+            <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; background:${light}; border:1px solid #d1fae5; border-radius:12px; overflow:hidden;">
+              ${rows
+                .map(
+                  ([label, value]) => `
+                    <tr>
+                      <td style="padding:9px 12px; color:#475467; width:190px; border-bottom:1px solid #d1fae5;">${escapeHtml(label)}</td>
+                      <td style="padding:9px 12px; font-weight:700; border-bottom:1px solid #d1fae5;">${escapeHtml(value)}</td>
+                    </tr>`
+                )
+                .join("")}
+            </table>
+
+            ${
+              validatorsLine
+                ? `<div style="margin-top:16px;"><strong>Chaine de validation :</strong> ${escapeHtml(validatorsLine)}</div>`
+                : ""
+            }
+
+            <div style="margin-top:18px;">
+              <div style="font-weight:800; margin-bottom:8px;">Documents de la demande</div>
+              <ul style="margin:0; padding-left:18px;">${docsListHtml || "<li>Aucun document</li>"}</ul>
+              ${skippedHtml}
+            </div>
+          </div>
+        </div>
+        <div style="text-align:center; font-size:12px; color:#98a2b3; margin-top:12px;">- ${appName}</div>
+      </div>
+    </div>
+  `;
+
+  const textBody = [
+    `Paiement effectue pour la demande ${demandeRef}.`,
+    `Motif: ${demande?.motif || "-"}`,
+    `Beneficiaire: ${demande?.beneficiaire || "-"}`,
+    `Montant paye: ${payload?.montant != null ? String(payload.montant) : "-"}`,
+    `Moyen: ${payload?.moyen_paiement || "-"}`,
+  ].join("\n");
+
+  return {
+    subject: `E-Depenses - Paiement effectue (Demande ${demandeRef})`,
+    text: textBody,
+    html,
+  };
 }
 
 function normalizeUploadsUrlToLocalPath(url) {
@@ -320,7 +436,7 @@ function hasPermission(user, code) {
 
 function paiementScopeWhereForUser(user, permissionCodes = []) {
   if (!user) {
-    const err = new Error("AccÃ¨s interdit");
+    const err = new Error("Acces interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -334,7 +450,7 @@ function paiementScopeWhereForUser(user, permissionCodes = []) {
   }
 
   if (!scopes.length) {
-    const err = new Error("AccÃ¨s interdit");
+    const err = new Error("Acces interdit");
     err.statusCode = 403;
     throw err;
   }
@@ -346,7 +462,7 @@ function paiementScopeWhereForUser(user, permissionCodes = []) {
   if (scopeWhere === null) return null;
   if (scopeWhere && scopeWhere.id !== -1) return scopeWhere;
 
-  const err = new Error("AccÃ¨s interdit");
+  const err = new Error("Acces interdit");
   err.statusCode = 403;
   throw err;
 }
@@ -358,6 +474,60 @@ async function findUserIdByAgentId(agentId) {
     select: { users: { select: { id: true } } },
   });
   return a?.users?.id || null;
+}
+
+async function notifyDemandeurAndDelegatesForPaiement({
+  demande,
+  actorUserId = null,
+  type,
+  message,
+  delegateMessage = null,
+  meta = {},
+  sendEmailNow = false,
+}) {
+  const demandeurUser = demande?.agents_demandes_paiement_demandeur_idToagents?.users;
+  const demandeurAgent = demande?.agents_demandes_paiement_demandeur_idToagents;
+  const demandeurLabel = [demandeurAgent?.prenom, demandeurAgent?.nom].filter(Boolean).join(" ").trim() || "votre delegant";
+  const demandeurUserId = Number(demandeurUser?.id);
+  const excluded = [actorUserId].filter(Boolean).map(Number);
+  const recipientsById = new Map();
+
+  if (Number.isInteger(demandeurUserId) && demandeurUserId > 0 && !excluded.includes(demandeurUserId)) {
+    recipientsById.set(demandeurUserId, demandeurUser);
+  }
+
+  const delegates = await getActiveDelegateUsersForDemande(prisma, demande, {
+    excludeUserIds: [...excluded, demandeurUserId],
+  });
+  for (const delegate of delegates) {
+    const delegateUserId = Number(delegate?.id);
+    if (Number.isInteger(delegateUserId) && delegateUserId > 0) {
+      recipientsById.set(delegateUserId, delegate);
+    }
+  }
+
+  for (const user of recipientsById.values()) {
+    const isDelegate = Number(user.id) !== demandeurUserId;
+    await notifications.createNotification({
+      user_id: user.id,
+      type,
+      demande_id: Number(demande?.id),
+      message: isDelegate && delegateMessage ? delegateMessage : message,
+      meta: {
+        ...meta,
+        skipDelegatedNotifications: true,
+        ...(isDelegate
+          ? {
+              delegatedNotification: true,
+              principalUserId: demandeurUserId || null,
+              principalAgentId: demande?.demandeur_id || null,
+              principalLabel: demandeurLabel,
+            }
+          : {}),
+      },
+      sendEmailNow,
+    });
+  }
 }
 
 async function getAgentById(agentId) {
@@ -388,7 +558,7 @@ async function assertDemandePayable(demandeId) {
   });
 
   if (pending > 0) {
-    const err = new Error("Demande non payable : validations incomplÃ¨tes ou rejetÃ©e");
+    const err = new Error("Demande non payable : validations incompletes ou rejetee");
     err.statusCode = 400;
     throw err;
   }
@@ -407,7 +577,7 @@ async function ensureConditionsForDemande(tx, demandeId, source) {
 
   if (src !== "DEMANDEUR") return [];
 
-  // Compat: anciennes demandes sans Ã©chÃ©ancier -> crÃ©er 100/100
+  // Compat: anciennes demandes sans echeancier -> creer 100/100
   const d = await tx.demandes_paiement.findUnique({
     where: { id: Number(demandeId) },
     select: { id: true, montant: true, montant_net: true },
@@ -514,7 +684,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
 
     const unpaid = conditions.filter((c) => !c.paiement_id && String(c.statut || "").toLowerCase() !== "paye");
     if (unpaid.length === 0) {
-      const err = new Error("Demande dÃ©jÃ  payÃ©e");
+      const err = new Error("Demande deja payee");
       err.statusCode = 409;
       throw err;
     }
@@ -535,14 +705,14 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         throw err;
       }
 
-      // RÃ¨gle: une seule fois par tranche, et ordre imposÃ© (montant le plus Ã©levÃ© en premier)
+      // Regle: une seule fois par tranche, et ordre impose (montant le plus eleve en premier)
       const nextTranche = [...unpaid].sort((a, b) => {
         const diff = Number(b.montant_prevu || 0) - Number(a.montant_prevu || 0);
         if (diff !== 0) return diff;
         return Number(a.id || 0) - Number(b.id || 0);
       })[0];
       if (!nextTranche) {
-        const err = new Error("Aucune tranche Ã  payer");
+        const err = new Error("Aucune tranche a payer");
         err.statusCode = 400;
         throw err;
       }
@@ -630,7 +800,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         return Number(a.id || 0) - Number(b.id || 0);
       })[0];
       if (!nextTranche) {
-        const err = new Error("Aucune tranche Ã  payer");
+        const err = new Error("Aucune tranche a payer");
         err.statusCode = 400;
         throw err;
       }
@@ -640,7 +810,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         data: { paiement_id: paiement.id, statut: "paye", updated_at: new Date() },
       });
     } else {
-      // total: marque toutes les tranches restantes comme payÃ©es par ce paiement
+      // total: marque toutes les tranches restantes comme payees par ce paiement
       await tx.conditions_paiement.updateMany({
         where: { demande_id: Number(demande_id), source: effectiveSource, paiement_id: null },
         data: { paiement_id: paiement.id, statut: "paye", updated_at: new Date() },
@@ -657,8 +827,8 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     });
     const fullyPaid = stillUnpaid === 0;
 
-    // RÃ¨gle: un paiement partiel ne doit jamais "bloquer" la capacitÃ© Ã  payer.
-    // Donc tant que ce n'est pas totalement payÃ© => en_attente_paiement (mÃªme si rÃ©ception existe).
+    // Regle: un paiement partiel ne doit jamais "bloquer" la capacite a payer.
+    // Donc tant que ce n'est pas totalement paye => en_attente_paiement (meme si reception existe).
     const currentDemandeStatut = String(demande?.statut || "").toLowerCase();
     const keepAchatStatut = currentDemandeStatut === "achat_effectue";
     const nextStatut = keepAchatStatut ? "achat_effectue" : (fullyPaid ? "paye" : "en_attente_paiement");
@@ -674,33 +844,36 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     };
   });
 
-  // notif demandeur after commit (safe for email)
+  // notif demandeur + délégataires actifs after commit (safe for email)
   try {
-    const demandeurUser = result.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users;
-    if (demandeurUser?.id) {
-      const source = normalizeConditionsSource(result?.conditions_source) || "DEMANDEUR";
-      const stillUnpaid = await prisma.conditions_paiement.count({
-        where: {
-          demande_id: Number(demande_id),
-          source,
-          paiement_id: null,
-          statut: { notIn: ["paye", "payee", "regle", "reglee"] },
-        },
-      });
-      const fullyPaid = stillUnpaid === 0;
-      const nextStatut = result?.demande_statut_after_paiement || (fullyPaid ? "paye" : "en_attente_paiement");
-
-      await notifications.createNotification({
-        user_id: demandeurUser.id,
-        type: "paiement_effectue",
+    const actorUserId = await findUserIdByAgentId(comptableAgentId);
+    const source = normalizeConditionsSource(result?.conditions_source) || "DEMANDEUR";
+    const stillUnpaid = await prisma.conditions_paiement.count({
+      where: {
         demande_id: Number(demande_id),
-        message: fullyPaid
-          ? `Votre demande a Ã©tÃ© payÃ©e. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
-          : `Un paiement partiel a Ã©tÃ© enregistrÃ©. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
-        meta: { paiementId: result.id, paiementUuid: result.uuid },
-        sendEmailNow: false,
-      });
-    }
+        source,
+        paiement_id: null,
+        statut: { notIn: ["paye", "payee", "regle", "reglee"] },
+      },
+    });
+    const fullyPaid = stillUnpaid === 0;
+    const nextStatut = result?.demande_statut_after_paiement || (fullyPaid ? "paye" : "en_attente_paiement");
+    const principal = result.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents;
+    const principalLabel = [principal?.prenom, principal?.nom].filter(Boolean).join(" ").trim() || "votre delegant";
+
+    await notifyDemandeurAndDelegatesForPaiement({
+      demande: result.demandes_paiement,
+      actorUserId,
+      type: "paiement_effectue",
+      message: fullyPaid
+        ? `Votre demande a ete payee. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
+        : `Un paiement partiel a ete enregistre. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
+      delegateMessage: fullyPaid
+        ? `La demande de ${principalLabel} a ete payee. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`
+        : `Un paiement partiel a ete enregistre sur la demande de ${principalLabel}. Montant: ${montant}. Moyen: ${moyen_paiement}. Statut: ${nextStatut}.`,
+      meta: { paiementId: result.id, paiementUuid: result.uuid },
+      sendEmailNow: false,
+    });
 
   } catch {
     // ignore email errors
@@ -715,7 +888,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     // ignore realtime errors
   }
 
-  // ? Email rÃ©cap paiement + piÃ¨ces jointes: documents de la demande
+  // Email recap paiement + pieces jointes: documents de la demande
   try {
     const demande = await prisma.demandes_paiement.findUnique({
       where: { id: Number(demande_id) },
@@ -726,12 +899,24 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
         montant: true,
         devise: true,
         beneficiaire: true,
-        agents_demandes_paiement_demandeur_idToagents: { select: { users: { select: { email: true } } } },
+        demandeur_id: true,
+        direction_id: true,
+        departement_id: true,
+        service_id: true,
+        agents_demandes_paiement_demandeur_idToagents: {
+          select: {
+            id: true,
+            nom: true,
+            prenom: true,
+            users: { select: { id: true, email: true } },
+          },
+        },
       },
     });
 
-    const demandeurEmail = demande?.agents_demandes_paiement_demandeur_idToagents?.users?.email
-      ? String(demande.agents_demandes_paiement_demandeur_idToagents.users.email)
+    const demandeurUser = demande?.agents_demandes_paiement_demandeur_idToagents?.users;
+    const demandeurEmail = demandeurUser?.email
+      ? String(demandeurUser.email)
       : null;
 
     const steps = await prisma.validation_steps.findMany({
@@ -753,7 +938,7 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       )
     ).filter(Boolean);
 
-    // docs liÃ©s Ã  la demande
+    // Documents lies a la demande
     const docs = await prisma.documents.findMany({
       where: { demande_id: Number(demande_id) },
       orderBy: { created_at: "asc" },
@@ -765,58 +950,32 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
     const recipients = [];
     if (demandeurEmail) recipients.push(demandeurEmail);
     for (const e of validatorEmails) recipients.push(e);
+
+    const actorUserId = await findUserIdByAgentId(comptableAgentId);
+    const delegateUsers = await getActiveDelegateUsersForDemande(prisma, demande, {
+      excludeUserIds: [actorUserId, demandeurUser?.id].filter(Boolean),
+    });
+    for (const delegate of delegateUsers) {
+      if (delegate?.email) recipients.push(delegate.email);
+    }
+
     const uniqueRecipients = Array.from(new Set(recipients.map((x) => String(x).trim()).filter(Boolean)));
 
     if (uniqueRecipients.length > 0) {
-      const subject = `E-DÃ©penses â€” Paiement effectuÃ© (Demande ${demande?.uuid || Number(demande_id)})`;
-
       const validatorsLine = (steps || [])
         .map((s) => (s?.role_name ? String(s.role_name) : null))
         .filter(Boolean)
-        .join(" ? ");
+        .join(" > ");
 
-      const montantLabel = demande?.montant != null ? String(demande.montant) : "";
-      const devise = demande?.devise ? String(demande.devise) : "XOF";
-
-      const docsListHtml = (docs || [])
-        .map((d) => {
-          const n = safeFilename(d);
-          const u = d?.url ? String(d.url) : "";
-          const t = d?.type_document ? String(d.type_document) : "document";
-          return `<li><b>${t}</b> â€” ${n}${u ? ` <span style=\"color:#666\">(${u})</span>` : ""}</li>`;
-        })
-        .join("");
-
-      const skippedHtml = skipped.length
-        ? `
-          <p style="margin-top:12px;color:#b45309"><b>Note:</b> certains documents n'ont pas pu Ãªtre joints (taille/URL). Ils sont listÃ©s ci-dessus avec leurs liens.</p>
-          <p style="margin-top:6px;color:#666;font-size:12px">Taille jointe: ${(totalBytes / 1024 / 1024).toFixed(1)}MB / ${(maxTotalBytes / 1024 / 1024).toFixed(1)}MB</p>
-        `
-        : "";
-
-      const html = `
-        <div style="font-family:Arial,sans-serif;line-height:1.5">
-          <h2 style="margin:0 0 8px">Paiement effectuÃ©</h2>
-          <p style="margin:0 0 12px">Un paiement a Ã©tÃ© enregistrÃ© pour la demande <b>${demande?.uuid || Number(demande_id)}</b>.</p>
-          <ul style="margin:0 0 12px;padding-left:18px">
-            <li><b>Motif:</b> ${demande?.motif ? String(demande.motif) : "-"}</li>
-            <li><b>BÃ©nÃ©ficiaire:</b> ${demande?.beneficiaire ? String(demande.beneficiaire) : "-"}</li>
-            <li><b>Montant demande:</b> ${montantLabel ? `${montantLabel} ${devise}` : "-"}</li>
-            <li><b>Type paiement:</b> ${payload?.type_paiement ? String(payload.type_paiement) : "-"}</li>
-            <li><b>Montant payÃ©:</b> ${payload?.montant != null ? String(payload.montant) : "-"}</li>
-            <li><b>Moyen:</b> ${payload?.moyen_paiement ? String(payload.moyen_paiement) : "-"}</li>
-          </ul>
-          ${validatorsLine ? `<p style="margin:0 0 12px;color:#111"><b>ChaÃ®ne de validation:</b> ${validatorsLine}</p>` : ""}
-
-          <div style="margin-top:14px">
-            <div style="font-weight:700;margin-bottom:6px">Documents de la demande</div>
-            <ul style="margin:0;padding-left:18px">${docsListHtml || "<li>Aucun document</li>"}</ul>
-            ${skippedHtml}
-          </div>
-
-          <p style="margin-top:16px;color:#777">â€” E-DÃ©penses</p>
-        </div>
-      `;
+      const builtMail = buildPaymentRecapEmail({
+        demande,
+        payload,
+        docs,
+        validatorsLine,
+        skipped,
+        totalBytes,
+        maxTotalBytes,
+      });
 
       // To = demandeur si dispo, sinon 1er validateur; CC = le reste
       const to = demandeurEmail || uniqueRecipients[0];
@@ -824,9 +983,9 @@ async function createPaiement(payload, comptableAgentId, options = {}) {
       await sendMail({
         to,
         ...(ccList.length ? { cc: ccList.join(",") } : {}),
-        subject,
-        text: `Paiement effectuÃ© pour la demande ${demande?.uuid || Number(demande_id)}.`,
-        html,
+        subject: builtMail.subject,
+        text: builtMail.text,
+        html: builtMail.html,
         attachments,
       });
     }
@@ -1178,30 +1337,30 @@ async function updatePaiement(id, payload, actorAgentId) {
 
   try {
     const actorUserId = await findUserIdByAgentId(actorAgentId);
-    const demandeurUser = existing.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users;
+    const principal = existing.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents;
+    const principalLabel = [principal?.prenom, principal?.nom].filter(Boolean).join(" ").trim() || "votre delegant";
 
-    if (demandeurUser?.id && Number(demandeurUser.id) !== Number(actorUserId)) {
-      await notifications.createNotification({
-        user_id: demandeurUser.id,
-        type: "paiement_updated",
-        demande_id: Number(existing.demande_id),
-        message: "Un paiement liÃ© Ã  votre demande a Ã©tÃ© modifiÃ©.",
-        meta: {
-          paiementId: updated.id,
-          paiementUuid: updated.uuid,
-          changes: {
-            type_paiement: payload.type_paiement ?? undefined,
-            montant: payload.montant != null ? Number(payload.montant) : undefined,
-            date_paiement: payload.date_paiement ? new Date(payload.date_paiement).toISOString() : undefined,
-            moyen_paiement: payload.moyen_paiement ?? undefined,
-            reference_piece: payload.reference_piece ?? undefined,
-            compte_debite: payload.compte_debite ?? undefined,
-            commentaire: payload.commentaire ?? undefined,
-          },
+    await notifyDemandeurAndDelegatesForPaiement({
+      demande: existing.demandes_paiement,
+      actorUserId,
+      type: "paiement_updated",
+      message: "Un paiement lie a votre demande a ete modifie.",
+      delegateMessage: `Un paiement lie a la demande de ${principalLabel} a ete modifie.`,
+      meta: {
+        paiementId: updated.id,
+        paiementUuid: updated.uuid,
+        changes: {
+          type_paiement: payload.type_paiement ?? undefined,
+          montant: payload.montant != null ? Number(payload.montant) : undefined,
+          date_paiement: payload.date_paiement ? new Date(payload.date_paiement).toISOString() : undefined,
+          moyen_paiement: payload.moyen_paiement ?? undefined,
+          reference_piece: payload.reference_piece ?? undefined,
+          compte_debite: payload.compte_debite ?? undefined,
+          commentaire: payload.commentaire ?? undefined,
         },
-        sendEmailNow: true,
-      });
-    }
+      },
+      sendEmailNow: true,
+    });
   } catch {
     // ignore email errors
   }
@@ -1237,7 +1396,7 @@ async function deletePaiement(id, actorAgentId) {
   await prisma.$transaction(async (tx) => {
     await budgetLines.reversePaymentMovement(tx, { paiement: snapshot, actorAgentId });
 
-    // 1) DÃ©tacher les tranches liÃ©es Ã  ce paiement
+    // 1) Detacher les tranches liees a ce paiement
     await tx.conditions_paiement.updateMany({
       where: { paiement_id: Number(id) },
       data: { paiement_id: null, statut: "prevu", updated_at: new Date() },
@@ -1282,18 +1441,18 @@ async function deletePaiement(id, actorAgentId) {
 
   try {
     const actorUserId = await findUserIdByAgentId(actorAgentId);
-    const demandeurUser = snapshot.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents?.users;
+    const principal = snapshot.demandes_paiement?.agents_demandes_paiement_demandeur_idToagents;
+    const principalLabel = [principal?.prenom, principal?.nom].filter(Boolean).join(" ").trim() || "votre delegant";
 
-    if (demandeurUser?.id && Number(demandeurUser.id) !== Number(actorUserId)) {
-      await notifications.createNotification({
-        user_id: demandeurUser.id,
-        type: "paiement_deleted",
-        demande_id: Number(snapshot.demande_id),
-        message: "Un paiement liÃ© Ã  votre demande a Ã©tÃ© supprimÃ©.",
-        meta: { paiementId: snapshot.id, paiementUuid: snapshot.uuid },
-        sendEmailNow: true,
-      });
-    }
+    await notifyDemandeurAndDelegatesForPaiement({
+      demande: snapshot.demandes_paiement,
+      actorUserId,
+      type: "paiement_deleted",
+      message: "Un paiement lie a votre demande a ete supprime.",
+      delegateMessage: `Un paiement lie a la demande de ${principalLabel} a ete supprime.`,
+      meta: { paiementId: snapshot.id, paiementUuid: snapshot.uuid },
+      sendEmailNow: true,
+    });
   } catch {
     // ignore email errors
   }

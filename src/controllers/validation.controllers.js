@@ -59,7 +59,7 @@ exports.approveStep = async (req, res) => {
     validation_stop_role,
     ligne_budgetaire_id,
   } = req.body || {};
-  // On ignore signature_data_url car on ne gÃ¨re plus les signatures Ã©lectroniques
+  // On ignore signature_data_url car on ne gere plus les signatures electroniques
   const result = await service.approveStep(stepId, req.user.userId, commentaire, null, {
     budget_prevu,
     budget_disponible,
@@ -72,7 +72,7 @@ exports.approveStep = async (req, res) => {
     validation_stop_role,
     ligne_budgetaire_id,
   });
-  res.json({ success: true, message: "Ã‰tape validÃ©e", data: result });
+  res.json({ success: true, message: "Etape validee", data: result });
 };
 
 exports.startSignature = async (req, res) => {
@@ -158,7 +158,7 @@ exports.downloadSignature = async (req, res) => {
     if (!signatureUrl) {
       return res.status(409).json({
         success: false,
-        message: "Document en cours de gÃƒÂ©nÃƒÂ©ration. RÃƒÂ©essayez dans quelques instants.",
+        message: "Document en cours de generation. Reessayez dans quelques instants.",
       });
     }
 
@@ -189,7 +189,7 @@ exports.rejectStep = async (req, res) => {
   }
 
   const result = await service.rejectStep(stepId, req.user.userId, commentaire);
-  res.json({ success: true, message: "Demande rejetÃ©e", data: result });
+  res.json({ success: true, message: "Demande rejetee", data: result });
 };
 
 exports.returnForModification = async (req, res) => {
@@ -203,7 +203,7 @@ exports.returnForModification = async (req, res) => {
 
   try {
     const result = await service.returnForModification(stepId, req.user.userId, commentaireTrimmed);
-    return res.json({ success: true, message: "Demande retournÃ©e pour modification", data: result });
+    return res.json({ success: true, message: "Demande retournee pour modification", data: result });
   } catch (e) {
     const status = e?.statusCode && Number.isFinite(Number(e.statusCode)) ? Number(e.statusCode) : 400;
     return res.status(status).json({ success: false, message: e.message });
