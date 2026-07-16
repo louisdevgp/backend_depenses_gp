@@ -1677,7 +1677,9 @@ exports.listDemandes = async (user, query) => {
 
   if (query.demandeur_id) where.demandeur_id = Number(query.demandeur_id);
   if (query.beneficiaire) {
-    where.beneficiaire = { contains: String(query.beneficiaire), mode: "insensitive" };
+    // MySQL collations are case-insensitive in this project; Prisma's `mode`
+    // option is PostgreSQL-only and fails on MySQL.
+    where.beneficiaire = { contains: String(query.beneficiaire) };
   }
 
   if (query.roleView) {

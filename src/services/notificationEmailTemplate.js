@@ -96,6 +96,14 @@ function titleForType(type, meta) {
 function inferCta(type, meta) {
   const front = resolveFrontendBaseUrl();
   const m = meta && typeof meta === "object" ? meta : {};
+  const t = String(type || "").toLowerCase();
+
+  if (t === "validation_pending" && m.demandeUuid) {
+    return {
+      label: "Ouvrir la demande",
+      url: joinUrl(front, `/demandes/${m.demandeUuid}`),
+    };
+  }
 
   if (m.paiementUuid) {
     return { label: "Ouvrir le paiement", url: joinUrl(front, `/paiements/${m.paiementUuid}`) };
@@ -113,7 +121,6 @@ function inferCta(type, meta) {
     return { label: "Ouvrir la demande", url: joinUrl(front, `/demandes/${m.demandeUuid}`) };
   }
 
-  const t = String(type || "").toLowerCase();
   if (t === "validation_pending") {
     return { label: "Voir les validations", url: joinUrl(front, "/validations/pending") };
   }

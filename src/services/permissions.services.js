@@ -367,17 +367,22 @@ exports.setUserPermissionOverrides = async (userId, payload = {}) => {
     // --- scopes (allowed permissions only) ---
     const allowedIdToCode = new Map(perms.map((p) => [p.id, p.code]));
     const desiredScopes = [];
+    const desiredScopeKeys = new Set();
     for (const pid of allowIds) {
       const code = allowedIdToCode.get(pid);
       if (!code) continue;
       const desired = scopePayload[code];
       const scopes = Array.isArray(desired) && desired.length ? desired : [{ type: "GLOBAL", id: null }];
       for (const s of scopes) {
-        desiredScopes.push({
+        const normalized = {
           permission_id: pid,
           scope_type: normalizeScopeType(s.type) || "GLOBAL",
           scope_id: normalizeScopeId(s.id),
-        });
+        };
+        const key = `${normalized.permission_id}:${scopeKey(normalized)}`;
+        if (desiredScopeKeys.has(key)) continue;
+        desiredScopeKeys.add(key);
+        desiredScopes.push(normalized);
       }
     }
 
@@ -425,6 +430,7 @@ exports.setUserPermissionOverrides = async (userId, payload = {}) => {
           scope_id: s.scope_id,
           deleted_at: null,
         })),
+        skipDuplicates: true,
       });
     }
 
