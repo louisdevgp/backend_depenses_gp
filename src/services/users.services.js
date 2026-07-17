@@ -320,7 +320,12 @@ async function getById(idOrUuid) {
       agents: {
         where: { deleted_at: null },
         take: 1,
-        include: { roles: true },
+        include: {
+          roles: true,
+          directions: true,
+          departements: true,
+          services: true,
+        },
       },
     },
   });

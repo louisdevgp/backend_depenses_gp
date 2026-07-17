@@ -30,7 +30,7 @@ function normalizeScopeType(value) {
 }
 
 function normalizeScopeId(value) {
-  if (value == null) return null;
+  if (value == null || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }

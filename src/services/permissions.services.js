@@ -77,12 +77,34 @@ function normalizeScopePayload(scopes) {
       const type = normalizeScopeType(item?.type || item?.scope_type);
       if (!type) continue;
       const id = normalizeScopeId(item?.id ?? item?.scope_id);
-      normalized.push({ type, id });
+      if (type !== "GLOBAL" && id == null) continue;
+      normalized.push({ type, id: type === "GLOBAL" ? null : id });
     }
     out[code] = normalized;
   }
   return out;
 }
+
+function defaultScopesFromAgent(agent) {
+  if (agent?.direction_id) return [{ type: "DIRECTION", id: Number(agent.direction_id) }];
+  if (agent?.departement_id) return [{ type: "DEPARTEMENT", id: Number(agent.departement_id) }];
+  if (agent?.service_id) return [{ type: "SERVICE", id: Number(agent.service_id) }];
+  return [{ type: "GLOBAL", id: null }];
+}
+
+async function defaultScopesForUser(userId) {
+  const agent = await prisma.agents.findFirst({
+    where: { user_id: Number(userId), deleted_at: null },
+    select: { direction_id: true, departement_id: true, service_id: true },
+  });
+
+  return defaultScopesFromAgent(agent);
+}
+
+exports.__testables = {
+  defaultScopesFromAgent,
+  normalizeScopePayload,
+};
 
 exports.listPermissions = async () => {
   const rows = await prisma.permissions.findMany({
@@ -251,6 +273,7 @@ exports.getUserPermissionOverrides = async (userId) => {
 
   const scopes = {};
   if (allowIds.size) {
+    const fallbackScopes = await defaultScopesForUser(id);
     const scopeRows = await prisma.user_permission_scopes.findMany({
       where: { user_id: id, permission_id: { in: Array.from(allowIds) }, deleted_at: null },
       select: { permission_id: true, scope_type: true, scope_id: true },
@@ -264,7 +287,7 @@ exports.getUserPermissionOverrides = async (userId) => {
       codeToScopes.set(code, list);
     }
     for (const code of allowCodes) {
-      scopes[code] = codeToScopes.get(code) || [{ type: "GLOBAL", id: null }];
+      scopes[code] = codeToScopes.get(code) || fallbackScopes;
     }
   }
 
@@ -281,6 +304,8 @@ exports.setUserPermissionOverrides = async (userId, payload = {}) => {
     select: { id: true },
   });
   if (!user) throw new Error("USER_NOT_FOUND");
+
+  const fallbackScopes = await defaultScopesForUser(id);
 
   const allCodes = [...allowCodes, ...denyCodes];
   const perms = allCodes.length
@@ -372,7 +397,7 @@ exports.setUserPermissionOverrides = async (userId, payload = {}) => {
       const code = allowedIdToCode.get(pid);
       if (!code) continue;
       const desired = scopePayload[code];
-      const scopes = Array.isArray(desired) && desired.length ? desired : [{ type: "GLOBAL", id: null }];
+      const scopes = Array.isArray(desired) && desired.length ? desired : fallbackScopes;
       for (const s of scopes) {
         const normalized = {
           permission_id: pid,
