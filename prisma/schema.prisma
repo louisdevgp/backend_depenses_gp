@@ -222,6 +222,12 @@ model demandes_paiement {
   budget_disponible                                      Boolean?
   paiement_immediat                                      Boolean?
   validation_oci                                         Boolean?
+  budget_prevu_reponse                                   String?               @db.VarChar(10)
+  budget_disponible_reponse                              String?               @db.VarChar(10)
+  paiement_immediat_reponse                              String?               @db.VarChar(10)
+  validation_oci_reponse                                 String?               @db.VarChar(10)
+  ligne_budgetaire_reponse                               String?               @db.VarChar(10)
+  daf_controle_commentaires                              Json?
   ajournee                                               Boolean               @default(false)
   ajournee_le                                            DateTime?             @db.DateTime(0)
   ajournee_par_id                                        Int?                  @db.UnsignedInt

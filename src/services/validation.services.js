@@ -101,6 +101,112 @@ function buildCustomPaiementConditions({ total, tranches = [] }) {
   return out;
 }
 
+function buildDafValidationSummary(demande) {
+  if (!demande) return null;
+  return {
+    validation_oci: demande.validation_oci,
+    validation_oci_reponse: demande.validation_oci_reponse,
+    budget_prevu: demande.budget_prevu,
+    budget_prevu_reponse: demande.budget_prevu_reponse,
+    paiement_immediat: demande.paiement_immediat,
+    paiement_immediat_reponse: demande.paiement_immediat_reponse,
+    budget_disponible: demande.budget_disponible,
+    budget_disponible_reponse: demande.budget_disponible_reponse,
+    ligne_budgetaire_id: demande.ligne_budgetaire_id,
+    ligne_budgetaire_reponse: demande.ligne_budgetaire_reponse,
+    lignes_budgetaires: demande.lignes_budgetaires || null,
+    budget_depassement_montant: demande.budget_depassement_montant,
+    daf_critere4: demande.daf_critere4,
+    daf_controle_commentaires: demande.daf_controle_commentaires || null,
+  };
+}
+
+function withDgaDafValidationSummary(step) {
+  if (!step?.demandes_paiement) return step;
+  if (String(step.role_name || "").trim().toUpperCase() !== "DGA") return step;
+
+  return {
+    ...step,
+    demandes_paiement: {
+      ...step.demandes_paiement,
+      daf_validation_summary: buildDafValidationSummary(step.demandes_paiement),
+    },
+  };
+}
+
+const DAF_CONTROL_CONFIG = [
+  { key: "budget_prevu", responseKey: "budget_prevu_reponse", label: "Prevu au budget" },
+  { key: "budget_disponible", responseKey: "budget_disponible_reponse", label: "Budget disponible" },
+  { key: "paiement_immediat", responseKey: "paiement_immediat_reponse", label: "Paiement immediat" },
+  { key: "validation_oci", responseKey: "validation_oci_reponse", label: "Validation OCI" },
+  { key: "ligne_budgetaire", responseKey: "ligne_budgetaire_reponse", label: "Ligne budgetaire" },
+];
+
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeDafControlResponse(value, legacyValue = null) {
+  if (value == null || value === "") {
+    if (legacyValue === true) return "OUI";
+    if (legacyValue === false) return "NON";
+    return null;
+  }
+  if (value === true) return "OUI";
+  if (value === false) return "NON";
+  const v = String(value).trim().toUpperCase();
+  if (["OUI", "YES", "TRUE", "1"].includes(v)) return "OUI";
+  if (["NON", "NO", "FALSE", "0"].includes(v)) return "NON";
+  if (["NA", "N/A", "N.A", "N.A.", "N A", "NOT_APPLICABLE"].includes(v)) return "NA";
+  return null;
+}
+
+function booleanFromDafControlResponse(response) {
+  if (response === "OUI") return true;
+  if (response === "NON") return false;
+  return null;
+}
+
+function normalizeDafControlComments(payload = {}) {
+  const source = isPlainObject(payload.daf_controle_commentaires) ? payload.daf_controle_commentaires : {};
+  const out = {};
+  for (const item of DAF_CONTROL_CONFIG) {
+    const value = source[item.key] ?? payload[item.key + "_commentaire"];
+    const trimmed = value == null ? "" : String(value).trim();
+    if (trimmed) out[item.key] = trimmed;
+  }
+  return out;
+}
+
+function resolveDafControlState(payload = {}) {
+  const responses = {};
+  const booleans = {};
+
+  for (const item of DAF_CONTROL_CONFIG) {
+    const legacyValue =
+      item.key === "ligne_budgetaire"
+        ? payload.ligne_budgetaire_id != null && String(payload.ligne_budgetaire_id).trim() !== ""
+          ? true
+          : null
+        : payload[item.key];
+    const response = normalizeDafControlResponse(payload[item.responseKey], legacyValue);
+    if (!response) {
+      throw withStatusCode(new Error("Controle DAF incomplet: renseignez " + item.label + " (OUI, NON ou N/A)"), 400);
+    }
+    responses[item.key] = response;
+    if (item.key !== "ligne_budgetaire") booleans[item.key] = booleanFromDafControlResponse(response);
+  }
+
+  const comments = normalizeDafControlComments(payload);
+  for (const item of DAF_CONTROL_CONFIG) {
+    if (responses[item.key] === "NA" && !comments[item.key]) {
+      throw withStatusCode(new Error("Commentaire obligatoire si " + item.label + " = N/A"), 400);
+    }
+  }
+
+  return { responses, booleans, comments };
+}
+
 function computeTranchesPourcentageSum(total, tranches = []) {
   const totalNum = Number(total);
   let sum = 0;
@@ -443,7 +549,7 @@ async function getPendingForUser(userId) {
       : { validator_id: Number(agent.id) }),
   };
 
-  return prisma.validation_steps.findMany({
+  const steps = await prisma.validation_steps.findMany({
     where,
     include: {
       demandes_paiement: {
@@ -459,6 +565,8 @@ async function getPendingForUser(userId) {
     },
     orderBy: { id: "desc" },
   });
+
+  return steps.map(withDgaDafValidationSummary);
 }
 
 
@@ -518,19 +626,8 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       if (validation_stop_role != null && !validationStopRole) {
         throw withStatusCode(new Error("Categorie de validation invalide (attendu: DAF, DGA, DG)"), 400);
       }
-      if (
-        !isBoolean(budget_prevu) ||
-        !isBoolean(budget_disponible) ||
-        !isBoolean(paiement_immediat) ||
-        !isBoolean(validation_oci)
-      ) {
-        throw withStatusCode(
-          new Error(
-            "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat', 'validation_oci' (booleens)"
-          ),
-          400
-        );
-      }
+      const dafControl = resolveDafControlState(extra || {});
+      const ligneBudgetaireResponse = dafControl.responses.ligne_budgetaire;
 
       // Pour le 4e critere, on accepte maintenant une chaine (moyen de paiement) ou un booleen (legacy)
       const dafCritere4Value = normalizeDafCritere4(daf_critere4);
@@ -542,20 +639,22 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
       }
 
       const ligneBudgetaireId = Number(ligne_budgetaire_id);
-      if (!Number.isFinite(ligneBudgetaireId) || ligneBudgetaireId <= 0) {
-        throw withStatusCode(new Error("Ligne budgetaire requise pour la validation DAF"), 400);
+      if (ligneBudgetaireResponse === "OUI") {
+        if (!Number.isFinite(ligneBudgetaireId) || ligneBudgetaireId <= 0) {
+          throw withStatusCode(new Error("Ligne budgetaire requise pour la validation DAF"), 400);
+        }
+        const totalForBudget =
+          step?.demandes_paiement?.montant_net != null
+            ? step.demandes_paiement.montant_net
+            : step?.demandes_paiement?.montant;
+        await budgetLines.calculateBudgetWarning(ligneBudgetaireId, totalForBudget);
       }
-      const totalForBudget =
-        step?.demandes_paiement?.montant_net != null
-          ? step.demandes_paiement.montant_net
-          : step?.demandes_paiement?.montant;
-      await budgetLines.calculateBudgetWarning(ligneBudgetaireId, totalForBudget);
 
-      if (validation_oci === false && !commentaireTrimmed) {
+      if (dafControl.responses.validation_oci === "NON" && !commentaireTrimmed) {
         throw withStatusCode(new Error("Commentaire obligatoire si validation OCI = non"), 400);
       }
 
-      if (paiement_immediat === false) {
+      if (dafControl.responses.paiement_immediat === "NON") {
         if (!commentaireTrimmed) {
           throw withStatusCode(new Error("Commentaire obligatoire si paiement non immediat"), 400);
         }
@@ -574,26 +673,43 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
         }
       }
 
-      await budgetLines.assignLineToDemande(tx, {
-        demandeId: Number(step.demande_id),
-        ligneBudgetaireId,
-        actorAgentId: Number(agent.id),
-      });
+      if (ligneBudgetaireResponse === "OUI") {
+        await budgetLines.assignLineToDemande(tx, {
+          demandeId: Number(step.demande_id),
+          ligneBudgetaireId,
+          actorAgentId: Number(agent.id),
+        });
+      }
 
       await tx.demandes_paiement.update({
         where: { id: Number(step.demande_id) },
         data: {
-          budget_prevu: Boolean(budget_prevu),
-          budget_disponible: Boolean(budget_disponible),
-          paiement_immediat: Boolean(paiement_immediat),
-          validation_oci: Boolean(validation_oci),
+          budget_prevu: dafControl.booleans.budget_prevu,
+          budget_disponible: dafControl.booleans.budget_disponible,
+          paiement_immediat: dafControl.booleans.paiement_immediat,
+          validation_oci: dafControl.booleans.validation_oci,
+          budget_prevu_reponse: dafControl.responses.budget_prevu,
+          budget_disponible_reponse: dafControl.responses.budget_disponible,
+          paiement_immediat_reponse: dafControl.responses.paiement_immediat,
+          validation_oci_reponse: dafControl.responses.validation_oci,
+          ligne_budgetaire_reponse: ligneBudgetaireResponse,
+          daf_controle_commentaires: Object.keys(dafControl.comments).length ? dafControl.comments : null,
           daf_critere4: dafCritere4Value,
+          ...(ligneBudgetaireResponse === "OUI"
+            ? {}
+            : {
+                ligne_budgetaire_id: null,
+                ligne_budgetaire_assignee_par_id: null,
+                ligne_budgetaire_assignee_at: null,
+                budget_depassement_montant: null,
+                budget_warning_snapshot: null,
+              }),
           ...(validationStopRole ? { validation_stop_role: validationStopRole } : {}),
           updated_at: new Date(),
         },
       });
 
-      if (paiement_immediat === false) {
+      if (dafControl.responses.paiement_immediat === "NON") {
         const totalForConditions =
           step?.demandes_paiement?.montant_net != null
             ? step.demandes_paiement.montant_net
@@ -1254,7 +1370,7 @@ async function validationDone(userId) {
 }
 
 async function getByUuid(uuid) {
-  return prisma.validation_steps.findFirst({
+  const step = await prisma.validation_steps.findFirst({
     where: { uuid: String(uuid), demandes_paiement: { is: { deleted_at: null } } },
     include: {
       demandes_paiement: {
@@ -1269,6 +1385,8 @@ async function getByUuid(uuid) {
       agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
     },
   });
+
+  return withDgaDafValidationSummary(step);
 }
 
 async function validationHistory(userId, options = {}) {
@@ -1831,19 +1949,9 @@ async function startSignature(stepId, userId, payload = {}) {
     if (validation_stop_role != null && !validationStopRole) {
       throw withStatusCode(new Error("Categorie de validation invalide (attendu: DAF, DGA, DG)"), 400);
     }
-    if (
-      !isBoolean(budget_prevu) ||
-      !isBoolean(budget_disponible) ||
-      !isBoolean(paiement_immediat) ||
-      !isBoolean(validation_oci)
-    ) {
-      throw withStatusCode(
-        new Error(
-          "Controle DAF incomplet: renseignez 'budget_prevu', 'budget_disponible', 'paiement_immediat', 'validation_oci' (booleens)"
-        ),
-        400
-      );
-    }
+    const dafControl = resolveDafControlState(payload || {});
+    const ligneBudgetaireResponse = dafControl.responses.ligne_budgetaire;
+
     const dafCritere4Value = normalizeDafCritere4(daf_critere4);
     if (!dafCritere4Value) {
       throw withStatusCode(
@@ -1852,19 +1960,21 @@ async function startSignature(stepId, userId, payload = {}) {
       );
     }
     const ligneBudgetaireId = Number(ligne_budgetaire_id);
-    if (!Number.isFinite(ligneBudgetaireId) || ligneBudgetaireId <= 0) {
-      throw withStatusCode(new Error("Ligne budgetaire requise pour la validation DAF"), 400);
+    if (ligneBudgetaireResponse === "OUI") {
+      if (!Number.isFinite(ligneBudgetaireId) || ligneBudgetaireId <= 0) {
+        throw withStatusCode(new Error("Ligne budgetaire requise pour la validation DAF"), 400);
+      }
+      const totalForBudget =
+        step?.demandes_paiement?.montant_net != null
+          ? step.demandes_paiement.montant_net
+          : step?.demandes_paiement?.montant;
+      await budgetLines.calculateBudgetWarning(ligneBudgetaireId, totalForBudget);
     }
-    const totalForBudget =
-      step?.demandes_paiement?.montant_net != null
-        ? step.demandes_paiement.montant_net
-        : step?.demandes_paiement?.montant;
-    await budgetLines.calculateBudgetWarning(ligneBudgetaireId, totalForBudget);
 
-    if (validation_oci === false && !commentaireTrimmed) {
+    if (dafControl.responses.validation_oci === "NON" && !commentaireTrimmed) {
       throw withStatusCode(new Error("Commentaire obligatoire si validation OCI = non"), 400);
     }
-    if (paiement_immediat === false) {
+    if (dafControl.responses.paiement_immediat === "NON") {
       if (!commentaireTrimmed) {
         throw withStatusCode(new Error("Commentaire obligatoire si paiement non immediat"), 400);
       }
@@ -2123,5 +2233,9 @@ module.exports = {
   cancelStep,
   startSignature,
   completeSignature,
+  __testables: {
+    normalizeDafControlResponse,
+    resolveDafControlState,
+  },
 };
 

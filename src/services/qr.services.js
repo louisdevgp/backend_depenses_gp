@@ -122,7 +122,7 @@ function parseQrToken(token) {
   const [prefix, type, uuid, finalizedIso, sig] = parts;
   if (prefix !== "GP") return null;
   if (!type || !uuid || !finalizedIso || !sig) return null;
-  if (type !== "demande" && type !== "reception" && type !== "validation") return null;
+  if (type !== "demande" && type !== "demandeur" && type !== "reception" && type !== "validation") return null;
 
   const dt = new Date(finalizedIso);
   if (Number.isNaN(dt.getTime())) return null;
@@ -241,6 +241,70 @@ async function verifyToken({ token, user = null }) {
           }
         : { statut: demande.statut },
       approvals,
+      scope: showDetails ? "private" : "public",
+    };
+  }
+
+  if (parsed.type === "demandeur") {
+    const demande = await prisma.demandes_paiement.findFirst({
+      where: { uuid: parsed.uuid, deleted_at: null },
+      include: {
+        agents_demandes_paiement_demandeur_idToagents: {
+          include: { users: true, roles: true },
+        },
+        agents_demandes_paiement_created_by_idToagents: {
+          include: { users: true, roles: true },
+        },
+      },
+    });
+
+    if (!demande) {
+      return { valid: false, reason: "NOT_FOUND", type: parsed.type, uuid: parsed.uuid };
+    }
+
+    const createdIso = asIsoDateTime(demande.created_at) || "";
+    if (String(parsed.finalizedIso) !== String(createdIso)) {
+      return { valid: false, reason: "MISMATCH_CREATED_AT", type: parsed.type, uuid: parsed.uuid };
+    }
+
+    const showDetails = canViewDemandeDetails({ user, demande });
+    const demandeur = demande.agents_demandes_paiement_demandeur_idToagents || null;
+    const createdBy = demande.agents_demandes_paiement_created_by_idToagents || null;
+    const demandeurRole = demandeur?.roles?.name || "DEMANDEUR";
+
+    return {
+      valid: true,
+      type: parsed.type,
+      uuid: parsed.uuid,
+      isFinal: false,
+      finalizedAt: createdIso,
+      createdAt: createdIso,
+      ref: String(parsed.sig).slice(0, 16),
+      role: demandeurRole,
+      status: "soumis",
+      document: showDetails
+        ? {
+            motif: demande.motif,
+            montant: demande.montant,
+            beneficiaire: demande.beneficiaire,
+            statut: demande.statut,
+            created_at: createdIso,
+            demandeur: {
+              id: demande.demandeur_id,
+              nom: demandeur?.nom || null,
+              prenom: demandeur?.prenom || null,
+              email: demandeur?.users?.email || null,
+              role: demandeur?.roles?.name || null,
+            },
+            created_by: {
+              id: demande.created_by_id,
+              nom: createdBy?.nom || null,
+              prenom: createdBy?.prenom || null,
+              email: createdBy?.users?.email || null,
+              role: createdBy?.roles?.name || null,
+            },
+          }
+        : { statut: demande.statut, uuid: demande.uuid },
       scope: showDetails ? "private" : "public",
     };
   }
@@ -395,4 +459,7 @@ async function verifyToken({ token, user = null }) {
 
 module.exports = {
   verifyToken,
+  __testables: {
+    parseQrToken,
+  },
 };

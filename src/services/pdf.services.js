@@ -884,11 +884,25 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
     return null;
   };
 
-  const yesNoMarks = (value) => {
-    const b = parseBooleanLike(value);
-    if (b === true) return { oui: "X", non: "" };
-    if (b === false) return { oui: "", non: "X" };
-    return { oui: "", non: "" };
+  const normalizeDafResponse = (response, legacyValue = null) => {
+    if (response != null && response !== "") {
+      const v = String(response).trim().toUpperCase();
+      if (["OUI", "YES", "TRUE", "1"].includes(v)) return "OUI";
+      if (["NON", "NO", "FALSE", "0"].includes(v)) return "NON";
+      if (["NA", "N/A", "N.A", "N.A.", "N A", "NOT_APPLICABLE"].includes(v)) return "NA";
+    }
+    const b = parseBooleanLike(legacyValue);
+    if (b === true) return "OUI";
+    if (b === false) return "NON";
+    return null;
+  };
+
+  const yesNoNaMarks = (response, legacyValue = null) => {
+    const normalized = normalizeDafResponse(response, legacyValue);
+    if (normalized === "OUI") return { oui: "X", non: "", na: "" };
+    if (normalized === "NON") return { oui: "", non: "X", na: "" };
+    if (normalized === "NA") return { oui: "", non: "", na: "X" };
+    return { oui: "", non: "", na: "" };
   };
 
   const formatDafCritere4 = (value) => {
@@ -900,10 +914,11 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
     return { label, value: str || "-" };
   };
 
-  const bp = yesNoMarks(d.budget_prevu);
-  const bd = yesNoMarks(d.budget_disponible);
-  const pi = yesNoMarks(d.paiement_immediat);
-  const oci = yesNoMarks(d.validation_oci);
+  const bp = yesNoNaMarks(d.budget_prevu_reponse, d.budget_prevu);
+  const bd = yesNoNaMarks(d.budget_disponible_reponse, d.budget_disponible);
+  const pi = yesNoNaMarks(d.paiement_immediat_reponse, d.paiement_immediat);
+  const oci = yesNoNaMarks(d.validation_oci_reponse, d.validation_oci);
+  const lb = yesNoNaMarks(d.ligne_budgetaire_reponse, d.ligne_budgetaire_id ? true : null);
   const c4 = formatDafCritere4(d.daf_critere4);
 
   const montantBrut = Number(d.montant ?? 0);
@@ -937,12 +952,19 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
 
     budget_prevu_oui: bp.oui,
     budget_prevu_non: bp.non,
+    budget_prevu_na: bp.na,
     budget_disponible_oui: bd.oui,
     budget_disponible_non: bd.non,
+    budget_disponible_na: bd.na,
     paiement_immediat_oui: pi.oui,
     paiement_immediat_non: pi.non,
+    paiement_immediat_na: pi.na,
     validation_oci_oui: oci.oui,
     validation_oci_non: oci.non,
+    validation_oci_na: oci.na,
+    ligne_budgetaire_oui: lb.oui,
+    ligne_budgetaire_non: lb.non,
+    ligne_budgetaire_na: lb.na,
 
     daf_critere4_label: c4.label,
     daf_critere4_value: c4.value,
@@ -1066,7 +1088,6 @@ async function streamDemandePdfFromData(res, d, { forceFinal = false, forcedFina
       const qrBuf = await qrPngBuffer(qrText);
       return `data:image/png;base64,${qrBuf.toString("base64")}`;
     };
-
     const [directeurMoment, dafMoment, dgaMoment, dgMoment] = await Promise.all([
       directeur?.validated_by_id ? resolveSignatureMoment(directeur) : Promise.resolve(null),
       daf?.validated_by_id ? resolveSignatureMoment(daf) : Promise.resolve(null),

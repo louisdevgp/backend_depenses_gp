@@ -402,21 +402,70 @@ function canViewDafValidationFields(user, agent) {
   return hasPermission(user, P.DEMANDE_DAF_FIELDS_VIEW) || hasAnyRole(roles, ["ADMIN", "DAF"]);
 }
 
-function sanitizeDemandeForViewer(demande, user, agent) {
+function getPendingValidationStepFromDemande(demande) {
+  const steps = Array.isArray(demande?.validation_steps) ? demande.validation_steps : [];
+  return steps
+    .filter((step) => String(step?.status || "").toLowerCase() === "en_attente")
+    .sort((a, b) => (Number(a?.level) || 0) - (Number(b?.level) || 0))[0] || null;
+}
+
+function buildDafValidationSummary(demande) {
+  if (!demande) return null;
+  return {
+    budget_prevu: demande.budget_prevu,
+    budget_prevu_reponse: demande.budget_prevu_reponse,
+    budget_disponible: demande.budget_disponible,
+    budget_disponible_reponse: demande.budget_disponible_reponse,
+    paiement_immediat: demande.paiement_immediat,
+    paiement_immediat_reponse: demande.paiement_immediat_reponse,
+    validation_oci: demande.validation_oci,
+    validation_oci_reponse: demande.validation_oci_reponse,
+    ligne_budgetaire_id: demande.ligne_budgetaire_id,
+    ligne_budgetaire_reponse: demande.ligne_budgetaire_reponse,
+    lignes_budgetaires: demande.lignes_budgetaires || null,
+    budget_depassement_montant: demande.budget_depassement_montant,
+    daf_critere4: demande.daf_critere4,
+    daf_controle_commentaires: demande.daf_controle_commentaires || null,
+  };
+}
+
+async function canViewDafSummaryAsPendingDga(demande, user, agent) {
+  if (!demande || !agent?.id) return false;
+  if (!hasPermission(user, P.VALIDATION_APPROVE)) return false;
+
+  const pending = getPendingValidationStepFromDemande(demande);
+  if (normalizeRoleName(pending?.role_name) !== "DGA") return false;
+
+  return canEditAtDirectorStage({ user, demande, agent });
+}
+
+async function sanitizeDemandeForViewer(demande, user, agent) {
   if (!demande) return demande;
   if (canViewDafValidationFields(user, agent)) return demande;
+
+  const dafValidationSummary = (await canViewDafSummaryAsPendingDga(demande, user, agent))
+    ? buildDafValidationSummary(demande)
+    : null;
+
   return {
     ...demande,
+    daf_validation_summary: dafValidationSummary,
     budget_prevu: null,
+    budget_prevu_reponse: null,
     budget_disponible: null,
+    budget_disponible_reponse: null,
     paiement_immediat: null,
+    paiement_immediat_reponse: null,
     validation_oci: null,
+    validation_oci_reponse: null,
     ligne_budgetaire_id: null,
+    ligne_budgetaire_reponse: null,
     lignes_budgetaires: null,
     ligne_budgetaire_assignee_par_id: null,
     ligne_budgetaire_assignee_at: null,
     agents_demandes_paiement_ligne_budgetaire_assignee_par_idToagents: null,
     budget_depassement_montant: null,
+    daf_controle_commentaires: null,
   };
 }
 
@@ -1932,7 +1981,7 @@ exports.getOne = async (user, idOrUuid, options = {}) => {
     ...demande,
     return_workflow: returnWorkflow,
   };
-  return options?.sanitize === false ? result : sanitizeDemandeForViewer(result, user, agent);
+  return options?.sanitize === false ? result : await sanitizeDemandeForViewer(result, user, agent);
 };
 exports.update = async (user, idOrUuid, payload) => {
   const demande = await exports.getOne(user, idOrUuid, { sanitize: false });
