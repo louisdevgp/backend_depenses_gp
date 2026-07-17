@@ -103,7 +103,14 @@ function buildCustomPaiementConditions({ total, tranches = [] }) {
 
 function buildDafValidationSummary(demande) {
   if (!demande) return null;
+  const dafStep = (Array.isArray(demande.validation_steps) ? demande.validation_steps : []).find(
+    (step) =>
+      String(step?.role_name || "").trim().toUpperCase() === "DAF" &&
+      (step?.validated_by_id != null || step?.validated_at)
+  );
+  const dafValidatedBy = dafStep?.agents_validation_steps_validated_by_idToagents || null;
   return {
+    motif: demande.motif || null,
     validation_oci: demande.validation_oci,
     validation_oci_reponse: demande.validation_oci_reponse,
     budget_prevu: demande.budget_prevu,
@@ -118,6 +125,8 @@ function buildDafValidationSummary(demande) {
     budget_depassement_montant: demande.budget_depassement_montant,
     daf_critere4: demande.daf_critere4,
     daf_controle_commentaires: demande.daf_controle_commentaires || null,
+    daf_validated_by_name: dafValidatedBy ? agentDisplayName(dafValidatedBy) : null,
+    daf_validated_at: dafStep?.validated_at || null,
   };
 }
 
@@ -557,6 +566,12 @@ async function getPendingForUser(userId) {
           documents: true,
           conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
           lignes_budgetaires: true,
+          validation_steps: {
+            orderBy: { level: "asc" },
+            include: {
+              agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
+            },
+          },
           agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
       },
@@ -1378,6 +1393,12 @@ async function getByUuid(uuid) {
           documents: true,
           conditions_paiement: { where: { source: "DEMANDEUR" }, orderBy: { id: "asc" } },
           lignes_budgetaires: true,
+          validation_steps: {
+            orderBy: { level: "asc" },
+            include: {
+              agents_validation_steps_validated_by_idToagents: { include: { users: { select: { email: true } } } },
+            },
+          },
           agents_demandes_paiement_demandeur_idToagents: { include: { users: true } },
         },
       },

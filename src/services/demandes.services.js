@@ -411,7 +411,14 @@ function getPendingValidationStepFromDemande(demande) {
 
 function buildDafValidationSummary(demande) {
   if (!demande) return null;
+  const dafStep = (Array.isArray(demande.validation_steps) ? demande.validation_steps : []).find(
+    (step) =>
+      String(step?.role_name || "").trim().toUpperCase() === "DAF" &&
+      (step?.validated_by_id != null || step?.validated_at)
+  );
+  const dafValidatedBy = dafStep?.agents_validation_steps_validated_by_idToagents || null;
   return {
+    motif: demande.motif || null,
     budget_prevu: demande.budget_prevu,
     budget_prevu_reponse: demande.budget_prevu_reponse,
     budget_disponible: demande.budget_disponible,
@@ -426,6 +433,8 @@ function buildDafValidationSummary(demande) {
     budget_depassement_montant: demande.budget_depassement_montant,
     daf_critere4: demande.daf_critere4,
     daf_controle_commentaires: demande.daf_controle_commentaires || null,
+    daf_validated_by_name: dafValidatedBy ? agentDisplayName(dafValidatedBy) : null,
+    daf_validated_at: dafStep?.validated_at || null,
   };
 }
 
