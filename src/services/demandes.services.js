@@ -1997,6 +1997,7 @@ exports.update = async (user, idOrUuid, payload) => {
 
   const {
     canEditAsDirector = false,
+    isOwner = false,
     agent: actorAgent,
   } = await assertCanEditDemande({
     user,
@@ -2005,17 +2006,21 @@ exports.update = async (user, idOrUuid, payload) => {
     allowDirectorStage: true,
   });
 
-  const anyValidated = await prisma.validation_steps.count({
-    where: { demande_id: demande.id, status: { in: ["valide", "rejete", "rejetee", "rejete"] } },
+  const validationActions = await prisma.validation_steps.count({
+    where: {
+      demande_id: demande.id,
+      status: { in: ["valide", "rejete", "rejetee", "retour_modification", "a_modifier"] },
+    },
   });
 
   const statut = String(demande.statut || "").toLowerCase();
   const isEditableStage = statut === "a_modifier";
+  const ownerCanEditBeforeValidation = isOwner && validationActions === 0;
 
-  if (!isEditableStage && !canEditAsDirector) {
+  if (!isEditableStage && !canEditAsDirector && !ownerCanEditBeforeValidation) {
     throw withStatusCode(new Error("Demande verrouillee (soumise)"), 409);
   }
-  if (statut !== "a_modifier" && anyValidated > 0 && !canEditAsDirector) {
+  if (statut !== "a_modifier" && validationActions > 0 && !canEditAsDirector) {
     throw withStatusCode(new Error("Demande verrouillee (engagee)"), 409);
   }
 

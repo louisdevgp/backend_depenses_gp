@@ -92,7 +92,7 @@ router.get(
 router.put(
   "/:idOrUuid",
   auth,
-  requirePermission([P.DEMANDE_UPDATE, P.VALIDATION_APPROVE]),
+  requirePermission([P.DEMANDE_UPDATE, P.DEMANDE_CREATE, P.VALIDATION_APPROVE]),
   ctrl.update
 );
 router.delete(
