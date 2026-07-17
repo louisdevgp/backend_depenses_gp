@@ -92,6 +92,27 @@ function defaultScopesFromAgent(agent) {
   return [{ type: "GLOBAL", id: null }];
 }
 
+function hasOrgScope(scopes) {
+  return (Array.isArray(scopes) ? scopes : []).some((s) => {
+    const type = normalizeScopeType(s?.type || s?.scope_type);
+    const id = normalizeScopeId(s?.id ?? s?.scope_id);
+    return type && type !== "GLOBAL" && id != null;
+  });
+}
+
+function coerceUserScopes(scopes, fallbackScopes) {
+  const list = Array.isArray(scopes) && scopes.length ? scopes : fallbackScopes;
+  const orgScopes = list.filter((s) => {
+    const type = normalizeScopeType(s?.type || s?.scope_type);
+    const id = normalizeScopeId(s?.id ?? s?.scope_id);
+    return type && type !== "GLOBAL" && id != null;
+  });
+
+  if (orgScopes.length) return orgScopes;
+  if (hasOrgScope(fallbackScopes)) return fallbackScopes;
+  return list;
+}
+
 async function defaultScopesForUser(userId) {
   const agent = await prisma.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
@@ -102,6 +123,7 @@ async function defaultScopesForUser(userId) {
 }
 
 exports.__testables = {
+  coerceUserScopes,
   defaultScopesFromAgent,
   normalizeScopePayload,
 };
@@ -287,7 +309,7 @@ exports.getUserPermissionOverrides = async (userId) => {
       codeToScopes.set(code, list);
     }
     for (const code of allowCodes) {
-      scopes[code] = codeToScopes.get(code) || fallbackScopes;
+      scopes[code] = coerceUserScopes(codeToScopes.get(code), fallbackScopes);
     }
   }
 
@@ -397,7 +419,7 @@ exports.setUserPermissionOverrides = async (userId, payload = {}) => {
       const code = allowedIdToCode.get(pid);
       if (!code) continue;
       const desired = scopePayload[code];
-      const scopes = Array.isArray(desired) && desired.length ? desired : fallbackScopes;
+      const scopes = coerceUserScopes(desired, fallbackScopes);
       for (const s of scopes) {
         const normalized = {
           permission_id: pid,

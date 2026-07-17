@@ -35,6 +35,21 @@ function normalizeScopeId(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function defaultScopesFromAgent(agent) {
+  if (agent?.direction_id) return [{ type: "DIRECTION", id: Number(agent.direction_id) }];
+  if (agent?.departement_id) return [{ type: "DEPARTEMENT", id: Number(agent.departement_id) }];
+  if (agent?.service_id) return [{ type: "SERVICE", id: Number(agent.service_id) }];
+  return [DEFAULT_SCOPE];
+}
+
+function hasOrgScope(scopes = []) {
+  return (Array.isArray(scopes) ? scopes : []).some((s) => {
+    const type = normalizeScopeType(s?.type || s?.scope_type);
+    const id = normalizeScopeId(s?.id ?? s?.scope_id);
+    return type && type !== "GLOBAL" && id != null;
+  });
+}
+
 function parseDelegationScope(scopeRaw) {
   if (scopeRaw == null) return DEFAULT_SCOPE;
   const s = String(scopeRaw).trim();
@@ -141,7 +156,13 @@ async function getUserPermissionProfile({ prisma, userId }) {
     }),
     prisma.agents.findFirst({
       where: { user_id: id, deleted_at: null },
-      select: { id: true, roles: { select: { name: true } } },
+      select: {
+        id: true,
+        direction_id: true,
+        departement_id: true,
+        service_id: true,
+        roles: { select: { name: true } },
+      },
     }),
   ]);
 
@@ -243,6 +264,8 @@ async function getUserPermissionProfile({ prisma, userId }) {
   );
 
   const scopesMap = new Map();
+  const fallbackUserScopes = defaultScopesFromAgent(agent);
+  const forceAgentScopeForUserOverrides = hasOrgScope(fallbackUserScopes);
   if (allowedPermIds.length) {
     const scopeRows = await prisma.user_permission_scopes.findMany({
       where: {
@@ -256,7 +279,14 @@ async function getUserPermissionProfile({ prisma, userId }) {
     for (const row of scopeRows) {
       const code = idToCode.get(row.permission_id);
       if (!code) continue;
-      addScopeToMap(scopesMap, code, { type: row.scope_type, id: row.scope_id });
+      const scope = { type: row.scope_type, id: row.scope_id };
+      if (forceAgentScopeForUserOverrides && normalizeScopeType(scope.type) === "GLOBAL") {
+        for (const fallbackScope of fallbackUserScopes) {
+          addScopeToMap(scopesMap, code, fallbackScope);
+        }
+      } else {
+        addScopeToMap(scopesMap, code, scope);
+      }
     }
   }
 
@@ -292,6 +322,7 @@ module.exports = {
   normalizePermissionCode,
   normalizeScopeType,
   normalizeScopeId,
+  defaultScopesFromAgent,
   getUserPermissionProfile,
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,

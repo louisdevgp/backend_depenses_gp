@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 
 const { __testables } = require("./permissions.services");
 
-const { defaultScopesFromAgent, normalizeScopePayload } = __testables;
+const { coerceUserScopes, defaultScopesFromAgent, normalizeScopePayload } = __testables;
 
 test("defaultScopesFromAgent privilegie la direction de l'agent", () => {
   assert.deepEqual(
@@ -31,5 +31,25 @@ test("normalizeScopePayload ignore les portees organisationnelles sans id", () =
         { type: "DIRECTION", id: 4 },
       ],
     }
+  );
+});
+
+test("coerceUserScopes remplace global par la portee agent quand elle existe", () => {
+  assert.deepEqual(
+    coerceUserScopes([{ type: "GLOBAL", id: null }], [{ type: "DIRECTION", id: 4 }]),
+    [{ type: "DIRECTION", id: 4 }]
+  );
+});
+
+test("coerceUserScopes privilegie les portees organisationnelles envoyees", () => {
+  assert.deepEqual(
+    coerceUserScopes(
+      [
+        { type: "GLOBAL", id: null },
+        { type: "DIRECTION", id: 6 },
+      ],
+      [{ type: "DIRECTION", id: 4 }]
+    ),
+    [{ type: "DIRECTION", id: 6 }]
   );
 });
