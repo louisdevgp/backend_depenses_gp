@@ -5,6 +5,14 @@ const ROLE_IMPLICATIONS = {
   DGA: ["DIRECTEUR"],
   DAF: ["DIRECTEUR"],
 };
+const GLOBAL_DEFAULT_ROLES = new Set(["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"]);
+const SCOPED_DEFAULT_ROLES = new Set([
+  "DEMANDEUR",
+  "ASSISTANTE_TECHNIQUE",
+  "RESPONSABLE",
+  "DIRECTEUR",
+  "ACHETEUR",
+]);
 
 function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
@@ -81,11 +89,29 @@ function addScopeToMap(map, code, scope) {
   map.set(code, list);
 }
 
-function ensureDefaultScopes(allowedCodes, map) {
+function shouldUseAgentScopeByDefault({ code, codeToRoles, allowSet, fallbackScopes }) {
+  if (!hasOrgScope(fallbackScopes)) return false;
+
+  const roles = Array.from(codeToRoles?.get(code) || []);
+  if (roles.some((role) => GLOBAL_DEFAULT_ROLES.has(normalizeRoleName(role)))) return false;
+  if (roles.some((role) => SCOPED_DEFAULT_ROLES.has(normalizeRoleName(role)))) return true;
+
+  return Boolean(allowSet?.has(code));
+}
+
+function defaultScopesForAllowedCode({ code, codeToRoles, allowSet, fallbackScopes }) {
+  if (shouldUseAgentScopeByDefault({ code, codeToRoles, allowSet, fallbackScopes })) {
+    return fallbackScopes;
+  }
+  return [DEFAULT_SCOPE];
+}
+
+function ensureDefaultScopes(allowedCodes, map, { defaultScopesByCode } = {}) {
   for (const code of allowedCodes) {
     const list = map.get(code);
     if (!list || !list.length) {
-      map.set(code, [DEFAULT_SCOPE]);
+      const defaults = defaultScopesByCode?.get(code) || [DEFAULT_SCOPE];
+      map.set(code, defaults.map((scope) => ({ ...scope })));
     }
   }
 }
@@ -235,6 +261,7 @@ async function getUserPermissionProfile({ prisma, userId }) {
 
   const roleAllowed = new Set();
   const roleToCodes = new Map();
+  const codeToRoles = new Map();
   for (const row of rolePermRows) {
     const code = idToCode.get(row.permission_id);
     if (!code) continue;
@@ -244,6 +271,9 @@ async function getUserPermissionProfile({ prisma, userId }) {
     const list = roleToCodes.get(roleName) || new Set();
     list.add(code);
     roleToCodes.set(roleName, list);
+    const rolesForCode = codeToRoles.get(code) || new Set();
+    rolesForCode.add(roleName);
+    codeToRoles.set(code, rolesForCode);
   }
 
   const allowSet = new Set();
@@ -265,7 +295,13 @@ async function getUserPermissionProfile({ prisma, userId }) {
 
   const scopesMap = new Map();
   const fallbackUserScopes = defaultScopesFromAgent(agent);
-  const forceAgentScopeForUserOverrides = hasOrgScope(fallbackUserScopes);
+  const defaultScopesByCode = new Map();
+  for (const code of allowedCodes) {
+    defaultScopesByCode.set(
+      code,
+      defaultScopesForAllowedCode({ code, codeToRoles, allowSet, fallbackScopes: fallbackUserScopes })
+    );
+  }
   if (allowedPermIds.length) {
     const scopeRows = await prisma.user_permission_scopes.findMany({
       where: {
@@ -280,7 +316,10 @@ async function getUserPermissionProfile({ prisma, userId }) {
       const code = idToCode.get(row.permission_id);
       if (!code) continue;
       const scope = { type: row.scope_type, id: row.scope_id };
-      if (forceAgentScopeForUserOverrides && normalizeScopeType(scope.type) === "GLOBAL") {
+      if (
+        shouldUseAgentScopeByDefault({ code, codeToRoles, allowSet, fallbackScopes: fallbackUserScopes }) &&
+        normalizeScopeType(scope.type) === "GLOBAL"
+      ) {
         for (const fallbackScope of fallbackUserScopes) {
           addScopeToMap(scopesMap, code, fallbackScope);
         }
@@ -307,7 +346,7 @@ async function getUserPermissionProfile({ prisma, userId }) {
     }
   }
 
-  ensureDefaultScopes(allowedCodes, scopesMap);
+  ensureDefaultScopes(allowedCodes, scopesMap, { defaultScopesByCode });
 
   return {
     allowedCodes,
@@ -323,6 +362,7 @@ module.exports = {
   normalizeScopeType,
   normalizeScopeId,
   defaultScopesFromAgent,
+  defaultScopesForAllowedCode,
   getUserPermissionProfile,
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,

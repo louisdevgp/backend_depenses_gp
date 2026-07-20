@@ -12,6 +12,7 @@ const {
   normalizePermissionCode,
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,
+  defaultScopesFromAgent,
 } = require("../utils/permissionScopes");
 const {
   findReturnStep,
@@ -619,6 +620,8 @@ async function canAssignAcheteurForDemande({ user, agent, demande }) {
 
 function buildDemandeAccessWhere({ user, agent }) {
   const filters = [];
+  const roles = userEffectiveRoles(user, agent);
+  const canUseGlobalListScope = hasAnyRole(roles, ["ADMIN", "DG", "DGA", "DAF", "COMPTABLE", "CAISSE"]);
 
   const listScopes = [];
   if (hasPermission(user, "DEMANDE_LIST")) {
@@ -631,9 +634,11 @@ function buildDemandeAccessWhere({ user, agent }) {
   if (listScopes.length) {
     const scopeWhere = buildOrgScopeWhere(listScopes);
     if (scopeWhere === null) {
-      return null; // global access
-    }
-    if (scopeWhere) {
+      if (canUseGlobalListScope) return null; // global access
+      const fallbackWhere = buildOrgScopeWhere(defaultScopesFromAgent(agent));
+      if (fallbackWhere === null) return { id: -1 };
+      if (fallbackWhere) filters.push(fallbackWhere);
+    } else if (scopeWhere) {
       filters.push(scopeWhere);
     }
   }
