@@ -13,8 +13,17 @@ async function getActorAgentId(user) {
 
 exports.list = async (req, res) => {
   try {
-    const data = await service.listBudgetLines(req.query || {});
-    return res.json({ success: true, data });
+    const result = await service.listBudgetLines(req.query || {});
+    if (result && Array.isArray(result.items)) {
+      return res.json({
+        success: true,
+        data: result.items,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+      });
+    }
+    return res.json({ success: true, data: result });
   } catch (e) {
     return res.status(e.statusCode || 500).json({ success: false, message: e.message });
   }

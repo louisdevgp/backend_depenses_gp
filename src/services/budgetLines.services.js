@@ -35,6 +35,16 @@ function normalizeMois(value, fallback = new Date().getMonth() + 1) {
   return fallback;
 }
 
+function parsePagination(query = {}) {
+  const hasPagination = query.page !== undefined || query.limit !== undefined || query.pageSize !== undefined;
+  if (!hasPagination) return null;
+
+  const page = Math.max(1, Number(query.page || 1));
+  const rawLimit = Number(query.limit || query.pageSize || 20);
+  const limit = Math.min(100, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 20));
+  return { page, limit, skip: (page - 1) * limit };
+}
+
 function nextPeriod(exercice, mois) {
   const currentYear = Number(exercice) || new Date().getFullYear();
   const currentMonth = normalizeMois(mois, new Date().getMonth() + 1);
@@ -146,6 +156,7 @@ async function findLine(client, idOrUuid, extraWhere = {}) {
 
 async function listBudgetLines(query = {}) {
   const where = { deleted_at: null };
+  const pagination = parsePagination(query);
   if (query.exercice) where.exercice = Number(query.exercice);
   if (query.mois) where.mois = normalizeMois(query.mois, 0);
   if (query.statut) where.statut = normalizeStatut(query.statut);
@@ -157,14 +168,36 @@ async function listBudgetLines(query = {}) {
     where.OR = [{ code: { contains: q } }, { libelle: { contains: q } }];
   }
 
-  const rows = await prisma.lignes_budgetaires.findMany({
+  const findArgs = {
     where,
     orderBy: [{ exercice: "desc" }, { mois: "desc" }, { code: "asc" }],
     include: {
       agents_lignes_budgetaires_created_by_idToagents: { include: { users: true } },
       agents_lignes_budgetaires_updated_by_idToagents: { include: { users: true } },
     },
-  });
+  };
+
+  if (pagination) {
+    findArgs.skip = pagination.skip;
+    findArgs.take = pagination.limit;
+  }
+
+  const [total, rows] = pagination
+    ? await Promise.all([
+        prisma.lignes_budgetaires.count({ where }),
+        prisma.lignes_budgetaires.findMany(findArgs),
+      ])
+    : [null, await prisma.lignes_budgetaires.findMany(findArgs)];
+
+  if (pagination) {
+    return {
+      items: rows.map(decorateLine),
+      total,
+      page: pagination.page,
+      limit: pagination.limit,
+    };
+  }
+
   return rows.map(decorateLine);
 }
 
