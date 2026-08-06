@@ -7,6 +7,7 @@ const P = require("../constants/permissions");
 router.get("/", auth, requirePermission(P.BUDGET_LINE_LIST), ctrl.list);
 router.get("/preview", auth, requirePermission(P.BUDGET_LINE_USE), ctrl.preview);
 router.post("/", auth, requirePermission(P.BUDGET_LINE_CREATE), ctrl.create);
+router.post("/renew", auth, requirePermission(P.BUDGET_LINE_CREATE), ctrl.renewBulk);
 router.get("/:idOrUuid", auth, requirePermission(P.BUDGET_LINE_GET), ctrl.getOne);
 router.post("/:idOrUuid/renew", auth, requirePermission(P.BUDGET_LINE_CREATE), ctrl.renew);
 router.put("/:idOrUuid", auth, requirePermission(P.BUDGET_LINE_UPDATE), ctrl.update);

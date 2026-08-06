@@ -71,6 +71,21 @@ exports.renew = async (req, res) => {
   }
 };
 
+exports.renewBulk = async (req, res) => {
+  try {
+    const actorAgentId = await getActorAgentId(req.user);
+    if (!actorAgentId) return res.status(400).json({ success: false, message: "Agent introuvable" });
+    const data = await service.renewBudgetLinesBulk(req.body || {}, actorAgentId);
+    return res.status(201).json({
+      success: true,
+      data,
+      message: `${data.created.length} ligne(s) reconduite(s)`,
+    });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
+  }
+};
+
 exports.remove = async (req, res) => {
   try {
     const actorAgentId = await getActorAgentId(req.user);

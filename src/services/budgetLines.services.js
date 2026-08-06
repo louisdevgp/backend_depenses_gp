@@ -154,6 +154,12 @@ async function findLine(client, idOrUuid, extraWhere = {}) {
   return client.lignes_budgetaires.findFirst({ where });
 }
 
+function normalizeBulkRenewIds(payload = {}) {
+  const raw = payload.ids || payload.line_ids || payload.ligne_budgetaire_ids || [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  return Array.from(new Set(list.map((id) => String(id || "").trim()).filter(Boolean)));
+}
+
 async function listBudgetLines(query = {}) {
   const where = { deleted_at: null };
   const pagination = parsePagination(query);
@@ -347,6 +353,34 @@ async function renewBudgetLine(idOrUuid, payload = {}, actorAgentId) {
     },
   });
   return decorateLine(line);
+}
+
+async function renewBudgetLinesBulk(payload = {}, actorAgentId) {
+  await ensureDafAgent(prisma, actorAgentId);
+  const ids = normalizeBulkRenewIds(payload);
+  if (!ids.length) throw withStatusCode(new Error("Selectionnez au moins une ligne budgetaire"), 400);
+  if (ids.length > 200) throw withStatusCode(new Error("Trop de lignes selectionnees"), 400);
+
+  const created = [];
+  const skipped = [];
+  const errors = [];
+  const sharedPayload = { ...(payload || {}) };
+  delete sharedPayload.ids;
+  delete sharedPayload.line_ids;
+  delete sharedPayload.ligne_budgetaire_ids;
+
+  for (const idOrUuid of ids) {
+    try {
+      const line = await renewBudgetLine(idOrUuid, sharedPayload, actorAgentId);
+      created.push(line);
+    } catch (err) {
+      const item = { id: idOrUuid, message: err?.message || "Erreur reconduction" };
+      if (Number(err?.statusCode) === 409) skipped.push(item);
+      else errors.push(item);
+    }
+  }
+
+  return { requested: ids.length, created, skipped, errors };
 }
 
 async function deleteBudgetLine(idOrUuid, actorAgentId) {
@@ -585,6 +619,7 @@ module.exports = {
   createBudgetLine,
   updateBudgetLine,
   renewBudgetLine,
+  renewBudgetLinesBulk,
   deleteBudgetLine,
   calculateBudgetWarning,
   assignLineToDemande,

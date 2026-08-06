@@ -7,6 +7,7 @@ const firma = require("./firma.services");
 const signaturePdfTemplate = require("./signaturePdfTemplate");
 const budgetLines = require("./budgetLines.services");
 const { resolveDirectionDirectorAgent, resolveReturnTarget } = require("../utils/returnWorkflow");
+const { expandRoles } = require("../utils/permissionScopes");
 
 function withStatusCode(err, statusCode) {
   err.statusCode = Number(statusCode);
@@ -472,6 +473,12 @@ async function getAgentFromUserId(userId) {
   });
 }
 
+function delegationRoleCoversStep(delegationRole, stepRole) {
+  const targetRole = String(stepRole || "").trim().toUpperCase();
+  if (!targetRole) return false;
+  return expandRoles([delegationRole]).includes(targetRole);
+}
+
 async function canActByDelegation(tx, step, agent) {
   // agent peut agir si:
   // - il est validator_id
@@ -486,20 +493,19 @@ async function canActByDelegation(tx, step, agent) {
   const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
 
   const now = new Date();
-  const delegation = await tx.delegations.findFirst({
+  const delegations = await tx.delegations.findMany({
     where: {
       principal_id: Number(step.validator_id),
       delegate_id: Number(agent.id),
       is_active: true,
       start_at: { lte: now },
       end_at: { gte: now },
-      role_name: step.role_name,
       OR: [{ scope: null }, { scope: { in: candidateScopes } }],
     },
-    select: { id: true },
+    select: { id: true, role_name: true },
   });
 
-  return !!delegation;
+  return delegations.some((d) => delegationRoleCoversStep(d.role_name, step.role_name));
 }
 
 async function setDemandeStageFromCurrentStep(tx, demandeId) {
@@ -543,11 +549,13 @@ async function getPendingForUser(userId) {
 
   const delegatedOr = dels
     .filter((d) => d?.principal_id && d?.role_name)
-    .map((d) => {
-      const base = { validator_id: Number(d.principal_id), role_name: String(d.role_name) };
+    .flatMap((d) => {
       const scopeWhere = demandeWhereForScope(d.scope);
-      if (!scopeWhere) return base;
-      return { ...base, demandes_paiement: { is: scopeWhere } };
+      return expandRoles([d.role_name]).map((roleName) => {
+        const base = { validator_id: Number(d.principal_id), role_name: roleName };
+        if (!scopeWhere) return base;
+        return { ...base, demandes_paiement: { is: scopeWhere } };
+      });
     });
 
   const where = {
@@ -960,13 +968,19 @@ async function approveStep(stepId, userId, commentaire, signatureDataUrl = null,
           is_active: true,
           start_at: { lte: now },
           end_at: { gte: now },
-          role_name: String(result.nextRole),
           OR: [{ scope: null }, { scope: { in: candidateScopes } }],
         },
-        select: { delegate_id: true },
+        select: { delegate_id: true, role_name: true },
       });
 
-      const delegateIds = Array.from(new Set(delegates.map((d) => d.delegate_id).filter(Boolean)));
+      const delegateIds = Array.from(
+        new Set(
+          delegates
+            .filter((d) => delegationRoleCoversStep(d.role_name, result.nextRole))
+            .map((d) => d.delegate_id)
+            .filter(Boolean)
+        )
+      );
       if (delegateIds.length > 0) {
         const delegateAgents = await prisma.agents.findMany({
           where: { id: { in: delegateIds } },
