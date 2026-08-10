@@ -3,6 +3,7 @@ const prisma = new PrismaClient();
 const notifications = require("../services/notifications.services");
 const { randomUUID: uuidv4 } = require("crypto");
 const { canManageDelegation } = require("../utils/delegationPermissions.utils");
+const { defaultDelegationScopeForRole } = require("../utils/delegationScope.utils");
 
 // Delegations are allowed for business roles, except ADMIN.
 const DELEGABLE_ROLES = new Set([
@@ -50,14 +51,6 @@ async function getAgentOrg(agentId) {
     where: { id: Number(agentId) },
     select: { id: true, direction_id: true, departement_id: true, service_id: true },
   });
-}
-
-function computeDefaultScopeFromPrincipalOrg(principalOrg) {
-  if (!principalOrg) return "GLOBAL";
-  if (principalOrg.service_id) return `SERVICE:${Number(principalOrg.service_id)}`;
-  if (principalOrg.departement_id) return `DEPARTEMENT:${Number(principalOrg.departement_id)}`;
-  if (principalOrg.direction_id) return `DIRECTION:${Number(principalOrg.direction_id)}`;
-  return "GLOBAL";
 }
 
 function validateScopeAgainstPrincipalOrg(scopeParsed, principalOrg) {
@@ -412,7 +405,7 @@ exports.create = async (req, res) => {
   if (!scopeCheck.ok) {
     return res.status(400).json({ success: false, message: scopeCheck.message || "Portée invalide" });
   }
-  const scopeFinal = parsedScope?.normalized || computeDefaultScopeFromPrincipalOrg(principalOrg);
+  const scopeFinal = parsedScope?.normalized || defaultDelegationScopeForRole(principalRole, principalOrg);
 
   const created_by_id = actorAgentId || principal_id;
 
@@ -551,7 +544,7 @@ exports.update = async (req, res) => {
     if (!scopeCheck.ok) {
       return res.status(400).json({ success: false, message: scopeCheck.message || "Portée invalide" });
     }
-    data.scope = parsedScope?.normalized || computeDefaultScopeFromPrincipalOrg(principalOrg);
+    data.scope = parsedScope?.normalized || defaultDelegationScopeForRole(principalRole, principalOrg);
   }
 
   const row = await prisma.delegations.update({

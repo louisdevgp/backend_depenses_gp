@@ -2,10 +2,30 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  defaultDelegationScopeForRole,
   candidateScopesForOrg,
   delegationScopeCoversAgent,
   delegationScopeCoversOrg,
 } = require("./delegationScope.utils");
+
+test("les roles centraux utilisent une portee globale par defaut", () => {
+  const org = { direction_id: 3, departement_id: 2, service_id: 1 };
+
+  assert.equal(defaultDelegationScopeForRole("DAF", org), "GLOBAL");
+  assert.equal(defaultDelegationScopeForRole("DGA", org), "GLOBAL");
+  assert.equal(defaultDelegationScopeForRole("DG", org), "GLOBAL");
+});
+
+test("les autres roles utilisent la portee organisationnelle la plus precise", () => {
+  assert.equal(
+    defaultDelegationScopeForRole("DIRECTEUR", { direction_id: 4 }),
+    "DIRECTION:4"
+  );
+  assert.equal(
+    defaultDelegationScopeForRole("RESPONSABLE", { direction_id: 4, departement_id: 8 }),
+    "DEPARTEMENT:8"
+  );
+});
 
 test("candidateScopesForOrg produit les portees attendues", () => {
   assert.deepEqual(candidateScopesForOrg({
