@@ -1,6 +1,6 @@
 const prisma = require("../config/prisma");
 const P = require("../constants/permissions");
-const { getUserPermissionProfile, normalizePermissionCode } = require("../utils/permissionScopes");
+const { getUserPermissionProfile, normalizePermissionCode, expandRoles } = require("../utils/permissionScopes");
 
 function toNumber(v) {
   if (v == null) return 0;
@@ -409,7 +409,12 @@ async function dashboard(userId, query = {}) {
 
     const delegatedOr = dels
       .filter((d) => d?.principal_id && d?.role_name)
-      .map((d) => ({ validator_id: Number(d.principal_id), role_name: String(d.role_name) }));
+      .flatMap((d) =>
+        expandRoles([d.role_name]).map((roleName) => ({
+          validator_id: Number(d.principal_id),
+          role_name: roleName,
+        }))
+      );
 
     const where = {
       status: "en_attente",

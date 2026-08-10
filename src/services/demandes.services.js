@@ -13,6 +13,7 @@ const {
   getScopesForPermissionFromUser,
   buildOrgScopeWhere,
   defaultScopesFromAgent,
+  expandRoles,
 } = require("../utils/permissionScopes");
 const {
   findReturnStep,
@@ -251,6 +252,35 @@ function normalizeRoleName(role) {
   return String(role || "").trim().toUpperCase();
 }
 
+function delegatedRoleCoversStep(delegationRole, stepRole) {
+  const target = normalizeRoleName(stepRole);
+  if (!target) return false;
+  return expandRoles([delegationRole]).includes(target);
+}
+
+async function findCoveringDelegation({ client = prisma, delegateId, principalId = null, stepRole, candidateScopes = ["GLOBAL"] }) {
+  const target = normalizeRoleName(stepRole);
+  const delegate = Number(delegateId);
+  if (!Number.isFinite(delegate) || !target) return null;
+
+  const now = new Date();
+  const where = {
+    delegate_id: delegate,
+    is_active: true,
+    start_at: { lte: now },
+    end_at: { gte: now },
+    OR: [{ scope: null }, { scope: { in: candidateScopes } }],
+    ...(principalId != null ? { principal_id: Number(principalId) } : {}),
+  };
+
+  const delegations = await client.delegations.findMany({
+    where,
+    select: { id: true, role_name: true },
+  });
+
+  return delegations.find((d) => delegatedRoleCoversStep(d.role_name, target)) || null;
+}
+
 function hasRoleNamed({ agent, userRoles = [] }, roleName) {
   const target = normalizeRoleName(roleName);
   if (!target) return false;
@@ -348,20 +378,13 @@ async function canEditAtDirectorStage({ user, demande, agent }) {
     service_id: demande.service_id ?? null,
   };
   const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
-  const now = new Date();
 
   if (pending.validator_id) {
-    const delegation = await prisma.delegations.findFirst({
-      where: {
-        principal_id: Number(pending.validator_id),
-        delegate_id: agentId,
-        role_name: pendingRole,
-        is_active: true,
-        start_at: { lte: now },
-        end_at: { gte: now },
-        OR: [{ scope: null }, { scope: { in: candidateScopes } }],
-      },
-      select: { id: true },
+    const delegation = await findCoveringDelegation({
+      delegateId: agentId,
+      principalId: pending.validator_id,
+      stepRole: pendingRole,
+      candidateScopes,
     });
     if (delegation) return true;
   }
@@ -372,16 +395,10 @@ async function canEditAtDirectorStage({ user, demande, agent }) {
     if (Number(agent.direction_id) === Number(demandeOrg.direction_id)) return true;
   }
 
-  const delegationAny = await prisma.delegations.findFirst({
-    where: {
-      delegate_id: agentId,
-      role_name: pendingRole,
-      is_active: true,
-      start_at: { lte: now },
-      end_at: { gte: now },
-      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
-    },
-    select: { id: true },
+  const delegationAny = await findCoveringDelegation({
+    delegateId: agentId,
+    stepRole: pendingRole,
+    candidateScopes,
   });
 
   return !!delegationAny;
@@ -494,19 +511,12 @@ async function canActAsReturnTarget({ user, agent, demande, resolution, client =
     service_id: demande?.service_id ?? null,
   };
   const candidateScopes = candidateScopesForDemandeOrg(demandeOrg);
-  const now = new Date();
-
-  const delegation = await client.delegations.findFirst({
-    where: {
-      principal_id: targetAgentId,
-      delegate_id: actorAgentId,
-      role_name: targetRole,
-      is_active: true,
-      start_at: { lte: now },
-      end_at: { gte: now },
-      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
-    },
-    select: { id: true },
+  const delegation = await findCoveringDelegation({
+    client,
+    delegateId: actorAgentId,
+    principalId: targetAgentId,
+    stepRole: targetRole,
+    candidateScopes,
   });
   if (delegation) return true;
 
@@ -603,17 +613,10 @@ async function canAssignAcheteurForDemande({ user, agent, demande }) {
     service_id: demande?.service_id ?? null,
   });
 
-  const now = new Date();
-  const delegation = await prisma.delegations.findFirst({
-    where: {
-      delegate_id: Number(agent.id),
-      role_name: "DIRECTEUR",
-      is_active: true,
-      start_at: { lte: now },
-      end_at: { gte: now },
-      OR: [{ scope: null }, { scope: { in: candidateScopes } }],
-    },
-    select: { id: true },
+  const delegation = await findCoveringDelegation({
+    delegateId: agent.id,
+    stepRole: "DIRECTEUR",
+    candidateScopes,
   });
   return Boolean(delegation);
 }

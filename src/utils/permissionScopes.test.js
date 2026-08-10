@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   defaultScopesForAllowedCode,
   buildOrgScopeWhere,
+  expandRoles,
 } = require("./permissionScopes");
 
 test("defaultScopesForAllowedCode restreint un responsable a la direction de son agent", () => {
@@ -40,4 +41,9 @@ test("buildOrgScopeWhere traduit une portee direction en filtre Prisma", () => {
   assert.deepEqual(buildOrgScopeWhere([{ type: "DIRECTION", id: 4 }]), {
     direction_id: { in: [4] },
   });
+});
+
+
+test("expandRoles ajoute DIRECTEUR pour une delegation DAF", () => {
+  assert.deepEqual(new Set(expandRoles(["DAF"])), new Set(["DAF", "DIRECTEUR"]));
 });
