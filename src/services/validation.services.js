@@ -466,8 +466,8 @@ function isPaidStatut(value) {
   return PAID_STATUTS.has(String(value || "").toLowerCase());
 }
 
-async function getAgentFromUserId(userId) {
-  return prisma.agents.findFirst({
+async function getAgentFromUserId(userId, client = prisma) {
+  return client.agents.findFirst({
     where: { user_id: Number(userId), deleted_at: null },
     include: { roles: true, users: true },
   });
@@ -506,6 +506,32 @@ async function canActByDelegation(tx, step, agent) {
   });
 
   return delegations.some((d) => delegationRoleCoversStep(d.role_name, step.role_name));
+}
+
+async function getCurrentUserValidationAccess({ demande, userId, client = prisma }) {
+  const steps = Array.isArray(demande?.validation_steps) ? demande.validation_steps : [];
+  const pendingStep =
+    steps
+      .filter((step) => String(step?.status || "").trim().toLowerCase() === "en_attente")
+      .sort((a, b) => (Number(a?.level) || 0) - (Number(b?.level) || 0))[0] || null;
+
+  if (!pendingStep) return null;
+
+  const agent = await getAgentFromUserId(userId, client);
+  const byAssignment =
+    agent?.id != null &&
+    pendingStep.validator_id != null &&
+    Number(pendingStep.validator_id) === Number(agent.id);
+  const canAct = agent ? await canActByDelegation(client, pendingStep, agent) : false;
+
+  return {
+    step_id: Number(pendingStep.id),
+    step_uuid: pendingStep.uuid || null,
+    role_name: normalizeRoleName(pendingStep.role_name) || null,
+    can_act: canAct,
+    by_assignment: byAssignment,
+    by_delegation: canAct && !byAssignment,
+  };
 }
 
 async function setDemandeStageFromCurrentStep(tx, demandeId) {
@@ -2256,6 +2282,7 @@ async function completeSignature(stepId, userId) {
 
 module.exports = {
   getPendingForUser,
+  getCurrentUserValidationAccess,
   approveStep,
   rejectStep,
   returnForModification,

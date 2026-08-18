@@ -6,6 +6,7 @@ const realtime = require("../realtime");
 const firma = require("./firma.services");
 const signatureSessions = require("./signatureSessions.services");
 const signaturePdfTemplate = require("./signaturePdfTemplate");
+const validationService = require("./validation.services");
 const P = require("../constants/permissions");
 const { delegationScopeCoversAgent } = require("../utils/delegationScope.utils");
 const {
@@ -1998,7 +1999,25 @@ exports.getOne = async (user, idOrUuid, options = {}) => {
     ...demande,
     return_workflow: returnWorkflow,
   };
-  return options?.sanitize === false ? result : await sanitizeDemandeForViewer(result, user, agent);
+  if (options?.sanitize === false) return result;
+
+  const currentValidationAccess = await validationService.getCurrentUserValidationAccess({
+    demande: result,
+    userId: getUserIdFromToken(user),
+  });
+  const validationAccess = currentValidationAccess
+    ? {
+        ...currentValidationAccess,
+        can_approve: currentValidationAccess.can_act && hasPermission(user, P.VALIDATION_APPROVE),
+        can_reject: currentValidationAccess.can_act && hasPermission(user, P.VALIDATION_REJECT),
+        can_return:
+          currentValidationAccess.can_act &&
+          hasPermission(user, P.VALIDATION_RETURN_FOR_MODIFICATION),
+      }
+    : null;
+
+  const sanitized = await sanitizeDemandeForViewer(result, user, agent);
+  return { ...sanitized, current_validation_access: validationAccess };
 };
 exports.update = async (user, idOrUuid, payload) => {
   const demande = await exports.getOne(user, idOrUuid, { sanitize: false });
